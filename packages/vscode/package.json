@@ -2,7 +2,7 @@
   "name": "codex-account-switch-vscode",
   "displayName": "Codex Account Switch",
   "description": "Codex Account Switch - VS Code extension",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "publisher": "codex-account-switch",
   "engines": {
     "vscode": "^1.85.0"
@@ -11,7 +11,6 @@
     "Other"
   ],
   "icon": "resources/icon.png",
-  "activationEvents": [],
   "main": "./dist/extension.js",
   "contributes": {
     "viewsContainers": {
@@ -28,6 +27,7 @@
         {
           "id": "codexAccountSwitchAccounts",
           "name": "",
+          "icon": "resources/icon.svg",
           "showCollapseAll": true
         }
       ]
@@ -169,17 +169,20 @@
     }
   },
   "scripts": {
-    "build": "tsc",
-    "dev": "tsc --watch",
-    "package": "npx @vscode/vsce package --no-dependencies --allow-missing-repository",
+    "typecheck": "tsc --noEmit",
+    "bundle": "node ./scripts/build.mjs",
+    "build": "npm run typecheck && npm run bundle",
+    "dev": "node ./scripts/build.mjs --watch",
+    "package": "npm --prefix ../.. run build:core && npm run build && npx @vscode/vsce package --no-dependencies --allow-missing-repository",
     "publish:marketplace": "npx @vscode/vsce publish"
   },
   "dependencies": {
     "@codex-account-switch/core": "*"
   },
   "devDependencies": {
-    "@types/vscode": "^1.85.0",
     "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.25.12",
     "typescript": "^5.9.3"
   },
   "license": "MIT"

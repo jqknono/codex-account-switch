@@ -1,4 +1,8 @@
 src/**
+scripts/**
 tsconfig.json
+*.tsbuildinfo
+dist/**/*.map
 node_modules/**
 .vscode-test/**
+dist/**/*.map
