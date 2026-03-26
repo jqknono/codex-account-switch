@@ -1,6 +1,6 @@
 import * as fs from "fs";
 import { writeCurrentAuth } from "./auth";
-import { activateProviderConfig, clearActiveModelProvider, getActiveModelProvider } from "./config";
+import { activateProviderConfig, clearActiveModelProvider, getActiveModelProvider, removeProviderConfig } from "./config";
 import { getNamedAuthDir, getNamedProviderPath, listNamedProviderFiles } from "./paths";
 import { ProviderProfile } from "./types";
 
@@ -105,19 +105,22 @@ export function deleteProviderProfile(name: string): DeleteProviderResult {
     };
   }
 
+  if (getActiveModelProvider() === name) {
+    return {
+      success: false,
+      message: `Provider "${name}" is currently in use and cannot be removed.`,
+      deactivated: false,
+    };
+  }
+
   fs.unlinkSync(providerPath);
 
-  const deactivated = getActiveModelProvider() === name;
-  if (deactivated) {
-    clearActiveModelProvider();
-  }
+  removeProviderConfig(name);
 
   return {
     success: true,
-    message: deactivated
-      ? `Removed provider "${name}" and exited provider mode`
-      : `Removed provider "${name}"`,
-    deactivated,
+    message: `Removed provider "${name}"`,
+    deactivated: false,
   };
 }
 

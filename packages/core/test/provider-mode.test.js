@@ -298,16 +298,33 @@ test("deleteProviderProfile removes a saved provider profile", () => {
     auth: { OPENAI_API_KEY: "sk-test" },
     config: { name: "cliproxyapi", base_url: "http://127.0.0.1:34046/v1", wire_api: "responses" },
   });
+  writeText(
+    path.join(codexHome, "config.toml"),
+    [
+      '[model_providers.cliproxyapi]',
+      'name = "cliproxyapi"',
+      'base_url = "http://127.0.0.1:34046/v1"',
+      'wire_api = "responses"',
+      "",
+      "[model_providers.other]",
+      'name = "other"',
+      'base_url = "https://example.com/v1"',
+      'wire_api = "responses"',
+    ].join("\n")
+  );
 
   const result = core.deleteProviderProfile("cliproxyapi");
   assert.equal(result.success, true);
   assert.equal(result.deactivated, false);
   assert.equal(result.message, 'Removed provider "cliproxyapi"');
   assert.equal(fs.existsSync(path.join(codexHome, "provider_cliproxyapi.json")), false);
+  const config = fs.readFileSync(path.join(codexHome, "config.toml"), "utf-8");
+  assert.doesNotMatch(config, /\[model_providers\.cliproxyapi\]/);
+  assert.match(config, /\[model_providers\.other\]/);
   assert.deepEqual(core.listModes(), ["account"]);
 });
 
-test("deleteProviderProfile deactivates the current provider mode", () => {
+test("deleteProviderProfile rejects the current provider mode", () => {
   const codexHome = createTempCodexHome();
   process.env.CODEX_HOME = codexHome;
 
@@ -323,14 +340,75 @@ test("deleteProviderProfile deactivates the current provider mode", () => {
   assert.equal(core.getActiveModelProvider(), "cliproxyapi");
 
   const result = core.deleteProviderProfile("cliproxyapi");
-  assert.equal(result.success, true);
-  assert.equal(result.deactivated, true);
-  assert.equal(result.message, 'Removed provider "cliproxyapi" and exited provider mode');
-  assert.equal(core.getActiveModelProvider(), null);
-  assert.equal(fs.existsSync(path.join(codexHome, "provider_cliproxyapi.json")), false);
+  assert.equal(result.success, false);
+  assert.equal(result.deactivated, false);
+  assert.equal(result.message, 'Provider "cliproxyapi" is currently in use and cannot be removed.');
+  assert.equal(core.getActiveModelProvider(), "cliproxyapi");
+  assert.equal(fs.existsSync(path.join(codexHome, "provider_cliproxyapi.json")), true);
 
   const config = fs.readFileSync(path.join(codexHome, "config.toml"), "utf-8");
-  assert.doesNotMatch(config, /^model_provider =/m);
+  assert.match(config, /^model_provider = "cliproxyapi"/m);
+  assert.match(config, /\[model_providers\.cliproxyapi\]/);
+});
+
+test("deleteProviderProfile removes quoted table headers for dotted provider names", () => {
+  const codexHome = createTempCodexHome();
+  process.env.CODEX_HOME = codexHome;
+
+  writeJson(path.join(codexHome, "provider_corp.proxy.json"), {
+    kind: "provider",
+    name: "corp.proxy",
+    auth: { OPENAI_API_KEY: "sk-corp" },
+    config: { name: "corp.proxy", base_url: "http://corp.local/v1", wire_api: "responses" },
+  });
+  writeText(
+    path.join(codexHome, "config.toml"),
+    [
+      'model_provider = "corp.proxy"',
+      "",
+      '[model_providers."corp.proxy"]',
+      'name = "corp.proxy"',
+      'base_url = "http://corp.local/v1"',
+      'wire_api = "responses"',
+      "",
+      "[model_providers.other]",
+      'name = "other"',
+      'base_url = "https://example.com/v1"',
+      'wire_api = "responses"',
+    ].join("\n")
+  );
+
+  const result = core.deleteProviderProfile("corp.proxy");
+  assert.equal(result.success, false);
+  assert.equal(result.deactivated, false);
+  assert.equal(result.message, 'Provider "corp.proxy" is currently in use and cannot be removed.');
+
+  const config = fs.readFileSync(path.join(codexHome, "config.toml"), "utf-8");
+  assert.match(config, /^model_provider = "corp.proxy"/m);
+  assert.match(config, /\[model_providers\."corp\.proxy"\]/);
+  assert.match(config, /\[model_providers\.other\]/);
+});
+
+test("removeAccount rejects the current account", () => {
+  const codexHome = createTempCodexHome();
+  process.env.CODEX_HOME = codexHome;
+
+  const auth = {
+    auth_mode: "chatgpt",
+    OPENAI_API_KEY: null,
+    tokens: {
+      account_id: "acct-work",
+      access_token: "access-token",
+      refresh_token: "refresh-token",
+    },
+  };
+  writeJson(path.join(codexHome, "auth_work.json"), auth);
+  writeJson(path.join(codexHome, "auth.json"), auth);
+
+  const result = core.removeAccount("work");
+  assert.equal(result.success, false);
+  assert.equal(result.message, 'Account "work" is currently in use and cannot be removed.');
+  assert.equal(fs.existsSync(path.join(codexHome, "auth_work.json")), true);
 });
 
 test("switching between multiple providers works", () => {

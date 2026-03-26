@@ -2,7 +2,7 @@
   "name": "codex-account-switch-vscode",
   "displayName": "Codex Account Switch",
   "description": "Codex Account Switch - VS Code extension",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "publisher": "techfetch-dev",
   "repository": {
     "type": "git",
@@ -36,7 +36,7 @@
       "activitybar": [
         {
           "id": "codex-account-switch",
-          "title": "Codex Account Switch: Accounts",
+          "title": "Codex Account Switch",
           "icon": "resources/icon.svg"
         }
       ]
@@ -45,7 +45,13 @@
       "codex-account-switch": [
         {
           "id": "codexAccountSwitchAccounts",
-          "name": "",
+          "name": "Accounts",
+          "icon": "resources/icon.svg",
+          "showCollapseAll": true
+        },
+        {
+          "id": "codexAccountSwitchProviders",
+          "name": "Providers",
           "icon": "resources/icon.svg",
           "showCollapseAll": true
         }
@@ -55,6 +61,10 @@
       {
         "view": "codexAccountSwitchAccounts",
         "contents": "No accounts to display yet.\n[Import accounts](command:codex-account-switch.importAccounts)\n[Add account](command:codex-account-switch.addAccount)"
+      },
+      {
+        "view": "codexAccountSwitchProviders",
+        "contents": "No provider profiles to display yet.\n[Switch mode](command:codex-account-switch.switchMode)"
       }
     ],
     "commands": [
@@ -119,6 +129,11 @@
         "icon": "$(debug-restart)"
       },
       {
+        "command": "codex-account-switch.copyProviderField",
+        "title": "Codex Account Switch: Copy Provider Value",
+        "icon": "$(copy)"
+      },
+      {
         "command": "codex-account-switch.expandAllAccounts",
         "title": "Codex Account Switch: Expand All Accounts",
         "icon": "$(expand-all)"
@@ -127,29 +142,49 @@
     "menus": {
       "view/title": [
         {
-          "command": "codex-account-switch.importAccounts",
+          "command": "codex-account-switch.switchMode",
           "when": "view == codexAccountSwitchAccounts",
           "group": "navigation@1"
         },
         {
-          "command": "codex-account-switch.addAccount",
+          "command": "codex-account-switch.reloadWindow",
           "when": "view == codexAccountSwitchAccounts",
           "group": "navigation@2"
         },
         {
-          "command": "codex-account-switch.switchMode",
+          "command": "codex-account-switch.importAccounts",
           "when": "view == codexAccountSwitchAccounts",
           "group": "navigation@3"
         },
         {
-          "command": "codex-account-switch.refreshList",
+          "command": "codex-account-switch.addAccount",
           "when": "view == codexAccountSwitchAccounts",
           "group": "navigation@4"
         },
         {
-          "command": "codex-account-switch.expandAllAccounts",
+          "command": "codex-account-switch.refreshList",
           "when": "view == codexAccountSwitchAccounts",
           "group": "navigation@5"
+        },
+        {
+          "command": "codex-account-switch.expandAllAccounts",
+          "when": "view == codexAccountSwitchAccounts",
+          "group": "navigation@6"
+        },
+        {
+          "command": "codex-account-switch.switchMode",
+          "when": "view == codexAccountSwitchProviders",
+          "group": "navigation@1"
+        },
+        {
+          "command": "codex-account-switch.reloadWindow",
+          "when": "view == codexAccountSwitchProviders",
+          "group": "navigation@2"
+        },
+        {
+          "command": "codex-account-switch.refreshList",
+          "when": "view == codexAccountSwitchProviders",
+          "group": "navigation@3"
         }
       ],
       "view/item/context": [
@@ -182,6 +217,16 @@
           "command": "codex-account-switch.removeAccount",
           "when": "view == codexAccountSwitchAccounts && viewItem == account",
           "group": "context@3"
+        },
+        {
+          "command": "codex-account-switch.copyProviderField",
+          "when": "view == codexAccountSwitchProviders && viewItem == providerCopyableField",
+          "group": "inline@1"
+        },
+        {
+          "command": "codex-account-switch.copyProviderField",
+          "when": "view == codexAccountSwitchProviders && viewItem == providerCopyableField",
+          "group": "context@1"
         }
       ]
     },

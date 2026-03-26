@@ -220,6 +220,18 @@ test("remove: existing account succeeds", () => {
   assert.ok(!fs.existsSync(path.join(home, "auth_work.json")));
 });
 
+test("remove: current account is rejected", () => {
+  const home = tmpHome();
+  const auth = makeAuth("w@e.com", "plus");
+  writeJson(path.join(home, "auth_work.json"), auth);
+  writeJson(path.join(home, "auth.json"), auth);
+
+  const r = cli("remove work", home);
+  assert.equal(r.code, 0);
+  assert.ok(r.stdout.includes("currently in use"));
+  assert.ok(fs.existsSync(path.join(home, "auth_work.json")));
+});
+
 test("remove: non-existing account fails", () => {
   const home = tmpHome();
   const r = cli("remove ghost", home);

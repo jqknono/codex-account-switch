@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { setNamedAuthDir } from "@codex-account-switch/core";
 import { AccountTreeProvider, AccountTreeNode } from "./accountTree";
+import { ProviderTreeProvider, ProviderTreeNode } from "./providerTree";
 import { StatusBarManager } from "./statusBar";
 import { registerCommands } from "./commands";
 
@@ -16,9 +17,14 @@ export function activate(context: vscode.ExtensionContext) {
   applyNamedAuthDirSetting();
 
   const accountTree = new AccountTreeProvider();
+  const providerTree = new ProviderTreeProvider();
   const statusBarManager = new StatusBarManager();
   const accountTreeView = vscode.window.createTreeView<AccountTreeNode>("codexAccountSwitchAccounts", {
     treeDataProvider: accountTree,
+    showCollapseAll: true,
+  });
+  const providerTreeView = vscode.window.createTreeView<ProviderTreeNode>("codexAccountSwitchProviders", {
+    treeDataProvider: providerTree,
     showCollapseAll: true,
   });
 
@@ -26,6 +32,7 @@ export function activate(context: vscode.ExtensionContext) {
     if (e.affectsConfiguration("codex-account-switch.authDirectory")) {
       applyNamedAuthDirSetting();
       accountTree.refresh();
+      providerTree.refresh();
       void accountTree.refreshQuota();
       void statusBarManager.refreshNow();
     }
@@ -33,12 +40,14 @@ export function activate(context: vscode.ExtensionContext) {
 
   context.subscriptions.push(
     accountTreeView,
+    providerTreeView,
     accountTree,
+    providerTree,
     statusBarManager,
     configListener,
   );
 
-  registerCommands(context, accountTree, statusBarManager, accountTreeView);
+  registerCommands(context, accountTree, providerTree, statusBarManager, accountTreeView);
 
   accountTree.startAutoRefresh(context);
   statusBarManager.startAutoRefresh(context);

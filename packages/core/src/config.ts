@@ -157,6 +157,18 @@ function upsertProviderTable(lines: string[], providerName: string, config: Prov
   ];
 }
 
+function removeProviderTable(lines: string[], providerName: string): string[] {
+  const block = findTableBlock(lines, getProviderTableHeaders(providerName));
+  if (!block) {
+    return lines;
+  }
+
+  return [
+    ...lines.slice(0, block.start),
+    ...lines.slice(block.end),
+  ];
+}
+
 export function getActiveModelProvider(): string | null {
   const text = readConfigText();
   if (!text) {
@@ -201,4 +213,18 @@ export function clearActiveModelProvider(): void {
   const lines = currentText ? currentText.split(/\r?\n/) : [];
   const nextLines = trimLeadingBlankLines(removeTopLevelModelProvider(lines));
   writeConfigText(nextLines.join(eol).replace(/(?:\r?\n)+$/, nextLines.length > 0 ? eol : ""));
+}
+
+export function removeProviderConfig(providerName: string): void {
+  const currentText = readConfigText();
+  const eol = detectEol(currentText);
+  let lines = currentText ? currentText.split(/\r?\n/) : [];
+
+  if (getActiveModelProvider() === providerName) {
+    lines = removeTopLevelModelProvider(lines);
+  }
+
+  lines = removeProviderTable(lines, providerName);
+  lines = trimLeadingBlankLines(lines);
+  writeConfigText(lines.join(eol).replace(/(?:\r?\n)+$/, lines.length > 0 ? eol : ""));
 }

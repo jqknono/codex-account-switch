@@ -25,11 +25,17 @@ import {
   getModeDisplayName,
 } from "@codex-account-switch/core";
 import { AccountTreeProvider, AccountTreeItem, AccountTreeNode } from "./accountTree";
+import { ProviderDetailItem, ProviderTreeProvider } from "./providerTree";
 import { StatusBarManager } from "./statusBar";
 import { buildCompletedProviderProfile, readProviderProfileDraft } from "./providerProfile";
 
-function refreshAll(accountTree: AccountTreeProvider, statusBar: StatusBarManager) {
+function refreshAll(
+  accountTree: AccountTreeProvider,
+  providerTree: ProviderTreeProvider,
+  statusBar: StatusBarManager
+) {
   accountTree.refresh();
+  providerTree.refresh();
   void accountTree.refreshQuota();
   void statusBar.refreshNow();
 }
@@ -243,15 +249,21 @@ async function pickModeAction(
 
 async function promptToDeleteMode(
   accountTree: AccountTreeProvider,
+  providerTree: ProviderTreeProvider,
   statusBar: StatusBarManager,
   modeName: string
 ) {
   const selection = getCurrentSelection();
   const isActiveMode = selection.kind === "provider" && selection.name === modeName;
+  if (isActiveMode) {
+    vscode.window.showWarningMessage(
+      `Provider mode "${getModeDisplayName(modeName)}" is currently in use and cannot be removed.`
+    );
+    return;
+  }
+
   const action = await vscode.window.showWarningMessage(
-    isActiveMode
-      ? `Delete provider mode "${getModeDisplayName(modeName)}"? This removes its saved profile and exits the current provider mode.`
-      : `Delete provider mode "${getModeDisplayName(modeName)}"? This removes its saved profile.`,
+    `Delete provider mode "${getModeDisplayName(modeName)}"? This removes its saved profile.`,
     { modal: true },
     "Delete"
   );
@@ -266,7 +278,7 @@ async function promptToDeleteMode(
   }
 
   vscode.window.showInformationMessage(`✓ ${result.message}`);
-  refreshAll(accountTree, statusBar);
+  refreshAll(accountTree, providerTree, statusBar);
 }
 
 async function restoreSelectionAfterLogin(
@@ -417,6 +429,7 @@ async function ensureProviderProfile(name: string): Promise<ProviderProfile | nu
 export function registerCommands(
   context: vscode.ExtensionContext,
   accountTree: AccountTreeProvider,
+  providerTree: ProviderTreeProvider,
   statusBar: StatusBarManager,
   accountTreeView: vscode.TreeView<AccountTreeNode>
 ) {
@@ -445,7 +458,7 @@ export function registerCommands(
               ? `Account "${existingName}" already exists. Token refreshed. Remaining validity: ${tokenStatus}.`
               : `Account "${existingName}" already exists. Token refreshed.`
           );
-          refreshAll(accountTree, statusBar);
+          refreshAll(accountTree, providerTree, statusBar);
           return;
         }
 
@@ -468,7 +481,7 @@ export function registerCommands(
 
       const result = addAccountFromAuth(name.trim());
       if (result.success) {
-        refreshAll(accountTree, statusBar);
+        refreshAll(accountTree, providerTree, statusBar);
         await promptReloadWindowAfterAdd(name.trim(), result.meta?.email);
       } else {
         restoreProviderModeAfterFailedLogin(loginState.previousSelection, loginState.switched);
@@ -508,7 +521,7 @@ export function registerCommands(
           : { restored: false, restoredLabel: undefined as string | undefined };
 
         if (result.success) {
-          refreshAll(accountTree, statusBar);
+          refreshAll(accountTree, providerTree, statusBar);
           if (restoreResult.restored) {
             const savedMessage = result.meta?.email
               ? `✓ Account "${name}" was updated (${result.meta.email}). Active selection stayed on "${restoreResult.restoredLabel}".`
@@ -519,7 +532,7 @@ export function registerCommands(
           }
         } else {
           if (restoreResult.restored) {
-            refreshAll(accountTree, statusBar);
+            refreshAll(accountTree, providerTree, statusBar);
           }
           vscode.window.showErrorMessage(result.message);
         }
@@ -538,7 +551,7 @@ export function registerCommands(
         const result = renameAccount(name, newName);
         if (result.success) {
           vscode.window.showInformationMessage(`✓ ${result.message}`);
-          refreshAll(accountTree, statusBar);
+          refreshAll(accountTree, providerTree, statusBar);
         } else {
           vscode.window.showErrorMessage(result.message);
         }
@@ -566,6 +579,12 @@ export function registerCommands(
 
         if (!name) return;
 
+        const selection = getCurrentSelection();
+        if (selection.kind === "account" && selection.name === name) {
+          vscode.window.showWarningMessage(`Account "${name}" is currently in use and cannot be removed.`);
+          return;
+        }
+
         const confirm = await vscode.window.showWarningMessage(
           `Remove account "${name}"?`,
           "Remove",
@@ -576,7 +595,7 @@ export function registerCommands(
         const result = removeAccount(name);
         if (result.success) {
           vscode.window.showInformationMessage(`✓ ${result.message}`);
-          refreshAll(accountTree, statusBar);
+          refreshAll(accountTree, providerTree, statusBar);
         } else {
           vscode.window.showErrorMessage(result.message);
         }
@@ -614,7 +633,7 @@ export function registerCommands(
           vscode.window.showInformationMessage(
             `✓ ${result.message} (${result.meta?.email ?? "unknown"})`
           );
-          refreshAll(accountTree, statusBar);
+          refreshAll(accountTree, providerTree, statusBar);
           await maybeReloadWindowAfterSwitch(name, "account");
         } else {
           vscode.window.showErrorMessage(result.message);
@@ -632,7 +651,7 @@ export function registerCommands(
       }
 
       if (picked.action === "delete") {
-        await promptToDeleteMode(accountTree, statusBar, picked.modeName);
+        await promptToDeleteMode(accountTree, providerTree, statusBar, picked.modeName);
         return;
       }
 
@@ -669,7 +688,7 @@ export function registerCommands(
       }
 
       vscode.window.showInformationMessage(`✓ ${result.message}`);
-      refreshAll(accountTree, statusBar);
+      refreshAll(accountTree, providerTree, statusBar);
       await maybeReloadWindowAfterSwitch(targetName, "mode");
     }),
 
@@ -770,11 +789,11 @@ export function registerCommands(
       }
 
       vscode.window.showInformationMessage(`Import finished: ${msgs.join(", ")}`);
-      refreshAll(accountTree, statusBar);
+      refreshAll(accountTree, providerTree, statusBar);
     }),
 
     vscode.commands.registerCommand("codex-account-switch.refreshList", () => {
-      refreshAll(accountTree, statusBar);
+      refreshAll(accountTree, providerTree, statusBar);
     }),
 
     vscode.commands.registerCommand("codex-account-switch.expandAllAccounts", async () => {
@@ -785,6 +804,18 @@ export function registerCommands(
 
     vscode.commands.registerCommand("codex-account-switch.reloadWindow", async () => {
       await reloadWindow();
+    }),
+
+    vscode.commands.registerCommand("codex-account-switch.copyProviderField", async (item?: ProviderDetailItem) => {
+      const value = item?.rawValue;
+      if (!value) {
+        vscode.window.showWarningMessage("No provider value available to copy.");
+        return;
+      }
+
+      const label = typeof item?.label === "string" ? item.label : "provider value";
+      await vscode.env.clipboard.writeText(value);
+      vscode.window.showInformationMessage(`Copied ${label} to clipboard.`);
     })
   );
 }

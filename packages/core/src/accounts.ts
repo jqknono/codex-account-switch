@@ -168,6 +168,13 @@ export function removeAccount(name: string): { success: boolean; message: string
     return { success: false, message: `Account "${name}" does not exist.` };
   }
 
+  if (detectCurrentName() === name) {
+    return {
+      success: false,
+      message: `Account "${name}" is currently in use and cannot be removed.`,
+    };
+  }
+
   fs.unlinkSync(p);
   return { success: true, message: `Account "${name}" was removed` };
 }

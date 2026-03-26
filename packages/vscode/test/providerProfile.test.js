@@ -7,6 +7,8 @@ const path = require("node:path");
 const {
   readProviderProfileDraft,
   buildCompletedProviderProfile,
+  formatProviderFieldValue,
+  isSecretLikeProviderKey,
 } = require("../dist/providerProfile.js");
 
 function tmpFile() {
@@ -67,4 +69,29 @@ test("buildCompletedProviderProfile preserves extra auth and config draft fields
   assert.equal(profile.config.base_url, "http://example.local/v1");
   assert.equal(profile.config.wire_api, "responses");
   assert.equal(profile.config.timeout_ms, 30000);
+});
+
+test("formatProviderFieldValue masks secret-like provider auth values", () => {
+  assert.equal(isSecretLikeProviderKey("OPENAI_API_KEY"), true);
+  assert.equal(isSecretLikeProviderKey("base_url"), false);
+  assert.equal(
+    formatProviderFieldValue("OPENAI_API_KEY", "sk-live-12345678"),
+    "Configured (16 chars, ends with 5678)"
+  );
+});
+
+test("formatProviderFieldValue can reveal secret values when explicitly requested", () => {
+  assert.equal(
+    formatProviderFieldValue("OPENAI_API_KEY", "sk-live-12345678", { revealSecrets: true }),
+    "sk-live-12345678"
+  );
+});
+
+test("formatProviderFieldValue keeps non-secret values readable", () => {
+  assert.equal(
+    formatProviderFieldValue("base_url", "https://api.example.com/v1"),
+    "https://api.example.com/v1"
+  );
+  assert.equal(formatProviderFieldValue("timeout_ms", 30000), "30000");
+  assert.equal(formatProviderFieldValue("extra_header", ""), "Empty");
 });
