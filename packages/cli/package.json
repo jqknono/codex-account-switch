@@ -11,8 +11,9 @@
   },
   "scripts": {
     "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\"",
-    "build": "npm run clean && tsc --emitDeclarationOnly && node ./scripts/build.mjs",
+    "build": "tsc --emitDeclarationOnly && node ./scripts/build.mjs",
     "dev": "tsc --watch",
+    "test": "npm run build && node --test test/**/*.test.js",
     "prepack": "npm run build",
     "publish:npm": "npm publish --access public"
   },

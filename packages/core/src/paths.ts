@@ -33,8 +33,16 @@ export function getCodexAuthPath(): string {
   return path.join(getCodexConfigDir(), "auth.json");
 }
 
+export function getCodexConfigPath(): string {
+  return path.join(getCodexConfigDir(), "config.toml");
+}
+
 export function getNamedAuthPath(name: string): string {
   return path.join(getNamedAuthDir(), `auth_${name}.json`);
+}
+
+export function getNamedProviderPath(name: string): string {
+  return path.join(getNamedAuthDir(), `provider_${name}.json`);
 }
 
 export function listNamedAuthFiles(): string[] {
@@ -42,6 +50,18 @@ export function listNamedAuthFiles(): string[] {
   if (!fs.existsSync(dir)) return [];
 
   const pattern = /^auth_(.+)\.json$/;
+  return fs
+    .readdirSync(dir)
+    .map((f) => pattern.exec(f))
+    .filter((m): m is RegExpExecArray => m !== null)
+    .map((m) => m[1]);
+}
+
+export function listNamedProviderFiles(): string[] {
+  const dir = getNamedAuthDir();
+  if (!fs.existsSync(dir)) return [];
+
+  const pattern = /^provider_(.+)\.json$/;
   return fs
     .readdirSync(dir)
     .map((f) => pattern.exec(f))

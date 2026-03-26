@@ -3,25 +3,37 @@ import { jwtDecode } from "jwt-decode";
 import { getCodexAuthPath } from "./paths";
 import { AuthFile, IdTokenPayload, AccountMeta } from "./types";
 
-export function readCurrentAuth(): AuthFile | null {
-  const p = getCodexAuthPath();
-  if (!fs.existsSync(p)) {
-    return null;
-  }
+function parseAuthJson(raw: string): AuthFile | null {
   try {
-    return JSON.parse(fs.readFileSync(p, "utf-8")) as AuthFile;
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+    return parsed as AuthFile;
   } catch {
     return null;
   }
 }
 
-export function readAuthFile(filePath: string): AuthFile | null {
-  if (!fs.existsSync(filePath)) return null;
-  try {
-    return JSON.parse(fs.readFileSync(filePath, "utf-8")) as AuthFile;
-  } catch {
+export function readCurrentAuth(): AuthFile | null {
+  const p = getCodexAuthPath();
+  if (!fs.existsSync(p)) {
     return null;
   }
+  return parseAuthJson(fs.readFileSync(p, "utf-8"));
+}
+
+export function readAuthFile(filePath: string): AuthFile | null {
+  if (!fs.existsSync(filePath)) return null;
+  return parseAuthJson(fs.readFileSync(filePath, "utf-8"));
+}
+
+export function writeAuthFile(filePath: string, auth: AuthFile): void {
+  fs.writeFileSync(filePath, JSON.stringify(auth, null, 2), "utf-8");
+}
+
+export function writeCurrentAuth(auth: AuthFile): void {
+  writeAuthFile(getCodexAuthPath(), auth);
 }
 
 export function extractMeta(auth: AuthFile): AccountMeta {
@@ -29,9 +41,10 @@ export function extractMeta(auth: AuthFile): AccountMeta {
   let name = "unknown";
   let plan = "unknown";
 
-  if (auth.tokens?.id_token) {
+  const idToken = auth.tokens?.id_token;
+  if (typeof idToken === "string" && idToken) {
     try {
-      const decoded = jwtDecode<IdTokenPayload>(auth.tokens.id_token);
+      const decoded = jwtDecode<IdTokenPayload>(idToken);
       email = decoded.email ?? email;
       name = decoded.name ?? decoded.sub ?? name;
       const authInfo = decoded["https://api.openai.com/auth"];
@@ -46,10 +59,19 @@ export function extractMeta(auth: AuthFile): AccountMeta {
   return { name, email, plan };
 }
 
+export function hasAccountAuthTokens(auth: AuthFile | null | undefined): boolean {
+  if (!auth) {
+    return false;
+  }
+
+  return typeof auth.tokens?.access_token === "string" && auth.tokens.access_token.trim().length > 0;
+}
+
 export function getTokenExpiry(auth: AuthFile): Date | null {
-  if (!auth.tokens?.access_token) return null;
+  const accessToken = auth.tokens?.access_token;
+  if (!accessToken) return null;
   try {
-    const decoded = jwtDecode<{ exp?: number }>(auth.tokens.access_token);
+    const decoded = jwtDecode<{ exp?: number }>(accessToken);
     if (decoded.exp) {
       return new Date(decoded.exp * 1000);
     }

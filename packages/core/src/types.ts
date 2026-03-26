@@ -1,15 +1,16 @@
 export interface AuthTokens {
-  id_token: string;
-  access_token: string;
-  refresh_token: string;
-  account_id: string;
+  id_token?: string;
+  access_token?: string;
+  refresh_token?: string;
+  account_id?: string;
 }
 
 export interface AuthFile {
-  auth_mode: string;
-  OPENAI_API_KEY: string | null;
-  tokens: AuthTokens;
-  last_refresh: string;
+  auth_mode?: string;
+  OPENAI_API_KEY?: string | null;
+  tokens?: AuthTokens;
+  last_refresh?: string;
+  [key: string]: unknown;
 }
 
 export interface IdTokenPayload {
@@ -33,10 +34,50 @@ export interface AccountMeta {
   plan: string;
 }
 
+export interface ProviderConfig {
+  name: string;
+  base_url: string;
+  wire_api: string;
+}
+
+export interface ProviderProfile {
+  kind: "provider";
+  name: string;
+  auth: AuthFile;
+  config: ProviderConfig;
+}
+
+export type CurrentSelection =
+  | {
+      kind: "account";
+      name: string;
+      meta: AccountMeta | null;
+    }
+  | {
+      kind: "provider";
+      name: string;
+    }
+  | {
+      kind: "unknown";
+      meta: AccountMeta | null;
+    };
+
 export interface WindowInfo {
   usedPercent: number;
   resetsAt: Date | null;
   windowSeconds: number | null;
+}
+
+export type QuotaUnavailableCode =
+  | "workspace_deactivated"
+  | "missing_auth_tokens"
+  | "invalid_auth_token"
+  | "request_failed";
+
+export interface QuotaUnavailableReason {
+  code: QuotaUnavailableCode;
+  message: string;
+  statusCode: number | null;
 }
 
 export interface QuotaInfo {
@@ -52,6 +93,7 @@ export interface QuotaInfo {
   credits: { hasCredits: boolean } | null;
   email: string;
   tokenExpired: boolean;
+  unavailableReason: QuotaUnavailableReason | null;
 }
 
 export interface ExportData {

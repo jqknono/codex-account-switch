@@ -6,3 +6,4 @@ dist/**/*.map
 node_modules/**
 .vscode-test/**
 dist/**/*.map
+test/**

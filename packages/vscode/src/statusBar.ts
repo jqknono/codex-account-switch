@@ -1,5 +1,28 @@
 import * as vscode from "vscode";
-import { queryQuota, getCurrentAccount } from "@codex-account-switch/core";
+import { queryQuota, getCurrentSelection, QuotaInfo, WindowInfo, getModeDisplayName } from "@codex-account-switch/core";
+
+function windowLabel(window: WindowInfo): string {
+  if (window.windowSeconds == null) return "quota";
+  const hours = window.windowSeconds / 3600;
+  if (hours <= 5) return "5h";
+  if (hours <= 24) return `${Math.round(hours)}h`;
+  return `${Math.round(hours / 24)}d`;
+}
+
+function isFiveHourWindow(window: WindowInfo): boolean {
+  if (window.windowSeconds == null) return false;
+  return window.windowSeconds / 3600 <= 5;
+}
+
+function getPreferredStatusWindow(info: QuotaInfo): WindowInfo | null {
+  if (info.primaryWindow && isFiveHourWindow(info.primaryWindow)) {
+    return info.primaryWindow;
+  }
+  if (info.secondaryWindow && isFiveHourWindow(info.secondaryWindow)) {
+    return info.secondaryWindow;
+  }
+  return info.primaryWindow ?? info.secondaryWindow ?? null;
+}
 
 export class StatusBarManager implements vscode.Disposable {
   private statusBarItem: vscode.StatusBarItem;
@@ -26,7 +49,7 @@ export class StatusBarManager implements vscode.Disposable {
   }
 
   startAutoRefresh(context: vscode.ExtensionContext) {
-    this.refreshNow();
+    void this.refreshNow();
     this.restartTimer();
 
     this.configListener = vscode.workspace.onDidChangeConfiguration((e) => {
@@ -46,45 +69,60 @@ export class StatusBarManager implements vscode.Disposable {
     }
     const config = vscode.workspace.getConfiguration("codex-account-switch");
     const intervalSec = config.get<number>("quotaRefreshInterval", 300);
-    this.timer = setInterval(() => this.refreshNow(), intervalSec * 1000);
+    this.timer = setInterval(() => void this.refreshNow(), intervalSec * 1000);
   }
 
   async refreshNow() {
-    const { name } = getCurrentAccount();
+    const selection = getCurrentSelection();
 
-    if (!name) {
+    if (selection.kind === "provider") {
+      const modeLabel = getModeDisplayName(selection.name);
+      this.statusBarItem.text = `$(plug) ${modeLabel}`;
+      this.statusBarItem.tooltip = `Mode: ${modeLabel}\nQuota is unavailable in provider mode`;
+      return;
+    }
+
+    if (selection.kind !== "account") {
       this.statusBarItem.text = "$(account) Codex: No account";
       this.statusBarItem.tooltip = "No active Codex account detected";
       return;
     }
 
+    const name = selection.name;
     this.statusBarItem.text = `$(loading~spin) ${name}`;
 
     try {
       const result = await queryQuota();
-      if (!result) {
+      if (result.kind !== "ok") {
         this.statusBarItem.text = `$(account) ${name}`;
-        this.statusBarItem.tooltip = "Unable to load quota information";
+        this.statusBarItem.tooltip = result.message;
         return;
       }
 
       const { info } = result;
-      const primary = info.primaryWindow;
+      const preferredWindow = getPreferredStatusWindow(info);
 
-      if (primary) {
-        const used = Math.round(primary.usedPercent);
-        const icon = used >= 70 ? "$(warning)" : used >= 50 ? "$(info)" : "$(check)";
-        this.statusBarItem.text = `${icon} ${name}: ${used}%`;
+      if (preferredWindow) {
+        const used = Math.round(preferredWindow.usedPercent);
+        const remaining = Math.max(0, 100 - used);
+        const icon =
+          remaining === 0 ? "$(error)" : remaining <= 30 ? "$(warning)" : remaining <= 50 ? "$(info)" : "$(check)";
+        this.statusBarItem.text = `${icon} ${name}: ${remaining}%`;
 
         let tip = `Account: ${name}\nEmail: ${info.email}\nPlan: ${info.plan}\n`;
-        tip += `\n5h quota: ${used}% used`;
-        if (info.secondaryWindow) {
-          tip += `\n7d quota: ${Math.round(info.secondaryWindow.usedPercent)}% used`;
+        tip += `\n${windowLabel(preferredWindow)} quota: ${remaining}% remaining`;
+        const otherWindow =
+          preferredWindow === info.primaryWindow ? info.secondaryWindow : info.primaryWindow;
+        if (otherWindow) {
+          tip += `\n${windowLabel(otherWindow)} quota: ${Math.max(0, 100 - Math.round(otherWindow.usedPercent))}% remaining`;
         }
         this.statusBarItem.tooltip = tip;
       } else {
-        this.statusBarItem.text = `$(account) ${name}`;
-        this.statusBarItem.tooltip = `Account: ${name}\nEmail: ${info.email}\nPlan: ${info.plan}`;
+        const reason = info.unavailableReason?.message;
+        this.statusBarItem.text = `${reason ? "$(warning)" : "$(account)"} ${name}`;
+        this.statusBarItem.tooltip = reason
+          ? `Account: ${name}\nEmail: ${info.email}\nPlan: ${info.plan}\nQuota: ${reason}`
+          : `Account: ${name}\nEmail: ${info.email}\nPlan: ${info.plan}`;
       }
     } catch {
       this.statusBarItem.text = `$(account) ${name}`;

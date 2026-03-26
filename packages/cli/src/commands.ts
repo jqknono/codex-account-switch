@@ -1,5 +1,7 @@
 import * as fs from "fs";
 import { execSync } from "child_process";
+import * as readline from "node:readline/promises";
+import { stdin as input, stdout as output } from "node:process";
 import chalk from "chalk";
 import {
   listAccounts,
@@ -17,7 +19,187 @@ import {
   WindowInfo,
   getNamedAuthPath,
   readNamedAuth,
+  getCurrentSelection,
+  listModes,
+  switchMode,
+  readProviderProfile,
+  writeProviderProfile,
+  getDefaultProviderProfile,
+  getNamedProviderPath,
+  ProviderProfile,
+  getModeDisplayName,
 } from "@codex-account-switch/core";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+type PromptSession =
+  | {
+      rl: readline.Interface;
+      pipedLines: null;
+      pipedIndex: 0;
+    }
+  | {
+      rl: null;
+      pipedLines: string[];
+      pipedIndex: number;
+    };
+
+async function createPromptSession(): Promise<PromptSession> {
+  if (input.isTTY && output.isTTY) {
+    return {
+      rl: readline.createInterface({ input, output }),
+      pipedLines: null,
+      pipedIndex: 0,
+    };
+  }
+
+  input.setEncoding("utf8");
+  let raw = "";
+  for await (const chunk of input) {
+    raw += chunk;
+  }
+  return {
+    rl: null,
+    pipedLines: raw.split(/\r?\n/),
+    pipedIndex: 0,
+  };
+}
+
+async function askRequired(session: PromptSession, label: string, defaultValue?: string): Promise<string> {
+  while (true) {
+    const suffix = defaultValue ? ` [${defaultValue}]` : "";
+    let answer = "";
+
+    if (session.rl) {
+      answer = (await session.rl.question(`${label}${suffix}: `)).trim();
+    } else {
+      output.write(`${label}${suffix}: `);
+      const rawAnswer =
+        session.pipedIndex < session.pipedLines.length ? session.pipedLines[session.pipedIndex] : "";
+      session.pipedIndex += 1;
+      answer = rawAnswer.trim();
+      output.write("\n");
+    }
+
+    if (answer) {
+      return answer;
+    }
+    if (defaultValue) {
+      return defaultValue;
+    }
+    if (!session.rl && session.pipedIndex >= session.pipedLines.length) {
+      throw new Error(`Missing required input for ${label}.`);
+    }
+    console.log(chalk.yellow("This value is required."));
+  }
+}
+
+function resolveModeNameInput(name: string): string {
+  return name;
+}
+
+function readProviderProfileDraft(name: string): {
+  auth: Record<string, unknown>;
+  config: Record<string, unknown>;
+  exists: boolean;
+  invalid: boolean;
+} {
+  const providerPath = getNamedProviderPath(name);
+  if (!fs.existsSync(providerPath)) {
+    return { auth: {}, config: {}, exists: false, invalid: false };
+  }
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(providerPath, "utf-8")) as unknown;
+    if (!isRecord(parsed)) {
+      return { auth: {}, config: {}, exists: true, invalid: true };
+    }
+
+    const auth = isRecord(parsed.auth) ? parsed.auth : {};
+    const config = isRecord(parsed.config) ? parsed.config : {};
+
+    return {
+      auth,
+      config,
+      exists: true,
+      invalid:
+        parsed.kind !== "provider" ||
+        parsed.name !== name ||
+        !isRecord(parsed.auth) ||
+        !isRecord(parsed.config) ||
+        typeof auth.OPENAI_API_KEY !== "string" ||
+        auth.OPENAI_API_KEY.trim() === "" ||
+        typeof config.base_url !== "string" ||
+        config.base_url.trim() === "" ||
+        typeof config.wire_api !== "string" ||
+        config.wire_api.trim() === "",
+    };
+  } catch {
+    return { auth: {}, config: {}, exists: true, invalid: true };
+  }
+}
+
+async function ensureProviderProfile(name: string): Promise<ProviderProfile | null> {
+  const existing = readProviderProfile(name);
+  if (existing) {
+    return existing;
+  }
+
+  const defaults = getDefaultProviderProfile(name);
+  const draft = readProviderProfileDraft(name);
+  console.log(
+    chalk.cyan(
+      `${draft.exists ? "Completing" : "Creating"} provider "${name}".`
+    )
+  );
+  console.log(chalk.dim(`  Profile file: ${getNamedProviderPath(name)}`));
+  if (draft.invalid) {
+    console.log(chalk.yellow("  Existing profile is incomplete or invalid. Required fields will be prompted and the file will be updated."));
+  }
+
+  const prompts = await createPromptSession();
+  try {
+    const existingApiKey =
+      typeof draft.auth.OPENAI_API_KEY === "string" && draft.auth.OPENAI_API_KEY.trim()
+        ? draft.auth.OPENAI_API_KEY
+        : undefined;
+    const existingBaseUrl =
+      typeof draft.config.base_url === "string" && draft.config.base_url.trim()
+        ? draft.config.base_url
+        : defaults.config.base_url || undefined;
+    const existingWireApi =
+      typeof draft.config.wire_api === "string" && draft.config.wire_api.trim()
+        ? draft.config.wire_api
+        : defaults.config.wire_api;
+
+    const apiKey = await askRequired(prompts, "OPENAI_API_KEY", existingApiKey);
+    const baseUrl = await askRequired(prompts, "base_url", existingBaseUrl);
+    const wireApi = await askRequired(prompts, "wire_api", existingWireApi);
+
+    const profile: ProviderProfile = {
+      kind: "provider",
+      name,
+      auth: {
+        ...defaults.auth,
+        ...draft.auth,
+        OPENAI_API_KEY: apiKey,
+      },
+      config: {
+        name,
+        base_url: baseUrl,
+        wire_api: wireApi,
+      },
+    };
+
+    writeProviderProfile(profile);
+    console.log(chalk.green(`✓ Created provider profile for "${name}"`));
+    return profile;
+  } finally {
+    prompts.rl?.close();
+  }
+}
 
 export function cmdList(): void {
   const accounts = listAccounts();
@@ -77,17 +259,39 @@ export async function cmdAdd(name: string): Promise<void> {
     console.log(chalk.cyan("  Starting a new login flow to re-authorize and overwrite the saved account.\n"));
   }
 
+  const previousSelection = getCurrentSelection();
+  let restoreProviderOnFailure = false;
+  if (previousSelection.kind === "provider") {
+    const switchResult = switchMode("account");
+    if (!switchResult.success) {
+      console.log(chalk.red(switchResult.message));
+      return;
+    }
+    restoreProviderOnFailure = true;
+    console.log(
+      chalk.dim(
+        `Exited provider mode "${getModeDisplayName(previousSelection.name)}" before login so Codex can create an account auth.json.`
+      )
+    );
+  }
+
   console.log(chalk.cyan("Starting the Codex login flow...\n"));
 
   try {
     execSync("codex login", { stdio: "inherit" });
   } catch {
+    if (restoreProviderOnFailure && previousSelection.kind === "provider") {
+      switchMode(previousSelection.name);
+    }
     console.log(chalk.red("\nLogin failed or was cancelled."));
     return;
   }
 
   const result = addAccountFromAuth(name);
   if (!result.success) {
+    if (restoreProviderOnFailure && previousSelection.kind === "provider") {
+      switchMode(previousSelection.name);
+    }
     console.log(chalk.red(result.message));
     return;
   }
@@ -123,6 +327,37 @@ export function cmdUse(name: string): void {
     console.log(chalk.dim(`  Email: ${result.meta.email}`));
     console.log(chalk.dim(`  Plan: ${result.meta.plan}`));
   }
+}
+
+export async function cmdMode(name?: string): Promise<void> {
+  if (!name) {
+    const selection = getCurrentSelection();
+    const currentMode = selection.kind === "provider" ? selection.name : "account";
+    console.log(chalk.green(`Current mode: ${getModeDisplayName(currentMode)}`));
+
+    const modes = Array.from(new Set([...listModes(), ...(selection.kind === "provider" ? [selection.name] : [])]));
+    console.log(chalk.bold("\nAvailable modes:\n"));
+    modes.forEach((modeName) => {
+      const tag = modeName === currentMode ? chalk.green(" [current]") : "";
+      const kindLabel = modeName === "account" ? chalk.dim("account mode") : chalk.cyan("provider mode");
+      console.log(`  ${getModeDisplayName(modeName)}  ${kindLabel}${tag}`);
+    });
+    console.log();
+    return;
+  }
+
+  const resolvedName = resolveModeNameInput(name);
+
+  if (resolvedName !== "account" && !readProviderProfile(resolvedName)) {
+    const created = await ensureProviderProfile(resolvedName);
+    if (!created) {
+      console.log(chalk.red(`Failed to create provider "${resolvedName}".`));
+      return;
+    }
+  }
+
+  const result = switchMode(resolvedName);
+  console.log(result.success ? chalk.green(`✓ ${result.message}`) : chalk.red(result.message));
 }
 
 function formatResetTime(resetsAt: Date | null): string {
@@ -175,8 +410,13 @@ function printWindowLine(label: string, w: WindowInfo): void {
 export async function cmdQuota(name?: string): Promise<void> {
   const result = await queryQuota(name);
 
-  if (!result) {
-    console.log(chalk.red(name ? `Account "${name}" does not exist.` : "No auth information found."));
+  if (result.kind === "unsupported") {
+    console.log(chalk.yellow(result.message));
+    return;
+  }
+
+  if (result.kind === "not_found") {
+    console.log(chalk.red(result.message));
     return;
   }
 
@@ -218,17 +458,27 @@ export async function cmdQuota(name?: string): Promise<void> {
   }
 
   if (!info.primaryWindow && !info.secondaryWindow) {
-    console.log(chalk.yellow("\n  Unable to load quota information (API request failed or token expired)"));
+    console.log(
+      chalk.yellow(`\n  ${info.unavailableReason?.message ?? "Unable to load quota information (API request failed or token expired)"}`)
+    );
   }
 
   console.log();
 }
 
 export function cmdCurrent(): void {
+  const selection = getCurrentSelection();
+
+  if (selection.kind === "provider") {
+    console.log(chalk.green(`Current mode: ${getModeDisplayName(selection.name)}`));
+    console.log(chalk.dim("  Quota and token refresh are unavailable in provider mode."));
+    return;
+  }
+
   const { name, meta } = getCurrentAccount();
 
   if (!name) {
-    console.log(chalk.yellow("No saved account matches the current auth. You may be using an unsaved login."));
+    console.log(chalk.yellow("No saved account matches the current auth. You may be using an unsaved login or a cleared account mode."));
     if (meta) {
       console.log(chalk.dim(`  Current auth.json email: ${meta.email}`));
     }
@@ -247,8 +497,10 @@ export async function cmdRefresh(name?: string): Promise<void> {
   const result = await refreshAccount(name);
 
   if (!result.success) {
-    console.log(chalk.red(result.message));
-    console.log(chalk.yellow("Try logging in again: codex-account-switch add <name>"));
+    console.log(result.unsupported ? chalk.yellow(result.message) : chalk.red(result.message));
+    if (!result.unsupported) {
+      console.log(chalk.yellow("Try logging in again: codex-account-switch add <name>"));
+    }
     return;
   }
 

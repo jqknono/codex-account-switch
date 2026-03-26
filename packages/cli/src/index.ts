@@ -2,7 +2,18 @@
 
 import { Command } from "commander";
 import { setNamedAuthDir } from "@codex-account-switch/core";
-import { cmdList, cmdAdd, cmdRemove, cmdUse, cmdQuota, cmdCurrent, cmdRefresh, cmdExport, cmdImport } from "./commands";
+import {
+  cmdList,
+  cmdAdd,
+  cmdRemove,
+  cmdUse,
+  cmdQuota,
+  cmdCurrent,
+  cmdRefresh,
+  cmdExport,
+  cmdImport,
+  cmdMode,
+} from "./commands";
 
 const program = new Command();
 
@@ -43,6 +54,11 @@ program
   .action((name: string) => cmdUse(name));
 
 program
+  .command("mode [name]")
+  .description("Show or switch the active mode")
+  .action(async (name?: string) => cmdMode(name));
+
+program
   .command("quota [name]")
   .aliases(["info", "status"])
   .description("Show account quota usage")
@@ -50,7 +66,7 @@ program
 
 program
   .command("current")
-  .description("Show the current active account")
+  .description("Show the current active account or mode")
   .action(() => cmdCurrent());
 
 program
@@ -70,4 +86,8 @@ program
   .option("--overwrite", "Overwrite existing accounts with the same name", false)
   .action(async (file: string, opts?: { overwrite?: boolean }) => cmdImport(file, opts?.overwrite));
 
-program.parse();
+program.parseAsync().catch((error: unknown) => {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exitCode = 1;
+});
+

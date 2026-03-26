@@ -38,6 +38,10 @@ function formatQuotaSummary(info: QuotaInfo | null): string | null {
   return parts.join(" · ");
 }
 
+function getQuotaUnavailableMessage(info: QuotaInfo | null | undefined): string | null {
+  return info?.unavailableReason?.message ?? null;
+}
+
 function formatResetTime(resetsAt: Date | null): string | null {
   if (!resetsAt) return null;
   const secs = Math.floor((resetsAt.getTime() - Date.now()) / 1000);
@@ -141,6 +145,8 @@ export class AccountTreeItem extends vscode.TreeItem {
       parts.push("Refreshing quota");
     } else if (quotaSummary) {
       parts.push(quotaSummary);
+    } else if (getQuotaUnavailableMessage(quotaState?.info)) {
+      parts.push(getQuotaUnavailableMessage(quotaState?.info)!);
     } else if (quotaState?.error) {
       parts.push("Quota unavailable");
     } else if (quotaState) {
@@ -175,6 +181,9 @@ export class AccountTreeItem extends vscode.TreeItem {
       tooltipLines.push("Quota: Refreshing");
     } else if (quotaState?.info) {
       appendQuotaTooltip(tooltipLines, quotaState.info);
+      if (quotaState.info.unavailableReason) {
+        tooltipLines.push(`Quota: ${quotaState.info.unavailableReason.message}`);
+      }
     } else if (quotaState?.error) {
       tooltipLines.push("Quota: Failed to load");
     }
@@ -241,11 +250,12 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
             return;
           }
 
+          const previous = this.quotaState.get(account.name);
           this.quotaState.set(account.name, {
-            info: result?.info ?? null,
-            error: result == null,
+            info: result.kind === "ok" ? result.info : null,
+            error: result.kind !== "ok",
             loading: false,
-            updatedAt: Date.now(),
+            updatedAt: result.kind === "ok" ? Date.now() : previous?.updatedAt ?? null,
           });
         } catch {
           if (refreshVersion !== this.refreshVersion) {
@@ -380,6 +390,17 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
     }
 
     const info = quotaState.info;
+    if (info.unavailableReason) {
+      const unavailableItem = new AccountDetailItem(
+        "Quota",
+        info.unavailableReason.message,
+        info.unavailableReason.message,
+        parent
+      );
+      unavailableItem.iconPath = new vscode.ThemeIcon("warning", new vscode.ThemeColor("errorForeground"));
+      items.push(unavailableItem);
+      return items;
+    }
 
     if (info.primaryWindow) {
       const primaryItem = new AccountDetailItem(
@@ -452,3 +473,4 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
     return items;
   }
 }
+

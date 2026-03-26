@@ -68,6 +68,7 @@ export async function refreshAndSave(authPath: string): Promise<AuthFile> {
   const auth = JSON.parse(fs.readFileSync(authPath, "utf-8")) as AuthFile;
   const result = await refreshAccessToken(auth);
 
+  auth.tokens ??= {};
   if (result.access_token) {
     auth.tokens.access_token = result.access_token;
   }

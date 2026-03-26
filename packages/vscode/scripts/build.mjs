@@ -10,13 +10,16 @@ const distDir = path.join(packageDir, "dist");
 const watch = process.argv.includes("--watch");
 
 const options = {
-  entryPoints: [path.join(packageDir, "src", "extension.ts")],
+  entryPoints: {
+    extension: path.join(packageDir, "src", "extension.ts"),
+    providerProfile: path.join(packageDir, "src", "providerProfile.ts"),
+  },
   bundle: true,
   format: "cjs",
   platform: "node",
   target: "node18",
-  outfile: path.join(distDir, "extension.js"),
-  external: ["vscode", "@codex-account-switch/core"],
+  outdir: distDir,
+  external: ["vscode"],
   sourcemap: watch,
   logLevel: "info",
 };
