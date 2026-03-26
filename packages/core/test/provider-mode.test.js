@@ -194,6 +194,20 @@ test("useAccount clears the active provider and restores account auth", () => {
   });
 });
 
+test("addAccountFromAuth rejects provider auth payloads", () => {
+  const codexHome = createTempCodexHome();
+  process.env.CODEX_HOME = codexHome;
+
+  writeJson(path.join(codexHome, "auth.json"), {
+    OPENAI_API_KEY: "sk-qtdev",
+  });
+
+  const result = core.addAccountFromAuth("bad");
+  assert.equal(result.success, false);
+  assert.match(result.message, /not a valid account login result/i);
+  assert.equal(fs.existsSync(path.join(codexHome, "auth_bad.json")), false);
+});
+
 test("queryQuota and refreshAccount report unsupported for provider mode without an account name", async () => {
   const codexHome = createTempCodexHome();
   process.env.CODEX_HOME = codexHome;

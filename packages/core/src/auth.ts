@@ -59,6 +59,14 @@ export function extractMeta(auth: AuthFile): AccountMeta {
   return { name, email, plan };
 }
 
+export function hasAccountAuthTokens(auth: AuthFile | null | undefined): boolean {
+  if (!auth) {
+    return false;
+  }
+
+  return typeof auth.tokens?.access_token === "string" && auth.tokens.access_token.trim().length > 0;
+}
+
 export function getTokenExpiry(auth: AuthFile): Date | null {
   const accessToken = auth.tokens?.access_token;
   if (!accessToken) return null;

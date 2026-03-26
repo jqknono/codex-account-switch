@@ -5,7 +5,7 @@ import {
   listNamedAuthFiles,
   getNamedAuthDir,
 } from "./paths";
-import { readCurrentAuth, readAuthFile, extractMeta } from "./auth";
+import { readCurrentAuth, readAuthFile, extractMeta, hasAccountAuthTokens } from "./auth";
 import { refreshAndSave } from "./refresh";
 import { getQuotaInfo } from "./quota";
 import { AuthFile, AccountMeta, QuotaInfo, ExportData, CurrentSelection } from "./types";
@@ -132,6 +132,14 @@ export function addAccountFromAuth(name: string): { success: boolean; message: s
   const auth = readCurrentAuth();
   if (!auth) {
     return { success: false, message: "auth.json was not found after login. Failed to add account." };
+  }
+
+  if (!hasAccountAuthTokens(auth)) {
+    return {
+      success: false,
+      message:
+        "Current auth.json is not a valid account login result. Complete `codex login` in account mode and try again.",
+    };
   }
 
   const meta = extractMeta(auth);

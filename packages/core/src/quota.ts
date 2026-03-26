@@ -1,5 +1,5 @@
 import * as https from "https";
-import { AuthFile, IdTokenPayload, WindowInfo, QuotaInfo } from "./types";
+import { AuthFile, IdTokenPayload, WindowInfo, QuotaInfo, QuotaUnavailableReason } from "./types";
 import { jwtDecode } from "jwt-decode";
 import { refreshAccessToken } from "./refresh";
 
@@ -31,6 +31,12 @@ interface UsageApiResponse {
     has_credits?: boolean;
     [key: string]: unknown;
   };
+}
+
+interface HttpErrorLike {
+  statusCode?: number;
+  body?: string;
+  message?: string;
 }
 
 function httpsGet(url: string, headers: Record<string, string>): Promise<string> {
@@ -116,6 +122,58 @@ function parseWindow(w?: RateLimitWindow): WindowInfo | null {
   };
 }
 
+function parseUnavailableReason(auth: AuthFile, err: unknown): QuotaUnavailableReason {
+  if (!auth.tokens?.access_token) {
+    return {
+      code: "missing_auth_tokens",
+      message: "Missing auth tokens",
+      statusCode: null,
+    };
+  }
+
+  const httpErr = err as HttpErrorLike;
+  const statusCode = typeof httpErr.statusCode === "number" ? httpErr.statusCode : null;
+
+  if (typeof httpErr.body === "string" && httpErr.body) {
+    try {
+      const parsed = JSON.parse(httpErr.body) as {
+        detail?: string | { code?: string };
+      };
+      if (parsed.detail && typeof parsed.detail === "object" && parsed.detail.code === "deactivated_workspace") {
+        return {
+          code: "workspace_deactivated",
+          message: "Workspace deactivated",
+          statusCode,
+        };
+      }
+
+      if (typeof parsed.detail === "string" && /authentication token/i.test(parsed.detail)) {
+        return {
+          code: "invalid_auth_token",
+          message: "Missing auth tokens",
+          statusCode,
+        };
+      }
+    } catch {
+      // Ignore body parse failures and fall through to the generic mapping.
+    }
+  }
+
+  if (httpErr.message === "No access_token in auth file") {
+    return {
+      code: "missing_auth_tokens",
+      message: "Missing auth tokens",
+      statusCode,
+    };
+  }
+
+  return {
+    code: "request_failed",
+    message: "Quota unavailable",
+    statusCode,
+  };
+}
+
 export async function getQuotaInfo(auth: AuthFile): Promise<QuotaInfo> {
   let email = "unknown";
   let tokenExpired = false;
@@ -145,7 +203,7 @@ export async function getQuotaInfo(auth: AuthFile): Promise<QuotaInfo> {
   let apiData: UsageApiResponse;
   try {
     apiData = await fetchUsageApi(auth);
-  } catch {
+  } catch (err: unknown) {
     return {
       plan: getPlanFromToken(auth),
       primaryWindow: null,
@@ -155,6 +213,7 @@ export async function getQuotaInfo(auth: AuthFile): Promise<QuotaInfo> {
       credits: null,
       email,
       tokenExpired,
+      unavailableReason: parseUnavailableReason(auth, err),
     };
   }
 
@@ -174,6 +233,7 @@ export async function getQuotaInfo(auth: AuthFile): Promise<QuotaInfo> {
     credits: apiData.credits?.has_credits ? { hasCredits: true } : null,
     email,
     tokenExpired,
+    unavailableReason: null,
   };
 }
 

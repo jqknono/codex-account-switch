@@ -68,6 +68,18 @@ export interface WindowInfo {
   windowSeconds: number | null;
 }
 
+export type QuotaUnavailableCode =
+  | "workspace_deactivated"
+  | "missing_auth_tokens"
+  | "invalid_auth_token"
+  | "request_failed";
+
+export interface QuotaUnavailableReason {
+  code: QuotaUnavailableCode;
+  message: string;
+  statusCode: number | null;
+}
+
 export interface QuotaInfo {
   plan: string;
   primaryWindow: WindowInfo | null;
@@ -81,6 +93,7 @@ export interface QuotaInfo {
   credits: { hasCredits: boolean } | null;
   email: string;
   tokenExpired: boolean;
+  unavailableReason: QuotaUnavailableReason | null;
 }
 
 export interface ExportData {

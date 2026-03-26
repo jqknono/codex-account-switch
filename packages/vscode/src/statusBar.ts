@@ -118,8 +118,11 @@ export class StatusBarManager implements vscode.Disposable {
         }
         this.statusBarItem.tooltip = tip;
       } else {
-        this.statusBarItem.text = `$(account) ${name}`;
-        this.statusBarItem.tooltip = `Account: ${name}\nEmail: ${info.email}\nPlan: ${info.plan}`;
+        const reason = info.unavailableReason?.message;
+        this.statusBarItem.text = `${reason ? "$(warning)" : "$(account)"} ${name}`;
+        this.statusBarItem.tooltip = reason
+          ? `Account: ${name}\nEmail: ${info.email}\nPlan: ${info.plan}\nQuota: ${reason}`
+          : `Account: ${name}\nEmail: ${info.email}\nPlan: ${info.plan}`;
       }
     } catch {
       this.statusBarItem.text = `$(account) ${name}`;

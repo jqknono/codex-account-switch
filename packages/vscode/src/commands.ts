@@ -117,6 +117,37 @@ async function runCodexLogin(): Promise<boolean> {
   return action === "Done";
 }
 
+function exitProviderModeForLogin(): { previousSelection: ReturnType<typeof getCurrentSelection>; switched: boolean } | null {
+  const previousSelection = getCurrentSelection();
+  if (previousSelection.kind !== "provider") {
+    return { previousSelection, switched: false };
+  }
+
+  const switched = switchMode("account");
+  if (!switched.success) {
+    void vscode.window.showErrorMessage(switched.message);
+    return null;
+  }
+
+  void vscode.window.showInformationMessage(
+    `Exited provider mode "${getModeDisplayName(previousSelection.name)}" before login so Codex can create an account auth.json.`
+  );
+  return { previousSelection, switched: true };
+}
+
+function restoreProviderModeAfterFailedLogin(previousSelection: ReturnType<typeof getCurrentSelection>, switched: boolean) {
+  if (!switched || previousSelection.kind !== "provider") {
+    return;
+  }
+
+  const restored = switchMode(previousSelection.name);
+  if (!restored.success) {
+    void vscode.window.showWarningMessage(
+      `Restoring mode "${getModeDisplayName(previousSelection.name)}" failed: ${restored.message}`
+    );
+  }
+}
+
 async function pickAccountName(
   item: AccountTreeItem | undefined,
   placeHolder: string
@@ -426,14 +457,21 @@ export function registerCommands(
         if (confirm !== "Login and overwrite") return;
       }
 
+      const loginState = exitProviderModeForLogin();
+      if (!loginState) return;
+
       const completed = await runCodexLogin();
-      if (!completed) return;
+      if (!completed) {
+        restoreProviderModeAfterFailedLogin(loginState.previousSelection, loginState.switched);
+        return;
+      }
 
       const result = addAccountFromAuth(name.trim());
       if (result.success) {
         refreshAll(accountTree, statusBar);
         await promptReloadWindowAfterAdd(name.trim(), result.meta?.email);
       } else {
+        restoreProviderModeAfterFailedLogin(loginState.previousSelection, loginState.switched);
         vscode.window.showErrorMessage(result.message);
       }
     }),
@@ -451,9 +489,15 @@ export function registerCommands(
         );
         if (confirm !== "Re-login") return;
 
-        const previousSelection = getCurrentSelection();
+        const loginState = exitProviderModeForLogin();
+        if (!loginState) return;
+
+        const previousSelection = loginState.previousSelection;
         const completed = await runCodexLogin();
-        if (!completed) return;
+        if (!completed) {
+          restoreProviderModeAfterFailedLogin(previousSelection, loginState.switched);
+          return;
+        }
 
         const result = addAccountFromAuth(name);
         const shouldRestore =

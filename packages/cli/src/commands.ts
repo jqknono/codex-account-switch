@@ -259,17 +259,39 @@ export async function cmdAdd(name: string): Promise<void> {
     console.log(chalk.cyan("  Starting a new login flow to re-authorize and overwrite the saved account.\n"));
   }
 
+  const previousSelection = getCurrentSelection();
+  let restoreProviderOnFailure = false;
+  if (previousSelection.kind === "provider") {
+    const switchResult = switchMode("account");
+    if (!switchResult.success) {
+      console.log(chalk.red(switchResult.message));
+      return;
+    }
+    restoreProviderOnFailure = true;
+    console.log(
+      chalk.dim(
+        `Exited provider mode "${getModeDisplayName(previousSelection.name)}" before login so Codex can create an account auth.json.`
+      )
+    );
+  }
+
   console.log(chalk.cyan("Starting the Codex login flow...\n"));
 
   try {
     execSync("codex login", { stdio: "inherit" });
   } catch {
+    if (restoreProviderOnFailure && previousSelection.kind === "provider") {
+      switchMode(previousSelection.name);
+    }
     console.log(chalk.red("\nLogin failed or was cancelled."));
     return;
   }
 
   const result = addAccountFromAuth(name);
   if (!result.success) {
+    if (restoreProviderOnFailure && previousSelection.kind === "provider") {
+      switchMode(previousSelection.name);
+    }
     console.log(chalk.red(result.message));
     return;
   }
@@ -436,7 +458,9 @@ export async function cmdQuota(name?: string): Promise<void> {
   }
 
   if (!info.primaryWindow && !info.secondaryWindow) {
-    console.log(chalk.yellow("\n  Unable to load quota information (API request failed or token expired)"));
+    console.log(
+      chalk.yellow(`\n  ${info.unavailableReason?.message ?? "Unable to load quota information (API request failed or token expired)"}`)
+    );
   }
 
   console.log();
