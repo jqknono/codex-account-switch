@@ -1,4 +1,82 @@
 import * as https from "https";
+import { AuthFile, IdTokenPayload, WindowInfo, QuotaInfo } from "./types";
+import { jwtDecode } from "jwt-decode";
+import { refreshAccessToken } from "./refresh";
+
+const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
+
+export interface RateLimitWindow {
+  used_percent: number;
+  reset_at: number | null;
+  limit_window_seconds?: number;
+}
+
+interface UsageApiResponse {
+  plan_type?: string;
+  rate_limit?: {
+    primary_window?: RateLimitWindow;
+    secondary_window?: RateLimitWindow;
+  };
+  additional_rate_limits?: Array<{
+    limit_name: string;
+    rate_limit: {
+      primary_window?: RateLimitWindow;
+      secondary_window?: RateLimitWindow;
+    };
+  }>;
+  code_review_rate_limit?: {
+    primary_window?: RateLimitWindow;
+  };
+  credits?: {
+    has_credits?: boolean;
+    [key: string]: unknown;
+  };
+}
+
+function httpsGet(url: string, headers: Record<string, string>): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const options = {
+      hostname: parsed.hostname,
+      port: 443,
+      path: parsed.pathname + parsed.search,
+      method: "GET",
+      headers,
+    };
+
+    const req = https.request(options, (res) => {
+      let body = "";
+      res.on("data", (chunk: string) => (body += chunk));
+      res.on("end", () => {
+        if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+          resolve(body);
+        } else {
+          reject({ statusCode: res.statusCode, body });
+        }
+      });
+    });
+
+    req.on("error", reject);
+    req.setTimeout(15000, () => {
+      req.destroy();
+      reject(new Error("Request timeout"));
+    });
+    req.end();
+  });
+}
+
+async function fetchUsageApi(auth: AuthFile): Promise<UsageApiResponse> {
+  const accessToken = auth.tokens?.access_token;
+  const accountId = auth.tokens?.account_id ?? "";
+
+  if (!accessToken) {
+    throw new Error("No access_token in auth file");
+  }
+
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${accessToken}`,
+    "ChatGPT-Account-Id": accountId,
+import * as https from "https";
 import { AuthFile, IdTokenPayload, WindowInfo, QuotaInfo, QuotaUnavailableReason } from "./types";
 import { jwtDecode } from "jwt-decode";
 import { refreshAccessToken } from "./refresh";
