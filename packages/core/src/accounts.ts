@@ -5,7 +5,17 @@ import {
   listNamedAuthFiles,
   getNamedAuthDir,
 } from "./paths";
-import { readCurrentAuth, readAuthFile, extractMeta, hasAccountAuthTokens } from "./auth";
+import {
+  readCurrentAuth,
+  readAuthFile,
+  extractMeta,
+  hasAccountAuthTokens,
+  getAccountIdentityFromMeta,
+  findMatchingNamedAuthName,
+  syncCurrentAuthToSavedAccount,
+  writeAuthFile,
+  writeCurrentAuth,
+} from "./auth";
 import { refreshAndSave } from "./refresh";
 import { getQuotaInfo } from "./quota";
 import { AuthFile, AccountMeta, QuotaInfo, ExportData, CurrentSelection } from "./types";
@@ -35,18 +45,6 @@ export type QuotaQueryResult =
       modeName: string;
     };
 
-function normalizeIdentityValue(value: string | null | undefined): string {
-  return (value ?? "").trim().toLowerCase();
-}
-
-function getAccountIdentity(meta: AccountMeta | null | undefined): string | null {
-  if (!meta) return null;
-  const email = normalizeIdentityValue(meta.email);
-  const plan = normalizeIdentityValue(meta.plan);
-  if (!email || !plan) return null;
-  return `${email}::${plan}`;
-}
-
 function getSavedAccountsSnapshot(): Array<{ name: string; meta: AccountMeta | null; auth: AuthFile | null }> {
   return listNamedAuthFiles().map((name) => {
     const auth = readNamedAuth(name);
@@ -60,7 +58,7 @@ function findAccountByIdentity(identity: string, excludeName?: string): AccountI
     if (excludeName && account.name === excludeName) {
       continue;
     }
-    if (getAccountIdentity(account.meta) === identity) {
+    if (getAccountIdentityFromMeta(account.meta) === identity) {
       return { ...account, isCurrent: false };
     }
   }
@@ -78,27 +76,7 @@ export function detectCurrentName(): string | null {
 
   const current = readCurrentAuth();
   if (!current) return null;
-
-  if (current.tokens?.account_id) {
-    for (const name of listNamedAuthFiles()) {
-      const named = readNamedAuth(name);
-      if (named?.tokens?.account_id === current.tokens.account_id) {
-        return name;
-      }
-    }
-  }
-
-  const currentIdentity = getAccountIdentity(extractMeta(current));
-  if (!currentIdentity) {
-    return null;
-  }
-
-  for (const account of getSavedAccountsSnapshot()) {
-    if (getAccountIdentity(account.meta) === currentIdentity) {
-      return account.name;
-    }
-  }
-  return null;
+  return findMatchingNamedAuthName(current);
 }
 
 export function getCurrentSelection(): CurrentSelection {
@@ -143,7 +121,7 @@ export function addAccountFromAuth(name: string): { success: boolean; message: s
   }
 
   const meta = extractMeta(auth);
-  const identity = getAccountIdentity(meta);
+  const identity = getAccountIdentityFromMeta(meta);
   if (identity) {
     const existing = findAccountByIdentity(identity, name);
     if (existing) {
@@ -215,6 +193,7 @@ export function useAccount(name: string): { success: boolean; message: string; m
     return { success: false, message: `Account "${name}" does not exist.` };
   }
 
+  syncCurrentAuthToSavedAccount();
   fs.copyFileSync(src, getCodexAuthPath());
   clearActiveModelProvider();
 
@@ -239,14 +218,19 @@ export function getCurrentAccount(): { name: string | null; meta: AccountMeta | 
 
 export async function queryQuota(name?: string): Promise<QuotaQueryResult> {
   let auth: AuthFile | null;
+  let authPath: string | null = null;
   let displayName: string;
+  let shouldSyncCurrentAuth = false;
 
   if (name) {
-    auth = readNamedAuth(name);
-    if (!auth) {
+    authPath = getNamedAuthPath(name);
+    if (!fs.existsSync(authPath)) {
       return { kind: "not_found", message: `Account "${name}" does not exist.` };
     }
+    const synced = syncCurrentAuthToSavedAccount();
+    auth = synced?.name === name ? synced.auth : readNamedAuth(name);
     displayName = name;
+    shouldSyncCurrentAuth = detectCurrentName() === name;
   } else {
     const selection = getCurrentSelection();
     if (selection.kind === "provider") {
@@ -258,8 +242,11 @@ export async function queryQuota(name?: string): Promise<QuotaQueryResult> {
     }
 
     if (selection.kind === "account") {
-      auth = readNamedAuth(selection.name);
+      authPath = getNamedAuthPath(selection.name);
+      const synced = syncCurrentAuthToSavedAccount();
+      auth = synced?.name === selection.name ? synced.auth : readNamedAuth(selection.name);
       displayName = selection.name;
+      shouldSyncCurrentAuth = true;
     } else {
       auth = readCurrentAuth();
       displayName = "Current auth";
@@ -270,7 +257,14 @@ export async function queryQuota(name?: string): Promise<QuotaQueryResult> {
     return { kind: "not_found", message: "No auth information found." };
   }
 
+  const authBefore = JSON.stringify(auth);
   const info = await getQuotaInfo(auth);
+  if (authPath && JSON.stringify(auth) !== authBefore) {
+    writeAuthFile(authPath, auth);
+    if (shouldSyncCurrentAuth) {
+      writeCurrentAuth(auth);
+    }
+  }
   return { kind: "ok", displayName, info };
 }
 
@@ -283,13 +277,16 @@ export async function refreshAccount(name?: string): Promise<{
 }> {
   let authPath: string;
   let displayName: string;
+  let shouldSyncCurrentAuth = false;
 
   if (name) {
     authPath = getNamedAuthPath(name);
     if (!fs.existsSync(authPath)) {
       return { success: false, message: `Account "${name}" does not exist.` };
     }
+    syncCurrentAuthToSavedAccount();
     displayName = name;
+    shouldSyncCurrentAuth = detectCurrentName() === name;
   } else {
     const selection = getCurrentSelection();
     if (selection.kind === "provider") {
@@ -302,7 +299,9 @@ export async function refreshAccount(name?: string): Promise<{
 
     if (selection.kind === "account") {
       authPath = getNamedAuthPath(selection.name);
+      syncCurrentAuthToSavedAccount();
       displayName = selection.name;
+      shouldSyncCurrentAuth = true;
     } else {
       authPath = getCodexAuthPath();
       displayName = "Current auth";
@@ -316,11 +315,8 @@ export async function refreshAccount(name?: string): Promise<{
   try {
     const updated = await refreshAndSave(authPath);
 
-    if (name) {
-      const currentName = detectCurrentName();
-      if (currentName === name) {
-        fs.copyFileSync(authPath, getCodexAuthPath());
-      }
+    if (shouldSyncCurrentAuth) {
+      writeCurrentAuth(updated);
     }
 
     const meta = extractMeta(updated);

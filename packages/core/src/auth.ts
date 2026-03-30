@@ -1,6 +1,6 @@
 import * as fs from "fs";
 import { jwtDecode } from "jwt-decode";
-import { getCodexAuthPath } from "./paths";
+import { getCodexAuthPath, getNamedAuthPath, listNamedAuthFiles } from "./paths";
 import { AuthFile, IdTokenPayload, AccountMeta } from "./types";
 
 function parseAuthJson(raw: string): AuthFile | null {
@@ -36,6 +36,10 @@ export function writeCurrentAuth(auth: AuthFile): void {
   writeAuthFile(getCodexAuthPath(), auth);
 }
 
+function normalizeIdentityValue(value: string | null | undefined): string {
+  return (value ?? "").trim().toLowerCase();
+}
+
 export function extractMeta(auth: AuthFile): AccountMeta {
   let email = "unknown";
   let name = "unknown";
@@ -57,6 +61,14 @@ export function extractMeta(auth: AuthFile): AccountMeta {
   }
 
   return { name, email, plan };
+}
+
+export function getAccountIdentityFromMeta(meta: AccountMeta | null | undefined): string | null {
+  if (!meta) return null;
+  const email = normalizeIdentityValue(meta.email);
+  const plan = normalizeIdentityValue(meta.plan);
+  if (!email || !plan) return null;
+  return `${email}::${plan}`;
 }
 
 export function hasAccountAuthTokens(auth: AuthFile | null | undefined): boolean {
@@ -105,4 +117,49 @@ export function formatTokenExpiry(auth: AuthFile): string {
   const h = Math.floor(m / 60);
   if (h < 24) return `expires in ${h}h${m % 60}m`;
   return `expires in ${Math.floor(h / 24)}d${h % 24}h`;
+}
+
+export function findMatchingNamedAuthName(auth: AuthFile | null | undefined): string | null {
+  if (!hasAccountAuthTokens(auth)) {
+    return null;
+  }
+
+  const accountId = auth?.tokens?.account_id;
+  if (accountId) {
+    for (const name of listNamedAuthFiles()) {
+      const named = readAuthFile(getNamedAuthPath(name));
+      if (named?.tokens?.account_id === accountId) {
+        return name;
+      }
+    }
+  }
+
+  const identity = getAccountIdentityFromMeta(auth ? extractMeta(auth) : null);
+  if (!identity) {
+    return null;
+  }
+
+  for (const name of listNamedAuthFiles()) {
+    const named = readAuthFile(getNamedAuthPath(name));
+    if (getAccountIdentityFromMeta(named ? extractMeta(named) : null) === identity) {
+      return name;
+    }
+  }
+
+  return null;
+}
+
+export function syncCurrentAuthToSavedAccount(): { name: string; auth: AuthFile } | null {
+  const auth = readCurrentAuth();
+  if (!auth) {
+    return null;
+  }
+
+  const name = findMatchingNamedAuthName(auth);
+  if (!name) {
+    return null;
+  }
+
+  writeAuthFile(getNamedAuthPath(name), auth);
+  return { name, auth };
 }

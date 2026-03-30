@@ -3,6 +3,8 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const https = require("node:https");
+const { EventEmitter } = require("node:events");
 
 const core = require("../dist");
 
@@ -19,6 +21,58 @@ function writeJson(filePath, value) {
 
 function writeText(filePath, value) {
   fs.writeFileSync(filePath, value, "utf-8");
+}
+
+function makeAccountAuth(accountId, refreshToken, accessToken = `access-${accountId}`) {
+  return {
+    auth_mode: "chatgpt",
+    OPENAI_API_KEY: null,
+    tokens: {
+      account_id: accountId,
+      access_token: accessToken,
+      refresh_token: refreshToken,
+    },
+  };
+}
+
+function withMockedHttpsRequest(mockImpl, fn) {
+  const original = https.request;
+  https.request = mockImpl;
+  return Promise.resolve()
+    .then(fn)
+    .finally(() => {
+      https.request = original;
+    });
+}
+
+function createQueuedHttpsMock(responses) {
+  return (options, handler) => {
+    const next = responses.shift();
+    assert.ok(next, "Unexpected https.request call");
+
+    const response = new EventEmitter();
+    response.statusCode = next.statusCode;
+
+    const request = new EventEmitter();
+    let writtenBody = "";
+    request.setTimeout = () => request;
+    request.destroy = () => {};
+    request.write = (chunk) => {
+      writtenBody += chunk;
+    };
+    request.end = () => {
+      if (typeof next.assertRequest === "function") {
+        next.assertRequest(options, writtenBody);
+      }
+      handler(response);
+      if (next.body != null) {
+        response.emit("data", next.body);
+      }
+      response.emit("end");
+    };
+
+    return request;
+  };
 }
 
 function restoreEnv() {
@@ -194,6 +248,26 @@ test("useAccount clears the active provider and restores account auth", () => {
   });
 });
 
+test("useAccount syncs the latest current auth back to the saved account before switching", () => {
+  const codexHome = createTempCodexHome();
+  process.env.CODEX_HOME = codexHome;
+
+  writeJson(path.join(codexHome, "auth_work.json"), makeAccountAuth("acct-work", "rt-stale", "access-stale"));
+  writeJson(path.join(codexHome, "auth_other.json"), makeAccountAuth("acct-other", "rt-other", "access-other"));
+  writeJson(path.join(codexHome, "auth.json"), makeAccountAuth("acct-work", "rt-fresh", "access-fresh"));
+
+  const result = core.useAccount("other");
+  assert.equal(result.success, true);
+
+  const savedWork = JSON.parse(fs.readFileSync(path.join(codexHome, "auth_work.json"), "utf-8"));
+  assert.equal(savedWork.tokens.refresh_token, "rt-fresh");
+  assert.equal(savedWork.tokens.access_token, "access-fresh");
+
+  const currentAuth = JSON.parse(fs.readFileSync(path.join(codexHome, "auth.json"), "utf-8"));
+  assert.equal(currentAuth.tokens.account_id, "acct-other");
+  assert.equal(currentAuth.tokens.refresh_token, "rt-other");
+});
+
 test("addAccountFromAuth rejects provider auth payloads", () => {
   const codexHome = createTempCodexHome();
   process.env.CODEX_HOME = codexHome;
@@ -233,6 +307,137 @@ test("queryQuota and refreshAccount report unsupported for provider mode without
   assert.equal(refreshResult.success, false);
   assert.equal(refreshResult.unsupported, true);
   assert.match(refreshResult.message, /provider mode "cliproxyapi"/i);
+});
+
+test("switchMode syncs the latest current account auth before writing provider auth", () => {
+  const codexHome = createTempCodexHome();
+  process.env.CODEX_HOME = codexHome;
+
+  writeJson(path.join(codexHome, "auth_work.json"), makeAccountAuth("acct-work", "rt-stale", "access-stale"));
+  writeJson(path.join(codexHome, "auth.json"), makeAccountAuth("acct-work", "rt-fresh", "access-fresh"));
+  writeJson(path.join(codexHome, "provider_cliproxyapi.json"), {
+    kind: "provider",
+    name: "cliproxyapi",
+    auth: { OPENAI_API_KEY: "sk-qtdev" },
+    config: {
+      name: "cliproxyapi",
+      base_url: "http://127.0.0.1:34046/v1",
+      wire_api: "responses",
+    },
+  });
+
+  const result = core.switchMode("cliproxyapi");
+  assert.equal(result.success, true);
+
+  const savedWork = JSON.parse(fs.readFileSync(path.join(codexHome, "auth_work.json"), "utf-8"));
+  assert.equal(savedWork.tokens.refresh_token, "rt-fresh");
+  assert.equal(savedWork.tokens.access_token, "access-fresh");
+
+  const currentAuth = JSON.parse(fs.readFileSync(path.join(codexHome, "auth.json"), "utf-8"));
+  assert.deepEqual(currentAuth, { OPENAI_API_KEY: "sk-qtdev" });
+});
+
+test("refreshAccount syncs the current auth before refreshing and writes the rotated token back to both files", async () => {
+  const codexHome = createTempCodexHome();
+  process.env.CODEX_HOME = codexHome;
+
+  writeJson(path.join(codexHome, "auth_work.json"), makeAccountAuth("acct-work", "rt-stale", "access-stale"));
+  writeJson(path.join(codexHome, "auth.json"), makeAccountAuth("acct-work", "rt-current", "access-current"));
+
+  const responses = [
+    {
+      statusCode: 200,
+      body: JSON.stringify({
+        access_token: "access-rotated",
+        refresh_token: "rt-rotated",
+        id_token: "id-rotated",
+      }),
+      assertRequest: (options, body) => {
+        assert.equal(options.hostname, "auth.openai.com");
+        assert.match(body, /refresh_token=rt-current/);
+      },
+    },
+  ];
+
+  await withMockedHttpsRequest(createQueuedHttpsMock(responses), async () => {
+    const result = await core.refreshAccount("work");
+    assert.equal(result.success, true);
+  });
+
+  const savedWork = JSON.parse(fs.readFileSync(path.join(codexHome, "auth_work.json"), "utf-8"));
+  assert.equal(savedWork.tokens.refresh_token, "rt-rotated");
+  assert.equal(savedWork.tokens.access_token, "access-rotated");
+  assert.equal(savedWork.tokens.id_token, "id-rotated");
+  assert.ok(typeof savedWork.last_refresh === "string");
+
+  const currentAuth = JSON.parse(fs.readFileSync(path.join(codexHome, "auth.json"), "utf-8"));
+  assert.equal(currentAuth.tokens.refresh_token, "rt-rotated");
+  assert.equal(currentAuth.tokens.access_token, "access-rotated");
+  assert.equal(currentAuth.tokens.id_token, "id-rotated");
+});
+
+test("queryQuota persists tokens refreshed during quota lookup back to the saved and current auth files", async () => {
+  const codexHome = createTempCodexHome();
+  process.env.CODEX_HOME = codexHome;
+
+  writeJson(path.join(codexHome, "auth_work.json"), makeAccountAuth("acct-work", "rt-stale", "access-stale"));
+  writeJson(path.join(codexHome, "auth.json"), makeAccountAuth("acct-work", "rt-current", "access-current"));
+
+  const responses = [
+    {
+      statusCode: 401,
+      body: JSON.stringify({ detail: "expired access token" }),
+      assertRequest: (options) => {
+        assert.equal(options.hostname, "chatgpt.com");
+        assert.equal(options.headers.Authorization, "Bearer access-current");
+      },
+    },
+    {
+      statusCode: 200,
+      body: JSON.stringify({
+        access_token: "access-rotated",
+        refresh_token: "rt-rotated",
+        id_token: "id-rotated",
+      }),
+      assertRequest: (options, body) => {
+        assert.equal(options.hostname, "auth.openai.com");
+        assert.match(body, /refresh_token=rt-current/);
+      },
+    },
+    {
+      statusCode: 200,
+      body: JSON.stringify({
+        plan_type: "plus",
+        rate_limit: {
+          primary_window: {
+            used_percent: 10,
+            reset_at: null,
+          },
+        },
+      }),
+      assertRequest: (options) => {
+        assert.equal(options.hostname, "chatgpt.com");
+        assert.equal(options.headers.Authorization, "Bearer access-rotated");
+      },
+    },
+  ];
+
+  await withMockedHttpsRequest(createQueuedHttpsMock(responses), async () => {
+    const result = await core.queryQuota("work");
+    assert.equal(result.kind, "ok");
+    assert.equal(result.info.plan, "plus");
+  });
+
+  const savedWork = JSON.parse(fs.readFileSync(path.join(codexHome, "auth_work.json"), "utf-8"));
+  assert.equal(savedWork.tokens.refresh_token, "rt-rotated");
+  assert.equal(savedWork.tokens.access_token, "access-rotated");
+  assert.equal(savedWork.tokens.id_token, "id-rotated");
+  assert.ok(typeof savedWork.last_refresh === "string");
+
+  const currentAuth = JSON.parse(fs.readFileSync(path.join(codexHome, "auth.json"), "utf-8"));
+  assert.equal(currentAuth.tokens.refresh_token, "rt-rotated");
+  assert.equal(currentAuth.tokens.access_token, "access-rotated");
+  assert.equal(currentAuth.tokens.id_token, "id-rotated");
 });
 
 test("switchMode removes leading blank lines from config.toml", () => {

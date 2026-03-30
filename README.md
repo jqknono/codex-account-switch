@@ -16,9 +16,9 @@ packages/
 ## How It Works
 
 - `add` runs `codex login`, then copies `~/.codex/auth.json` to `~/.codex/auth_{name}.json`
-- `use` copies `~/.codex/auth_{name}.json` back to `~/.codex/auth.json`, clears any active `model_provider`, and switches Codex CLI back to account mode
+- `use` first syncs the latest current account auth back to its saved `auth_{name}.json`, then restores the selected account into `~/.codex/auth.json`, clears any active `model_provider`, and switches Codex CLI back to account mode
 - `quota` queries the ChatGPT backend API for live usage data across the 5-hour and 7-day windows
-- `refresh` uses the stored `refresh_token` to refresh an expired access token
+- `refresh` uses the stored `refresh_token` to refresh an expired access token and writes rotated tokens back to the saved account file
 - `mode` switches between normal account mode and provider modes such as `provider`, synchronizing both `auth.json` and `config.toml`
 - Saved `auth_{name}.json` files can live in a separate directory; if not configured, the default Codex config directory is used
 
@@ -150,7 +150,9 @@ npm run publish:cli -- --otp <code>
 
 ## Data Storage
 
-Each saved account is stored as `auth_{name}.json` inside the configured account directory. By default this is the Codex config directory, typically `~/.codex`. Switching accounts always copies the selected file back to `~/.codex/auth.json` and clears the active `model_provider` in `~/.codex/config.toml`.
+Each saved account is stored as `auth_{name}.json` inside the configured account directory. By default this is the Codex config directory, typically `~/.codex`. Before any account or provider switch overwrites `~/.codex/auth.json`, the tool first syncs the latest current account auth back to its matching saved `auth_{name}.json`. Switching accounts then restores the selected file into `~/.codex/auth.json` and clears the active `model_provider` in `~/.codex/config.toml`.
+
+When `refresh` or `quota` rotates tokens for a saved account, the updated auth payload is written back to the saved account file. If that account is currently active, `~/.codex/auth.json` is updated too so future switches do not restore an older refresh token snapshot.
 
 Some tools and extensions that depend on `~/.codex/auth.json` may cache authentication state on startup. For those cases, replacing `auth.json` alone may not take effect immediately, and a VS Code window reload is required.
 

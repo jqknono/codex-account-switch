@@ -1,5 +1,5 @@
 import * as fs from "fs";
-import { writeCurrentAuth } from "./auth";
+import { syncCurrentAuthToSavedAccount, writeCurrentAuth } from "./auth";
 import { activateProviderConfig, clearActiveModelProvider, getActiveModelProvider, removeProviderConfig } from "./config";
 import { getNamedAuthDir, getNamedProviderPath, listNamedProviderFiles } from "./paths";
 import { ProviderProfile } from "./types";
@@ -148,6 +148,7 @@ export function switchMode(name: string): SwitchModeResult {
   }
 
   fs.mkdirSync(getNamedAuthDir(), { recursive: true });
+  syncCurrentAuthToSavedAccount();
   writeCurrentAuth(profile.auth);
   activateProviderConfig(name, profile.config);
   return { success: true, message: `Switched to mode "${getModeDisplayName(name)}"` };

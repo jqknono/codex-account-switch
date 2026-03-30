@@ -100,6 +100,10 @@ async function fetchUsageApi(auth: AuthFile): Promise<UsageApiResponse> {
       if (refreshed.refresh_token) {
         auth.tokens.refresh_token = refreshed.refresh_token;
       }
+      if (refreshed.id_token) {
+        auth.tokens.id_token = refreshed.id_token;
+      }
+      auth.last_refresh = new Date().toISOString();
 
       if (!auth.tokens.access_token) {
         throw new Error("No access_token in auth file");

@@ -721,6 +721,37 @@ test("workflow: use then current shows correct account", () => {
   assert.ok(r.stdout.includes("Current account: work"));
 });
 
+test("workflow: switching away preserves an externally refreshed current account snapshot", () => {
+  const home = tmpHome();
+  const staleWork = makeAuth("work@example.com", "plus", { acctId: "acct-work" });
+  const freshWork = {
+    ...staleWork,
+    tokens: {
+      ...staleWork.tokens,
+      access_token: jwt({ exp: Math.floor(Date.now() / 1000) + 7200 }),
+      refresh_token: "rt-work-fresh",
+    },
+  };
+  const other = makeAuth("other@example.com", "pro", { acctId: "acct-other" });
+
+  writeJson(path.join(home, "auth_work.json"), staleWork);
+  writeJson(path.join(home, "auth_other.json"), other);
+  writeJson(path.join(home, "auth.json"), freshWork);
+
+  const switchAway = cli("use other", home);
+  assert.equal(switchAway.code, 0);
+
+  const savedWork = readJson(path.join(home, "auth_work.json"));
+  assert.equal(savedWork.tokens.refresh_token, "rt-work-fresh");
+
+  const switchBack = cli("use work", home);
+  assert.equal(switchBack.code, 0);
+
+  const current = readJson(path.join(home, "auth.json"));
+  assert.equal(current.tokens.account_id, "acct-work");
+  assert.equal(current.tokens.refresh_token, "rt-work-fresh");
+});
+
 test("workflow: switch mode then current shows provider name", () => {
   const home = tmpHome();
   writeJson(path.join(home, "provider_cliproxyapi.json"), makeProviderProfile());
