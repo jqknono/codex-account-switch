@@ -9,6 +9,7 @@ import {
   readCurrentAuth,
   readAuthFile,
   extractMeta,
+  getAccountIdentity,
   hasAccountAuthTokens,
   getAccountIdentityFromMeta,
   findMatchingNamedAuthName,
@@ -58,7 +59,7 @@ function findAccountByIdentity(identity: string, excludeName?: string): AccountI
     if (excludeName && account.name === excludeName) {
       continue;
     }
-    if (getAccountIdentityFromMeta(account.meta) === identity) {
+    if (getAccountIdentity(account.auth) === identity) {
       return { ...account, isCurrent: false };
     }
   }
@@ -121,7 +122,40 @@ export function addAccountFromAuth(name: string): { success: boolean; message: s
   }
 
   const meta = extractMeta(auth);
-  const identity = getAccountIdentityFromMeta(meta);
+  const identity = getAccountIdentity(auth);
+  const dest = getNamedAuthPath(name);
+  if (fs.existsSync(dest)) {
+    const existingAuth = readNamedAuth(name);
+    const existingMeta = existingAuth ? extractMeta(existingAuth) : null;
+    const existingIdentity = getAccountIdentity(existingAuth);
+
+    if (!existingIdentity) {
+      return {
+        success: false,
+        message: `Saved account "${name}" does not contain a stable identity, so overwrite was rejected. Remove and add it again if you want to replace it.`,
+        meta,
+      };
+    }
+
+    if (!identity) {
+      return {
+        success: false,
+        message: `The new login result does not contain a stable identity, so "${name}" was not overwritten.`,
+        meta,
+      };
+    }
+
+    if (existingIdentity !== identity) {
+      const existingLabel = existingMeta ? `${existingMeta.email} (${existingMeta.plan})` : "unknown account";
+      const newLabel = `${meta.email} (${meta.plan})`;
+      return {
+        success: false,
+        message: `Saved account "${name}" belongs to a different account: expected ${existingLabel}, but the new login is ${newLabel}. Overwrite was rejected.`,
+        meta,
+      };
+    }
+  }
+
   if (identity) {
     const existing = findAccountByIdentity(identity, name);
     if (existing) {
@@ -133,7 +167,6 @@ export function addAccountFromAuth(name: string): { success: boolean; message: s
     }
   }
 
-  const dest = getNamedAuthPath(name);
   fs.mkdirSync(getNamedAuthDir(), { recursive: true });
   fs.copyFileSync(getCodexAuthPath(), dest);
 

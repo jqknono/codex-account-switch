@@ -30,6 +30,10 @@ import {
   getModeDisplayName,
 } from "@codex-account-switch/core";
 
+function getCodexLoginCommand(deviceAuth = false): string {
+  return deviceAuth ? "codex login --device-auth" : "codex login";
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -238,7 +242,9 @@ export function cmdList(): void {
   console.log();
 }
 
-export async function cmdAdd(name: string): Promise<void> {
+export async function cmdAdd(name: string, options?: { deviceAuth?: boolean }): Promise<void> {
+  const deviceAuth = options?.deviceAuth ?? false;
+  const loginCommand = getCodexLoginCommand(deviceAuth);
   const dest = getNamedAuthPath(name);
   if (fs.existsSync(dest)) {
     console.log(chalk.yellow(`Account "${name}" already exists. Trying to refresh its token first.`));
@@ -275,10 +281,21 @@ export async function cmdAdd(name: string): Promise<void> {
     );
   }
 
-  console.log(chalk.cyan("Starting the Codex login flow...\n"));
+  console.log(
+    chalk.cyan(
+      `Starting the Codex login flow${deviceAuth ? " with device auth" : ""}...\n  Command: ${loginCommand}\n`
+    )
+  );
+  if (deviceAuth) {
+    console.log(
+      chalk.dim(
+        '  If Codex says "Enable device code authorization for Codex in ChatGPT Security Settings, then run \\"codex login --device-auth\\" again.", enable it in ChatGPT first and retry.\n'
+      )
+    );
+  }
 
   try {
-    execSync("codex login", { stdio: "inherit" });
+    execSync(loginCommand, { stdio: "inherit" });
   } catch {
     if (restoreProviderOnFailure && previousSelection.kind === "provider") {
       switchMode(previousSelection.name);

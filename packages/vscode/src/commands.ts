@@ -29,6 +29,16 @@ import { ProviderDetailItem, ProviderTreeProvider } from "./providerTree";
 import { StatusBarManager } from "./statusBar";
 import { buildCompletedProviderProfile, readProviderProfileDraft } from "./providerProfile";
 
+function getUseDeviceAuthForLogin(): boolean {
+  return vscode.workspace
+    .getConfiguration("codex-account-switch")
+    .get<boolean>("useDeviceAuthForLogin", false);
+}
+
+function getCodexLoginCommand(useDeviceAuth = getUseDeviceAuthForLogin()): string {
+  return useDeviceAuth ? "codex login --device-auth" : "codex login";
+}
+
 function refreshAll(
   accountTree: AccountTreeProvider,
   providerTree: ProviderTreeProvider,
@@ -109,16 +119,18 @@ async function promptReloadWindowAfterAdd(accountName: string, email?: string) {
   );
 }
 
-async function runCodexLogin(): Promise<boolean> {
+async function runCodexLogin(options?: { useDeviceAuth?: boolean }): Promise<boolean> {
+  const useDeviceAuth = options?.useDeviceAuth ?? getUseDeviceAuthForLogin();
+  const loginCommand = getCodexLoginCommand(useDeviceAuth);
   const terminal = vscode.window.createTerminal("Codex Login");
   terminal.show();
-  terminal.sendText("codex login");
+  terminal.sendText(loginCommand);
 
-  const action = await vscode.window.showInformationMessage(
-    "Complete `codex login` in the terminal, then click Done.",
-    "Done",
-    "Cancel"
-  );
+  const message = useDeviceAuth
+    ? `Complete \`${loginCommand}\` in the terminal, then click Done. If Codex says "Enable device code authorization for Codex in ChatGPT Security Settings, then run \\"codex login --device-auth\\" again.", enable it in ChatGPT Security Settings first.`
+    : `Complete \`${loginCommand}\` in the terminal, then click Done.`;
+
+  const action = await vscode.window.showInformationMessage(message, "Done", "Cancel");
 
   return action === "Done";
 }
@@ -172,6 +184,26 @@ async function pickAccountName(
     accounts.map((account) => account.name),
     { placeHolder }
   );
+}
+
+async function promptLoginMethod(
+  message: string,
+  defaultActionLabel: string
+): Promise<"default" | "device-auth" | "cancel"> {
+  const action = await vscode.window.showWarningMessage(
+    message,
+    defaultActionLabel,
+    "Use Device Auth",
+    "Cancel"
+  );
+
+  if (action === defaultActionLabel) {
+    return "default";
+  }
+  if (action === "Use Device Auth") {
+    return "device-auth";
+  }
+  return "cancel";
 }
 
 async function pickModeAction(
@@ -462,12 +494,30 @@ export function registerCommands(
           return;
         }
 
-        const confirm = await vscode.window.showWarningMessage(
+        const loginMethod = await promptLoginMethod(
           `Account "${existingName}" already exists and token refresh failed. Start login and overwrite it?`,
-          "Login and overwrite",
-          "Cancel"
+          "Login and overwrite"
         );
-        if (confirm !== "Login and overwrite") return;
+        if (loginMethod === "cancel") return;
+
+        const loginState = exitProviderModeForLogin();
+        if (!loginState) return;
+
+        const completed = await runCodexLogin({ useDeviceAuth: loginMethod === "device-auth" });
+        if (!completed) {
+          restoreProviderModeAfterFailedLogin(loginState.previousSelection, loginState.switched);
+          return;
+        }
+
+        const result = addAccountFromAuth(name.trim());
+        if (result.success) {
+          refreshAll(accountTree, providerTree, statusBar);
+          await promptReloadWindowAfterAdd(name.trim(), result.meta?.email);
+        } else {
+          restoreProviderModeAfterFailedLogin(loginState.previousSelection, loginState.switched);
+          vscode.window.showErrorMessage(result.message);
+        }
+        return;
       }
 
       const loginState = exitProviderModeForLogin();
@@ -495,18 +545,17 @@ export function registerCommands(
         const name = await pickAccountName(item, "Select an account to re-login");
         if (!name) return;
 
-        const confirm = await vscode.window.showWarningMessage(
+        const loginMethod = await promptLoginMethod(
           `Re-login account "${name}" and overwrite its saved auth.json?`,
-          "Re-login",
-          "Cancel"
+          "Re-login"
         );
-        if (confirm !== "Re-login") return;
+        if (loginMethod === "cancel") return;
 
         const loginState = exitProviderModeForLogin();
         if (!loginState) return;
 
         const previousSelection = loginState.previousSelection;
-        const completed = await runCodexLogin();
+        const completed = await runCodexLogin({ useDeviceAuth: loginMethod === "device-auth" });
         if (!completed) {
           restoreProviderModeAfterFailedLogin(previousSelection, loginState.switched);
           return;

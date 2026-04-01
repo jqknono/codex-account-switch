@@ -39,7 +39,8 @@ program
 program
   .command("add <name>")
   .description("Run codex login and save the account")
-  .action(async (name: string) => cmdAdd(name));
+  .option("--device-auth", "Use codex login --device-auth. Requires enabling device code authorization in ChatGPT Security Settings.", false)
+  .action(async (name: string, opts?: { deviceAuth?: boolean }) => cmdAdd(name, opts));
 
 program
   .command("remove <name>")

@@ -2,7 +2,7 @@
   "name": "codex-account-switch-vscode",
   "displayName": "Codex Account Switch",
   "description": "Codex Account Switch - VS Code extension",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "publisher": "techfetch-dev",
   "repository": {
     "type": "git",
@@ -70,72 +70,86 @@
     "commands": [
       {
         "command": "codex-account-switch.importAccounts",
-        "title": "Codex Account Switch: Import Accounts",
+        "title": "Import Accounts",
+        "category": "Codex Account Switch",
         "icon": "$(folder-opened)"
       },
       {
         "command": "codex-account-switch.addAccount",
-        "title": "Codex Account Switch: Add Account",
+        "title": "Add Account",
+        "category": "Codex Account Switch",
         "icon": "$(add)"
       },
       {
         "command": "codex-account-switch.reloginAccount",
-        "title": "Codex Account Switch: Re-login Account",
+        "title": "Re-login Account",
+        "category": "Codex Account Switch",
         "icon": "$(sign-in)"
       },
       {
         "command": "codex-account-switch.renameAccount",
-        "title": "Codex Account Switch: Rename Account",
+        "title": "Rename Account",
+        "category": "Codex Account Switch",
         "icon": "$(edit)"
       },
       {
         "command": "codex-account-switch.removeAccount",
-        "title": "Codex Account Switch: Remove Account",
+        "title": "Remove Account",
+        "category": "Codex Account Switch",
         "icon": "$(trash)"
       },
       {
         "command": "codex-account-switch.useAccount",
-        "title": "Codex Account Switch: Switch Account",
+        "title": "Switch Account",
+        "category": "Codex Account Switch",
         "icon": "$(arrow-swap)"
       },
       {
         "command": "codex-account-switch.switchMode",
-        "title": "Codex Account Switch: Switch Mode",
+        "title": "Switch Mode",
+        "category": "Codex Account Switch",
         "icon": "$(plug)"
       },
       {
         "command": "codex-account-switch.refreshToken",
-        "title": "Codex Account Switch: Refresh Token and Quota",
+        "title": "Refresh Token and Quota",
+        "category": "Codex Account Switch",
         "icon": "$(refresh)"
       },
       {
         "command": "codex-account-switch.refreshQuota",
-        "title": "Codex Account Switch: Refresh Quota",
+        "title": "Refresh Quota",
+        "category": "Codex Account Switch",
         "icon": "$(refresh)"
       },
       {
         "command": "codex-account-switch.exportAccounts",
-        "title": "Codex Account Switch: Export Accounts",
+        "title": "Export Accounts",
+        "category": "Codex Account Switch",
         "icon": "$(export)"
       },
       {
         "command": "codex-account-switch.refreshList",
         "title": "Refresh List",
+        "category": "Codex Account Switch",
         "icon": "$(refresh)"
       },
       {
         "command": "codex-account-switch.reloadWindow",
-        "title": "Codex Account Switch: Reload Window",
+        "title": "Reload Window",
+        "category": "Codex Account Switch",
         "icon": "$(debug-restart)"
       },
       {
         "command": "codex-account-switch.copyProviderField",
-        "title": "Codex Account Switch: Copy Provider Value",
+        "title": "Copy Provider Value",
+        "category": "Codex Account Switch",
         "icon": "$(copy)"
       },
       {
         "command": "codex-account-switch.expandAllAccounts",
-        "title": "Codex Account Switch: Expand All Accounts",
+        "title": "Expand All Accounts",
+        "category": "Codex Account Switch",
         "icon": "$(expand-all)"
       }
     ],
@@ -263,6 +277,11 @@
           "type": "string",
           "default": "",
           "description": "Directory used to save and load auth_{name}.json files. Leave empty to use the default Codex config directory."
+        },
+        "codex-account-switch.useDeviceAuthForLogin": {
+          "type": "boolean",
+          "default": false,
+          "description": "Use `codex login --device-auth` for add/re-login. Enable this only after turning on device code authorization for Codex in ChatGPT Security Settings."
         }
       }
     }

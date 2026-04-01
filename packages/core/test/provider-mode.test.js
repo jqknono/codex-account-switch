@@ -282,6 +282,21 @@ test("addAccountFromAuth rejects provider auth payloads", () => {
   assert.equal(fs.existsSync(path.join(codexHome, "auth_bad.json")), false);
 });
 
+test("addAccountFromAuth rejects overwriting an existing account with a different identity", () => {
+  const codexHome = createTempCodexHome();
+  process.env.CODEX_HOME = codexHome;
+
+  writeJson(path.join(codexHome, "auth_work.json"), makeAccountAuth("acct-work", "rt-work", "access-work"));
+  writeJson(path.join(codexHome, "auth.json"), makeAccountAuth("acct-other", "rt-other", "access-other"));
+
+  const result = core.addAccountFromAuth("work");
+  assert.equal(result.success, false);
+  assert.match(result.message, /belongs to a different account/i);
+
+  const saved = JSON.parse(fs.readFileSync(path.join(codexHome, "auth_work.json"), "utf-8"));
+  assert.equal(saved.tokens.account_id, "acct-work");
+});
+
 test("queryQuota and refreshAccount report unsupported for provider mode without an account name", async () => {
   const codexHome = createTempCodexHome();
   process.env.CODEX_HOME = codexHome;

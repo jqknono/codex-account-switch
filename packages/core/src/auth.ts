@@ -71,6 +71,15 @@ export function getAccountIdentityFromMeta(meta: AccountMeta | null | undefined)
   return `${email}::${plan}`;
 }
 
+export function getAccountIdentity(auth: AuthFile | null | undefined): string | null {
+  const accountId = normalizeIdentityValue(auth?.tokens?.account_id);
+  if (accountId) {
+    return `account_id::${accountId}`;
+  }
+
+  return getAccountIdentityFromMeta(auth ? extractMeta(auth) : null);
+}
+
 export function hasAccountAuthTokens(auth: AuthFile | null | undefined): boolean {
   if (!auth) {
     return false;

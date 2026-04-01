@@ -76,6 +76,7 @@ function makeProviderProfile(providerName = "cliproxyapi") {
 function cli(args, home, opts = {}) {
   const env = {
     ...process.env,
+    ...opts.env,
     CODEX_HOME: home,
     NO_COLOR: "1",
     FORCE_COLOR: "0",
@@ -99,6 +100,20 @@ function cli(args, home, opts = {}) {
       stderr: err.stderr ?? "",
     };
   }
+}
+
+function writeFakeCodexCommand(binDir, { auth, logPath }) {
+  const authJson = JSON.stringify(auth);
+  const script = [
+    "@echo off",
+    "setlocal",
+    `echo %*>\"${logPath}\"`,
+    `echo ${authJson}>\"%CODEX_HOME%\\auth.json\"`,
+    "exit /b 0",
+    "",
+  ].join("\r\n");
+
+  fs.writeFileSync(path.join(binDir, "codex.cmd"), script, "utf-8");
 }
 
 // ─── Meta ────────────────────────────────────────────────────
@@ -131,6 +146,105 @@ test("unknown command shows error", () => {
   const home = tmpHome();
   const r = cli("nonexistent", home);
   assert.notEqual(r.code, 0);
+});
+
+// ─── add ─────────────────────────────────────────────────────
+
+test("add: uses browser login by default", () => {
+  const home = tmpHome();
+  const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "cas-cli-bin-"));
+  const logPath = path.join(home, "codex-login-args.txt");
+  const auth = makeAuth("device@example.com", "plus");
+  writeFakeCodexCommand(binDir, { auth, logPath });
+
+  const r = cli("add device", home, {
+    env: {
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+    },
+  });
+
+  assert.equal(r.code, 0);
+  assert.ok(r.stdout.includes('Account "device" was saved'));
+  assert.equal(fs.readFileSync(logPath, "utf-8").trim(), "login");
+
+  const saved = readJson(path.join(home, "auth_device.json"));
+  assert.equal(saved.tokens.refresh_token, auth.tokens.refresh_token);
+});
+
+test("add: uses device auth only when explicitly enabled", () => {
+  const home = tmpHome();
+  const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "cas-cli-bin-"));
+  const logPath = path.join(home, "codex-login-args.txt");
+  const auth = makeAuth("device@example.com", "plus");
+  writeFakeCodexCommand(binDir, { auth, logPath });
+
+  const r = cli("add device --device-auth", home, {
+    env: {
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+    },
+  });
+
+  assert.equal(r.code, 0);
+  assert.ok(r.stdout.includes('Account "device" was saved'));
+  assert.equal(fs.readFileSync(logPath, "utf-8").trim(), "login --device-auth");
+});
+
+test("add: existing account only accepts relogin for the same identity", () => {
+  const home = tmpHome();
+  const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "cas-cli-bin-"));
+  const logPath = path.join(home, "codex-login-args.txt");
+  const original = {
+    ...makeAuth("work@example.com", "plus"),
+    tokens: {
+      ...makeAuth("work@example.com", "plus").tokens,
+      refresh_token: undefined,
+    },
+  };
+  const different = makeAuth("personal@example.com", "pro");
+  writeJson(path.join(home, "auth_work.json"), original);
+  writeFakeCodexCommand(binDir, { auth: different, logPath });
+
+  const r = cli("add work", home, {
+    env: {
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+    },
+  });
+
+  assert.equal(r.code, 0);
+  assert.ok(r.stdout.includes("belongs to a different account"));
+  assert.ok(r.stdout.includes("work@example.com"));
+  assert.ok(r.stdout.includes("personal@example.com"));
+
+  const saved = readJson(path.join(home, "auth_work.json"));
+  assert.equal(saved.tokens.account_id, original.tokens.account_id);
+});
+
+test("add: existing account accepts relogin for the same identity", () => {
+  const home = tmpHome();
+  const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "cas-cli-bin-"));
+  const logPath = path.join(home, "codex-login-args.txt");
+  const original = {
+    ...makeAuth("work@example.com", "plus"),
+    tokens: {
+      ...makeAuth("work@example.com", "plus").tokens,
+      refresh_token: undefined,
+    },
+  };
+  const refreshed = makeAuth("work@example.com", "plus", { acctId: original.tokens.account_id });
+  writeJson(path.join(home, "auth_work.json"), original);
+  writeFakeCodexCommand(binDir, { auth: refreshed, logPath });
+
+  const r = cli("add work", home, {
+    env: {
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+    },
+  });
+
+  assert.equal(r.code, 0);
+  assert.ok(r.stdout.includes('Account "work" was saved'));
+
+  const saved = readJson(path.join(home, "auth_work.json"));
+  assert.equal(saved.tokens.refresh_token, refreshed.tokens.refresh_token);
 });
 
 // ─── list ────────────────────────────────────────────────────
