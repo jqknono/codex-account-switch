@@ -520,10 +520,16 @@ export function registerCommands(
         return;
       }
 
+      const loginMethod = await promptLoginMethod(
+        `Add account "${name.trim()}". Use device auth for this login?`,
+        "Login"
+      );
+      if (loginMethod === "cancel") return;
+
       const loginState = exitProviderModeForLogin();
       if (!loginState) return;
 
-      const completed = await runCodexLogin();
+      const completed = await runCodexLogin({ useDeviceAuth: loginMethod === "device-auth" });
       if (!completed) {
         restoreProviderModeAfterFailedLogin(loginState.previousSelection, loginState.switched);
         return;
