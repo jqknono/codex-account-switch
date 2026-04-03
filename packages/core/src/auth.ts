@@ -88,11 +88,10 @@ export function hasAccountAuthTokens(auth: AuthFile | null | undefined): boolean
   return typeof auth.tokens?.access_token === "string" && auth.tokens.access_token.trim().length > 0;
 }
 
-export function getTokenExpiry(auth: AuthFile): Date | null {
-  const accessToken = auth.tokens?.access_token;
-  if (!accessToken) return null;
+function getJwtExpiry(token: string | null | undefined): Date | null {
+  if (!token) return null;
   try {
-    const decoded = jwtDecode<{ exp?: number }>(accessToken);
+    const decoded = jwtDecode<{ exp?: number }>(token);
     if (decoded.exp) {
       return new Date(decoded.exp * 1000);
     }
@@ -102,14 +101,7 @@ export function getTokenExpiry(auth: AuthFile): Date | null {
   return null;
 }
 
-export function isTokenExpired(auth: AuthFile): boolean {
-  const expiry = getTokenExpiry(auth);
-  if (!expiry) return true;
-  return expiry.getTime() < Date.now();
-}
-
-export function formatTokenExpiry(auth: AuthFile): string {
-  const expiry = getTokenExpiry(auth);
+function formatExpiry(expiry: Date | null): string {
   if (!expiry) return "unknown";
   const now = Date.now();
   const diff = expiry.getTime() - now;
@@ -126,6 +118,28 @@ export function formatTokenExpiry(auth: AuthFile): string {
   const h = Math.floor(m / 60);
   if (h < 24) return `expires in ${h}h${m % 60}m`;
   return `expires in ${Math.floor(h / 24)}d${h % 24}h`;
+}
+
+export function getTokenExpiry(auth: AuthFile): Date | null {
+  return getJwtExpiry(auth.tokens?.access_token);
+}
+
+export function getRefreshTokenExpiry(auth: AuthFile): Date | null {
+  return getJwtExpiry(auth.tokens?.refresh_token);
+}
+
+export function isTokenExpired(auth: AuthFile): boolean {
+  const expiry = getTokenExpiry(auth);
+  if (!expiry) return true;
+  return expiry.getTime() < Date.now();
+}
+
+export function formatTokenExpiry(auth: AuthFile): string {
+  return formatExpiry(getTokenExpiry(auth));
+}
+
+export function formatRefreshTokenExpiry(auth: AuthFile): string {
+  return formatExpiry(getRefreshTokenExpiry(auth));
 }
 
 export function findMatchingNamedAuthName(auth: AuthFile | null | undefined): string | null {

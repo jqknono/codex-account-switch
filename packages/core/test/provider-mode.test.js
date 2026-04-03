@@ -23,6 +23,12 @@ function writeText(filePath, value) {
   fs.writeFileSync(filePath, value, "utf-8");
 }
 
+function jwt(payload) {
+  const header = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString("base64url");
+  const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  return `${header}.${body}.fakesig`;
+}
+
 function makeAccountAuth(accountId, refreshToken, accessToken = `access-${accountId}`) {
   return {
     auth_mode: "chatgpt",
@@ -93,6 +99,31 @@ function restoreEnv() {
 
 test.afterEach(() => {
   restoreEnv();
+});
+
+test("refresh token expiry helpers decode JWT refresh tokens", () => {
+  const refreshExp = Math.floor(Date.now() / 1000) + 3 * 24 * 3600;
+  const auth = {
+    tokens: {
+      refresh_token: jwt({ exp: refreshExp }),
+    },
+  };
+
+  const expiry = core.getRefreshTokenExpiry(auth);
+  assert.ok(expiry instanceof Date);
+  assert.equal(expiry?.toISOString(), new Date(refreshExp * 1000).toISOString());
+  assert.match(core.formatRefreshTokenExpiry(auth), /^expires in 2d\d+h$|^expires in 3d0h$/);
+});
+
+test("refresh token expiry helpers do not guess opaque refresh tokens", () => {
+  const auth = {
+    tokens: {
+      refresh_token: "rt-opaque-token",
+    },
+  };
+
+  assert.equal(core.getRefreshTokenExpiry(auth), null);
+  assert.equal(core.formatRefreshTokenExpiry(auth), "unknown");
 });
 
 test("listModes returns only account when no provider files exist", () => {

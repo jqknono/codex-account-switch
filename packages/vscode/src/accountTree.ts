@@ -4,6 +4,8 @@ import {
   AccountInfo,
   getTokenExpiry,
   formatTokenExpiry,
+  getRefreshTokenExpiry,
+  formatRefreshTokenExpiry,
   queryQuota,
   QuotaInfo,
   WindowInfo,
@@ -168,6 +170,7 @@ export class AccountTreeItem extends vscode.TreeItem {
       const expiry = getTokenExpiry(account.auth);
       const tokenStatus = formatTokenExpiry(account.auth);
       tooltipLines.push(`Token: ${tokenStatus}`);
+      tooltipLines.push(`Refresh token: ${formatRefreshTokenExpiry(account.auth)}`);
 
       if (expiry && expiry.getTime() < Date.now()) {
         this.iconPath = new vscode.ThemeIcon(
@@ -366,6 +369,26 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
         tokenItem.iconPath = new vscode.ThemeIcon("pass", new vscode.ThemeColor("charts.green"));
       }
       items.push(tokenItem);
+
+      const refreshTokenStatus = formatRefreshTokenExpiry(account.auth);
+      const refreshTokenItem = new AccountDetailItem(
+        "Refresh token",
+        refreshTokenStatus,
+        refreshTokenStatus,
+        parent
+      );
+      const refreshExpiry = getRefreshTokenExpiry(account.auth);
+      if (refreshExpiry && refreshExpiry.getTime() < Date.now()) {
+        refreshTokenItem.iconPath = new vscode.ThemeIcon(
+          "error",
+          new vscode.ThemeColor("errorForeground")
+        );
+      } else if (refreshExpiry) {
+        refreshTokenItem.iconPath = new vscode.ThemeIcon("refresh", new vscode.ThemeColor("charts.green"));
+      } else {
+        refreshTokenItem.iconPath = new vscode.ThemeIcon("question");
+      }
+      items.push(refreshTokenItem);
     }
 
     if (quotaState?.loading) {
