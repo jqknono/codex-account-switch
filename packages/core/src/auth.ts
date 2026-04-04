@@ -15,6 +15,46 @@ function parseAuthJson(raw: string): AuthFile | null {
   }
 }
 
+function sanitizeAuthFile(auth: AuthFile): AuthFile {
+  const sanitized: AuthFile = {};
+
+  if (typeof auth.auth_mode === "string" && auth.auth_mode) {
+    sanitized.auth_mode = auth.auth_mode;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(auth, "OPENAI_API_KEY")) {
+    sanitized.OPENAI_API_KEY = auth.OPENAI_API_KEY ?? null;
+  }
+
+  if (auth.tokens && typeof auth.tokens === "object") {
+    const tokens = auth.tokens;
+    const sanitizedTokens: NonNullable<AuthFile["tokens"]> = {};
+
+    if (typeof tokens.id_token === "string") {
+      sanitizedTokens.id_token = tokens.id_token;
+    }
+    if (typeof tokens.access_token === "string") {
+      sanitizedTokens.access_token = tokens.access_token;
+    }
+    if (typeof tokens.refresh_token === "string") {
+      sanitizedTokens.refresh_token = tokens.refresh_token;
+    }
+    if (typeof tokens.account_id === "string") {
+      sanitizedTokens.account_id = tokens.account_id;
+    }
+
+    if (Object.keys(sanitizedTokens).length > 0) {
+      sanitized.tokens = sanitizedTokens;
+    }
+  }
+
+  if (typeof auth.last_refresh === "string" && auth.last_refresh) {
+    sanitized.last_refresh = auth.last_refresh;
+  }
+
+  return sanitized;
+}
+
 export function readCurrentAuth(): AuthFile | null {
   const p = getCodexAuthPath();
   if (!fs.existsSync(p)) {
@@ -29,7 +69,7 @@ export function readAuthFile(filePath: string): AuthFile | null {
 }
 
 export function writeAuthFile(filePath: string, auth: AuthFile): void {
-  fs.writeFileSync(filePath, JSON.stringify(auth, null, 2), "utf-8");
+  fs.writeFileSync(filePath, JSON.stringify(sanitizeAuthFile(auth), null, 2), "utf-8");
 }
 
 export function writeCurrentAuth(auth: AuthFile): void {
@@ -124,10 +164,6 @@ export function getTokenExpiry(auth: AuthFile): Date | null {
   return getJwtExpiry(auth.tokens?.access_token);
 }
 
-export function getRefreshTokenExpiry(auth: AuthFile): Date | null {
-  return getJwtExpiry(auth.tokens?.refresh_token);
-}
-
 export function isTokenExpired(auth: AuthFile): boolean {
   const expiry = getTokenExpiry(auth);
   if (!expiry) return true;
@@ -138,8 +174,13 @@ export function formatTokenExpiry(auth: AuthFile): string {
   return formatExpiry(getTokenExpiry(auth));
 }
 
-export function formatRefreshTokenExpiry(auth: AuthFile): string {
-  return formatExpiry(getRefreshTokenExpiry(auth));
+export function getRefreshTokenStatus(auth: AuthFile): "available" | "missing" {
+  const refreshToken = auth.tokens?.refresh_token;
+  return typeof refreshToken === "string" && refreshToken.trim().length > 0 ? "available" : "missing";
+}
+
+export function formatRefreshTokenStatus(auth: AuthFile): string {
+  return getRefreshTokenStatus(auth);
 }
 
 export function findMatchingNamedAuthName(auth: AuthFile | null | undefined): string | null {

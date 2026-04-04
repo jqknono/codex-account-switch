@@ -1,7 +1,7 @@
 import * as https from "https";
 import { AuthFile, IdTokenPayload, WindowInfo, QuotaInfo, QuotaUnavailableReason } from "./types";
 import { jwtDecode } from "jwt-decode";
-import { refreshAccessToken } from "./refresh";
+import { refreshAccessToken, applyRefreshResponse } from "./refresh";
 
 const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 
@@ -39,6 +39,8 @@ interface HttpErrorLike {
   message?: string;
 }
 
+type AuthUpdateHook = (auth: AuthFile) => void | Promise<void>;
+
 function httpsGet(url: string, headers: Record<string, string>): Promise<string> {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
@@ -71,7 +73,7 @@ function httpsGet(url: string, headers: Record<string, string>): Promise<string>
   });
 }
 
-async function fetchUsageApi(auth: AuthFile): Promise<UsageApiResponse> {
+async function fetchUsageApi(auth: AuthFile, onAuthUpdated?: AuthUpdateHook): Promise<UsageApiResponse> {
   const accessToken = auth.tokens?.access_token;
   const accountId = auth.tokens?.account_id ?? "";
 
@@ -93,23 +95,15 @@ async function fetchUsageApi(auth: AuthFile): Promise<UsageApiResponse> {
     const httpErr = err as { statusCode?: number };
     if (httpErr.statusCode === 401 || httpErr.statusCode === 403) {
       const refreshed = await refreshAccessToken(auth);
-      auth.tokens ??= {};
-      if (refreshed.access_token) {
-        auth.tokens.access_token = refreshed.access_token;
-      }
-      if (refreshed.refresh_token) {
-        auth.tokens.refresh_token = refreshed.refresh_token;
-      }
-      if (refreshed.id_token) {
-        auth.tokens.id_token = refreshed.id_token;
-      }
-      auth.last_refresh = new Date().toISOString();
+      applyRefreshResponse(auth, refreshed);
+      await onAuthUpdated?.(auth);
+      const refreshedAccessToken = auth.tokens?.access_token;
 
-      if (!auth.tokens.access_token) {
+      if (!refreshedAccessToken) {
         throw new Error("No access_token in auth file");
       }
 
-      headers.Authorization = `Bearer ${auth.tokens.access_token}`;
+      headers.Authorization = `Bearer ${refreshedAccessToken}`;
       const raw = await httpsGet(USAGE_URL, headers);
       return JSON.parse(raw) as UsageApiResponse;
     }
@@ -178,7 +172,7 @@ function parseUnavailableReason(auth: AuthFile, err: unknown): QuotaUnavailableR
   };
 }
 
-export async function getQuotaInfo(auth: AuthFile): Promise<QuotaInfo> {
+export async function getQuotaInfo(auth: AuthFile, onAuthUpdated?: AuthUpdateHook): Promise<QuotaInfo> {
   let email = "unknown";
   let tokenExpired = false;
 
@@ -206,7 +200,7 @@ export async function getQuotaInfo(auth: AuthFile): Promise<QuotaInfo> {
 
   let apiData: UsageApiResponse;
   try {
-    apiData = await fetchUsageApi(auth);
+    apiData = await fetchUsageApi(auth, onAuthUpdated);
   } catch (err: unknown) {
     return {
       plan: getPlanFromToken(auth),

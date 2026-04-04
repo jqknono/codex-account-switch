@@ -1,5 +1,8 @@
 import * as fs from "fs";
+import * as path from "path";
+import { createHash } from "crypto";
 import {
+  getCodexConfigDir,
   getCodexAuthPath,
   getNamedAuthPath,
   listNamedAuthFiles,
@@ -17,7 +20,7 @@ import {
   writeAuthFile,
   writeCurrentAuth,
 } from "./auth";
-import { refreshAndSave } from "./refresh";
+import { applyRefreshResponse, refreshAccessToken, refreshAndSave } from "./refresh";
 import { getQuotaInfo } from "./quota";
 import { AuthFile, AccountMeta, QuotaInfo, ExportData, CurrentSelection } from "./types";
 import { clearActiveModelProvider, getActiveModelProvider } from "./config";
@@ -45,6 +48,246 @@ export type QuotaQueryResult =
       message: string;
       modeName: string;
     };
+
+const QUOTA_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const ACCOUNT_LOCK_TIMEOUT_MS = 30 * 1000;
+const ACCOUNT_LOCK_RETRY_MS = 100;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getAccountLockKey(auth: AuthFile): string {
+  const basis =
+    auth.tokens?.account_id?.trim() ||
+    auth.tokens?.refresh_token?.trim() ||
+    getAccountIdentity(auth) ||
+    auth.tokens?.access_token?.trim() ||
+    "unknown";
+
+  return createHash("sha1").update(basis).digest("hex");
+}
+
+function getAccountLockLabel(auth: AuthFile): string {
+  return auth.tokens?.account_id?.trim() || extractMeta(auth).email || "unknown";
+}
+
+function getAccountLockPath(auth: AuthFile): string {
+  return path.join(getCodexConfigDir(), ".locks", `account-${getAccountLockKey(auth)}.lock`);
+}
+
+async function withAccountLock<T>(auth: AuthFile, fn: () => Promise<T>): Promise<T> {
+  const lockPath = getAccountLockPath(auth);
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+  const startedAt = Date.now();
+
+  while (true) {
+    let handle: number | null = null;
+
+    try {
+      handle = fs.openSync(lockPath, "wx");
+      fs.writeFileSync(handle, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }), "utf-8");
+      try {
+        return await fn();
+      } finally {
+        fs.closeSync(handle);
+        try {
+          fs.unlinkSync(lockPath);
+        } catch {
+          // Ignore lock cleanup races.
+        }
+      }
+    } catch (err) {
+      if (handle != null) {
+        fs.closeSync(handle);
+      }
+
+      const fileError = err as NodeJS.ErrnoException;
+      if (fileError.code !== "EEXIST") {
+        throw err;
+      }
+
+      if (Date.now() - startedAt >= ACCOUNT_LOCK_TIMEOUT_MS) {
+        throw new Error(`Timed out waiting for account lock for "${getAccountLockLabel(auth)}"`);
+      }
+
+      await sleep(ACCOUNT_LOCK_RETRY_MS);
+    }
+  }
+}
+
+function resolveQuotaTarget(
+  name?: string
+):
+  | {
+      kind: "ok";
+      auth: AuthFile;
+      authPath: string | null;
+      displayName: string;
+      shouldSyncCurrentAuth: boolean;
+    }
+  | {
+      kind: "not_found";
+      message: string;
+    }
+  | {
+      kind: "unsupported";
+      message: string;
+      modeName: string;
+    } {
+  if (name) {
+    const authPath = getNamedAuthPath(name);
+    if (!fs.existsSync(authPath)) {
+      return { kind: "not_found", message: `Account "${name}" does not exist.` };
+    }
+    const synced = syncCurrentAuthToSavedAccount();
+    const auth = synced?.name === name ? synced.auth : readNamedAuth(name);
+    if (!auth) {
+      return { kind: "not_found", message: "No auth information found." };
+    }
+    return {
+      kind: "ok",
+      auth,
+      authPath,
+      displayName: name,
+      shouldSyncCurrentAuth: detectCurrentName() === name,
+    };
+  }
+
+  const selection = getCurrentSelection();
+  if (selection.kind === "provider") {
+    return {
+      kind: "unsupported",
+      modeName: selection.name,
+      message: `Quota is unavailable in provider mode "${getModeDisplayName(selection.name)}". Switch to an account or pass an account name explicitly.`,
+    };
+  }
+
+  if (selection.kind === "account") {
+    const authPath = getNamedAuthPath(selection.name);
+    const synced = syncCurrentAuthToSavedAccount();
+    const auth = synced?.name === selection.name ? synced.auth : readNamedAuth(selection.name);
+    if (!auth) {
+      return { kind: "not_found", message: "No auth information found." };
+    }
+    return {
+      kind: "ok",
+      auth,
+      authPath,
+      displayName: selection.name,
+      shouldSyncCurrentAuth: true,
+    };
+  }
+
+  const auth = readCurrentAuth();
+  if (!auth) {
+    return { kind: "not_found", message: "No auth information found." };
+  }
+
+  return {
+    kind: "ok",
+    auth,
+    authPath: null,
+    displayName: "Current auth",
+    shouldSyncCurrentAuth: true,
+  };
+}
+
+function resolveRefreshTarget(
+  name?: string
+):
+  | {
+      kind: "ok";
+      auth: AuthFile;
+      authPath: string;
+      displayName: string;
+      shouldSyncCurrentAuth: boolean;
+    }
+  | {
+      kind: "error";
+      success: false;
+      message: string;
+      unsupported?: boolean;
+    } {
+  if (name) {
+    const authPath = getNamedAuthPath(name);
+    if (!fs.existsSync(authPath)) {
+      return { kind: "error", success: false, message: `Account "${name}" does not exist.` };
+    }
+    syncCurrentAuthToSavedAccount();
+    const auth = readNamedAuth(name);
+    if (!auth) {
+      return { kind: "error", success: false, message: "Auth file was not found." };
+    }
+    return {
+      kind: "ok",
+      auth,
+      authPath,
+      displayName: name,
+      shouldSyncCurrentAuth: detectCurrentName() === name,
+    };
+  }
+
+  const selection = getCurrentSelection();
+  if (selection.kind === "provider") {
+    return {
+      kind: "error",
+      success: false,
+      unsupported: true,
+      message: `Refresh is unavailable in provider mode "${getModeDisplayName(selection.name)}". Switch to an account or pass an account name explicitly.`,
+    };
+  }
+
+  if (selection.kind === "account") {
+    const authPath = getNamedAuthPath(selection.name);
+    syncCurrentAuthToSavedAccount();
+    const auth = readNamedAuth(selection.name);
+    if (!auth) {
+      return { kind: "error", success: false, message: "Auth file was not found." };
+    }
+    return {
+      kind: "ok",
+      auth,
+      authPath,
+      displayName: selection.name,
+      shouldSyncCurrentAuth: true,
+    };
+  }
+
+  const authPath = getCodexAuthPath();
+  if (!fs.existsSync(authPath)) {
+    return { kind: "error", success: false, message: "Auth file was not found." };
+  }
+  const auth = readCurrentAuth();
+  if (!auth) {
+    return { kind: "error", success: false, message: "Auth file was not found." };
+  }
+  return {
+    kind: "ok",
+    auth,
+    authPath,
+    displayName: "Current auth",
+    shouldSyncCurrentAuth: false,
+  };
+}
+
+function shouldRefreshBeforeQuota(auth: AuthFile): boolean {
+  const refreshToken = auth.tokens?.refresh_token;
+  if (typeof refreshToken !== "string" || refreshToken.trim().length === 0) {
+    return false;
+  }
+
+  if (!auth.last_refresh) {
+    return true;
+  }
+
+  const lastRefreshTime = Date.parse(auth.last_refresh);
+  if (Number.isNaN(lastRefreshTime)) {
+    return true;
+  }
+
+  return Date.now() - lastRefreshTime >= QUOTA_REFRESH_INTERVAL_MS;
+}
 
 function getSavedAccountsSnapshot(): Array<{ name: string; meta: AccountMeta | null; auth: AuthFile | null }> {
   return listNamedAuthFiles().map((name) => {
@@ -250,55 +493,40 @@ export function getCurrentAccount(): { name: string | null; meta: AccountMeta | 
 }
 
 export async function queryQuota(name?: string): Promise<QuotaQueryResult> {
-  let auth: AuthFile | null;
-  let authPath: string | null = null;
-  let displayName: string;
-  let shouldSyncCurrentAuth = false;
-
-  if (name) {
-    authPath = getNamedAuthPath(name);
-    if (!fs.existsSync(authPath)) {
-      return { kind: "not_found", message: `Account "${name}" does not exist.` };
-    }
-    const synced = syncCurrentAuthToSavedAccount();
-    auth = synced?.name === name ? synced.auth : readNamedAuth(name);
-    displayName = name;
-    shouldSyncCurrentAuth = detectCurrentName() === name;
-  } else {
-    const selection = getCurrentSelection();
-    if (selection.kind === "provider") {
-      return {
-        kind: "unsupported",
-        modeName: selection.name,
-        message: `Quota is unavailable in provider mode "${getModeDisplayName(selection.name)}". Switch to an account or pass an account name explicitly.`,
-      };
-    }
-
-    if (selection.kind === "account") {
-      authPath = getNamedAuthPath(selection.name);
-      const synced = syncCurrentAuthToSavedAccount();
-      auth = synced?.name === selection.name ? synced.auth : readNamedAuth(selection.name);
-      displayName = selection.name;
-      shouldSyncCurrentAuth = true;
-    } else {
-      auth = readCurrentAuth();
-      displayName = "Current auth";
-    }
+  const initialTarget = resolveQuotaTarget(name);
+  if (initialTarget.kind !== "ok") {
+    return initialTarget;
   }
 
-  if (!auth) {
-    return { kind: "not_found", message: "No auth information found." };
-  }
-
-  const authBefore = JSON.stringify(auth);
-  const info = await getQuotaInfo(auth);
-  if (authPath && JSON.stringify(auth) !== authBefore) {
-    writeAuthFile(authPath, auth);
-    if (shouldSyncCurrentAuth) {
-      writeCurrentAuth(auth);
+  return withAccountLock(initialTarget.auth, async () => {
+    const target = resolveQuotaTarget(name);
+    if (target.kind !== "ok") {
+      return target;
     }
-  }
-  return { kind: "ok", displayName, info };
+
+    const { auth, authPath, displayName, shouldSyncCurrentAuth } = target;
+    const persistUpdatedAuth = async (): Promise<void> => {
+      if (authPath) {
+        writeAuthFile(authPath, auth);
+      }
+      if (!authPath || shouldSyncCurrentAuth) {
+        writeCurrentAuth(auth);
+      }
+    };
+
+    const authBefore = JSON.stringify(auth);
+    if (shouldRefreshBeforeQuota(auth)) {
+      const refreshed = await refreshAccessToken(auth);
+      applyRefreshResponse(auth, refreshed);
+      await persistUpdatedAuth();
+    }
+
+    const info = await getQuotaInfo(auth, persistUpdatedAuth);
+    if (JSON.stringify(auth) !== authBefore) {
+      await persistUpdatedAuth();
+    }
+    return { kind: "ok", displayName, info };
+  });
 }
 
 export async function refreshAccount(name?: string): Promise<{
@@ -308,63 +536,40 @@ export async function refreshAccount(name?: string): Promise<{
   lastRefresh?: string;
   unsupported?: boolean;
 }> {
-  let authPath: string;
-  let displayName: string;
-  let shouldSyncCurrentAuth = false;
+  const initialTarget = resolveRefreshTarget(name);
+  if (initialTarget.kind !== "ok") {
+    return initialTarget;
+  }
 
-  if (name) {
-    authPath = getNamedAuthPath(name);
-    if (!fs.existsSync(authPath)) {
-      return { success: false, message: `Account "${name}" does not exist.` };
+  return withAccountLock(initialTarget.auth, async () => {
+    const target = resolveRefreshTarget(name);
+    if (target.kind !== "ok") {
+      return target;
     }
-    syncCurrentAuthToSavedAccount();
-    displayName = name;
-    shouldSyncCurrentAuth = detectCurrentName() === name;
-  } else {
-    const selection = getCurrentSelection();
-    if (selection.kind === "provider") {
+
+    const { authPath, displayName, shouldSyncCurrentAuth } = target;
+
+    try {
+      const updated = await refreshAndSave(authPath);
+
+      if (shouldSyncCurrentAuth) {
+        writeCurrentAuth(updated);
+      }
+
+      const meta = extractMeta(updated);
+      return {
+        success: true,
+        message: `Token for "${displayName}" was refreshed`,
+        meta,
+        lastRefresh: updated.last_refresh,
+      };
+    } catch (err) {
       return {
         success: false,
-        unsupported: true,
-        message: `Refresh is unavailable in provider mode "${getModeDisplayName(selection.name)}". Switch to an account or pass an account name explicitly.`,
+        message: `Token refresh failed for "${displayName}": ${err instanceof Error ? err.message : err}`,
       };
     }
-
-    if (selection.kind === "account") {
-      authPath = getNamedAuthPath(selection.name);
-      syncCurrentAuthToSavedAccount();
-      displayName = selection.name;
-      shouldSyncCurrentAuth = true;
-    } else {
-      authPath = getCodexAuthPath();
-      displayName = "Current auth";
-    }
-  }
-
-  if (!fs.existsSync(authPath)) {
-    return { success: false, message: "Auth file was not found." };
-  }
-
-  try {
-    const updated = await refreshAndSave(authPath);
-
-    if (shouldSyncCurrentAuth) {
-      writeCurrentAuth(updated);
-    }
-
-    const meta = extractMeta(updated);
-    return {
-      success: true,
-      message: `Token for "${displayName}" was refreshed`,
-      meta,
-      lastRefresh: updated.last_refresh,
-    };
-  } catch (err) {
-    return {
-      success: false,
-      message: `Token refresh failed: ${err instanceof Error ? err.message : err}`,
-    };
-  }
+  });
 }
 
 export function exportAccounts(names?: string[]): ExportData {
@@ -404,7 +609,7 @@ export function importAccounts(
         skipped.push(account.name);
         continue;
       }
-      fs.writeFileSync(dest, JSON.stringify(account.auth, null, 2), "utf-8");
+      writeAuthFile(dest, account.auth);
       imported.push(account.name);
     } catch (err) {
       errors.push(`${account.name}: ${err instanceof Error ? err.message : String(err)}`);

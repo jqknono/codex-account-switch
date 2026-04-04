@@ -28,11 +28,11 @@ function jwt(payload) {
   return `${h}.${b}.fakesig`;
 }
 
-function makeAuth(email, plan, { expired = false, acctId } = {}) {
+function makeAuth(email, plan, { expired = false, acctId, refreshToken = `rt-${email}` } = {}) {
   const exp = expired
     ? Math.floor(Date.now() / 1000) - 3600
     : Math.floor(Date.now() / 1000) + 3600;
-  return {
+  const auth = {
     auth_mode: "chatgpt",
     OPENAI_API_KEY: null,
     tokens: {
@@ -44,10 +44,12 @@ function makeAuth(email, plan, { expired = false, acctId } = {}) {
         "https://api.openai.com/auth": { chatgpt_plan_type: plan },
       }),
       access_token: jwt({ exp }),
-      refresh_token: `rt-${email}`,
+      refresh_token: refreshToken,
       account_id: acctId ?? `acct-${email.replace(/[@.]/g, "-")}`,
     },
   };
+
+  return auth;
 }
 
 function providerTableHeader(providerName) {
@@ -289,7 +291,8 @@ test("list: expired token shows expired status", () => {
   );
   const r = cli("list", home);
   assert.equal(r.code, 0);
-  assert.ok(r.stdout.includes("expired"));
+  assert.ok(r.stdout.includes("access: expired"));
+  assert.ok(r.stdout.includes("refresh: available"));
 });
 
 test("list: valid token shows expires info", () => {
@@ -300,7 +303,20 @@ test("list: valid token shows expires info", () => {
   );
   const r = cli("list", home);
   assert.equal(r.code, 0);
-  assert.ok(r.stdout.includes("expires in"));
+  assert.ok(r.stdout.includes("access: expires in"));
+  assert.ok(r.stdout.includes("refresh: available"));
+});
+
+test("list: missing refresh token shows missing status", () => {
+  const home = tmpHome();
+  writeJson(
+    path.join(home, "auth_valid.json"),
+    makeAuth("v@example.com", "plus", { refreshToken: "" })
+  );
+  const r = cli("list", home);
+  assert.equal(r.code, 0);
+  assert.ok(r.stdout.includes("access: expires in"));
+  assert.ok(r.stdout.includes("refresh: missing"));
 });
 
 test("list: in provider mode no account is marked current", () => {
@@ -618,6 +634,32 @@ test("status alias works for quota", () => {
   const r = cli("status ghost", home);
   assert.equal(r.code, 0);
   assert.ok(r.stdout.includes("does not exist"));
+});
+
+test("quota: prints access and refresh token status lines", () => {
+  const home = tmpHome();
+  writeJson(path.join(home, "auth_work.json"), {
+    auth_mode: "chatgpt",
+    OPENAI_API_KEY: null,
+    last_refresh: new Date().toISOString(),
+    tokens: {
+      id_token: jwt({
+        email: "work@example.com",
+        name: "work",
+        sub: "sub-work@example.com",
+        exp: Math.floor(Date.now() / 1000) + 3600,
+        "https://api.openai.com/auth": { chatgpt_plan_type: "plus" },
+      }),
+      refresh_token: "rt-work@example.com",
+      account_id: "acct-work",
+    },
+  });
+  writeJson(path.join(home, "auth.json"), readJson(path.join(home, "auth_work.json")));
+
+  const r = cli("quota", home);
+  assert.equal(r.code, 0);
+  assert.ok(r.stdout.includes("Access token:  unknown"));
+  assert.ok(r.stdout.includes("Refresh token: available"));
 });
 
 // ─── refresh ─────────────────────────────────────────────────

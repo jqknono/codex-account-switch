@@ -13,12 +13,14 @@ import {
   refreshAccount,
   exportAccounts,
   importAccounts,
-  getTokenExpiry,
+  AuthFile,
   formatTokenExpiry,
+  formatRefreshTokenStatus,
   ExportData,
   WindowInfo,
   getNamedAuthPath,
   readNamedAuth,
+  readCurrentAuth,
   getCurrentSelection,
   listModes,
   switchMode,
@@ -223,23 +225,75 @@ export function cmdList(): void {
     const paddedName = account.name.padEnd(maxNameLen);
     const email = account.meta?.email ?? "unknown";
     const plan = account.meta?.plan ?? "unknown";
-
-    let tokenStatus = "";
-    if (account.auth) {
-      const expiry = getTokenExpiry(account.auth);
-      if (expiry) {
-        const expired = expiry.getTime() < Date.now();
-        tokenStatus = expired
-          ? chalk.red(` [${formatTokenExpiry(account.auth)}]`)
-          : chalk.dim(` [${formatTokenExpiry(account.auth)}]`);
-      }
-    }
+    const tokenStatus = account.auth
+      ? `${formatTokenStatusTag("access", account.auth)}${formatTokenStatusTag("refresh", account.auth)}`
+      : "";
 
     console.log(
       `${marker}${chalk.bold(paddedName)}  ${chalk.dim(email)}  ${chalk.cyan(plan)}${tokenStatus}${tag}`
     );
   }
   console.log();
+}
+
+function colorTokenStatus(status: string): string {
+  if (status === "unknown" || status === "missing") {
+    return chalk.yellow(status);
+  }
+  if (status.startsWith("expired")) {
+    return chalk.red(status);
+  }
+  return chalk.green(status);
+}
+
+function getAccessTokenStatus(auth: AuthFile): string {
+  return formatTokenExpiry(auth);
+}
+
+function getRefreshTokenStatus(auth: AuthFile): string {
+  return formatRefreshTokenStatus(auth);
+}
+
+function formatTokenStatusTag(kind: "access" | "refresh", auth: AuthFile): string {
+  const status = kind === "access" ? getAccessTokenStatus(auth) : getRefreshTokenStatus(auth);
+  return ` [${kind}: ${colorTokenStatus(status)}]`;
+}
+
+function printTokenStatusLines(auth: AuthFile | null): void {
+  if (!auth) {
+    console.log(`  Access token: ${chalk.yellow("unknown")}`);
+    console.log(`  Refresh token: ${chalk.yellow("unknown")}`);
+    return;
+  }
+
+  console.log(`  Access token:  ${colorTokenStatus(getAccessTokenStatus(auth))}`);
+  console.log(`  Refresh token: ${colorTokenStatus(getRefreshTokenStatus(auth))}`);
+}
+
+function readQuotaDisplayAuth(name?: string): AuthFile | null {
+  if (name) {
+    return readNamedAuth(name);
+  }
+
+  const selection = getCurrentSelection();
+  if (selection.kind === "account") {
+    return readNamedAuth(selection.name);
+  }
+
+  return readCurrentAuth();
+}
+
+function getQuotaTargetLabel(name?: string): string {
+  if (name) {
+    return name;
+  }
+
+  const selection = getCurrentSelection();
+  if (selection.kind === "account") {
+    return selection.name;
+  }
+
+  return "Current auth";
 }
 
 export async function cmdAdd(name: string, options?: { deviceAuth?: boolean }): Promise<void> {
@@ -252,12 +306,9 @@ export async function cmdAdd(name: string, options?: { deviceAuth?: boolean }): 
     const refreshResult = await refreshAccount(name);
     if (refreshResult.success) {
       const refreshedAuth = readNamedAuth(name);
-      const tokenStatus = refreshedAuth ? formatTokenExpiry(refreshedAuth) : null;
 
       console.log(chalk.green(`✓ Account "${name}" already existed and its token was refreshed.`));
-      if (tokenStatus) {
-        console.log(chalk.dim(`  Remaining validity: ${tokenStatus}`));
-      }
+      printTokenStatusLines(refreshedAuth);
       return;
     }
 
@@ -425,7 +476,14 @@ function printWindowLine(label: string, w: WindowInfo): void {
 }
 
 export async function cmdQuota(name?: string): Promise<void> {
-  const result = await queryQuota(name);
+  let result: Awaited<ReturnType<typeof queryQuota>>;
+  try {
+    result = await queryQuota(name);
+  } catch (err) {
+    const targetLabel = getQuotaTargetLabel(name);
+    console.log(chalk.red(`Quota refresh failed for "${targetLabel}": ${err instanceof Error ? err.message : String(err)}`));
+    return;
+  }
 
   if (result.kind === "unsupported") {
     console.log(chalk.yellow(result.message));
@@ -438,16 +496,12 @@ export async function cmdQuota(name?: string): Promise<void> {
   }
 
   const { displayName, info } = result;
+  const auth = readQuotaDisplayAuth(name);
 
   console.log(chalk.bold(`\nAccount quota - ${displayName}\n`));
   console.log(`  Email: ${info.email}`);
   console.log(`  Plan:  ${chalk.cyan(info.plan)}`);
-
-  if (info.tokenExpired) {
-    console.log(`  Token: ${chalk.red("expired")}`);
-  } else {
-    console.log(`  Token: ${chalk.green("valid")}`);
-  }
+  printTokenStatusLines(auth);
 
   if (info.primaryWindow || info.secondaryWindow) console.log();
 
@@ -528,6 +582,7 @@ export async function cmdRefresh(name?: string): Promise<void> {
   if (result.lastRefresh) {
     console.log(chalk.dim(`  Time: ${result.lastRefresh}`));
   }
+  printTokenStatusLines(readQuotaDisplayAuth(name));
 }
 
 export function cmdExport(file?: string, names?: string[]): void {

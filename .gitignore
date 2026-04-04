@@ -4,3 +4,4 @@ dist/
 *.vsix
 .vscode-test/
 packages/core/tsconfig.tsbuildinfo
+.playwright-mcp/

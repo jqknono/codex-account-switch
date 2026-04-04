@@ -101,29 +101,38 @@ test.afterEach(() => {
   restoreEnv();
 });
 
-test("refresh token expiry helpers decode JWT refresh tokens", () => {
-  const refreshExp = Math.floor(Date.now() / 1000) + 3 * 24 * 3600;
+test("refresh token status reports available when a refresh token exists", () => {
   const auth = {
     tokens: {
-      refresh_token: jwt({ exp: refreshExp }),
+      refresh_token: jwt({ exp: Math.floor(Date.now() / 1000) + 3 * 24 * 3600 }),
     },
   };
 
-  const expiry = core.getRefreshTokenExpiry(auth);
-  assert.ok(expiry instanceof Date);
-  assert.equal(expiry?.toISOString(), new Date(refreshExp * 1000).toISOString());
-  assert.match(core.formatRefreshTokenExpiry(auth), /^expires in 2d\d+h$|^expires in 3d0h$/);
+  assert.equal(core.getRefreshTokenStatus(auth), "available");
+  assert.equal(core.formatRefreshTokenStatus(auth), "available");
 });
 
-test("refresh token expiry helpers do not guess opaque refresh tokens", () => {
+test("refresh token status reports missing when the refresh token is absent", () => {
   const auth = {
+    tokens: {
+      refresh_token: "",
+    },
+  };
+
+  assert.equal(core.getRefreshTokenStatus(auth), "missing");
+  assert.equal(core.formatRefreshTokenStatus(auth), "missing");
+});
+
+test("refresh token status ignores legacy refresh expiry fields", () => {
+  const auth = {
+    refresh_token_expires_at: new Date(Date.now() + 5 * 24 * 3600 * 1000).toISOString(),
     tokens: {
       refresh_token: "rt-opaque-token",
     },
   };
 
-  assert.equal(core.getRefreshTokenExpiry(auth), null);
-  assert.equal(core.formatRefreshTokenExpiry(auth), "unknown");
+  assert.equal(core.getRefreshTokenStatus(auth), "available");
+  assert.equal(core.formatRefreshTokenStatus(auth), "available");
 });
 
 test("listModes returns only account when no provider files exist", () => {
@@ -387,8 +396,14 @@ test("refreshAccount syncs the current auth before refreshing and writes the rot
   const codexHome = createTempCodexHome();
   process.env.CODEX_HOME = codexHome;
 
-  writeJson(path.join(codexHome, "auth_work.json"), makeAccountAuth("acct-work", "rt-stale", "access-stale"));
-  writeJson(path.join(codexHome, "auth.json"), makeAccountAuth("acct-work", "rt-current", "access-current"));
+  writeJson(path.join(codexHome, "auth_work.json"), {
+    ...makeAccountAuth("acct-work", "rt-stale", "access-stale"),
+    refresh_token_expires_at: "2099-01-01T00:00:00.000Z",
+  });
+  writeJson(path.join(codexHome, "auth.json"), {
+    ...makeAccountAuth("acct-work", "rt-current", "access-current"),
+    refresh_token_expires_at: "2099-01-01T00:00:00.000Z",
+  });
 
   const responses = [
     {
@@ -415,19 +430,168 @@ test("refreshAccount syncs the current auth before refreshing and writes the rot
   assert.equal(savedWork.tokens.access_token, "access-rotated");
   assert.equal(savedWork.tokens.id_token, "id-rotated");
   assert.ok(typeof savedWork.last_refresh === "string");
+  assert.equal("refresh_token_expires_at" in savedWork, false);
+  assert.equal(core.formatRefreshTokenStatus(savedWork), "available");
 
   const currentAuth = JSON.parse(fs.readFileSync(path.join(codexHome, "auth.json"), "utf-8"));
   assert.equal(currentAuth.tokens.refresh_token, "rt-rotated");
   assert.equal(currentAuth.tokens.access_token, "access-rotated");
   assert.equal(currentAuth.tokens.id_token, "id-rotated");
+  assert.equal("refresh_token_expires_at" in currentAuth, false);
 });
 
-test("queryQuota persists tokens refreshed during quota lookup back to the saved and current auth files", async () => {
+test("queryQuota proactively refreshes when last_refresh is missing", async () => {
   const codexHome = createTempCodexHome();
   process.env.CODEX_HOME = codexHome;
 
   writeJson(path.join(codexHome, "auth_work.json"), makeAccountAuth("acct-work", "rt-stale", "access-stale"));
   writeJson(path.join(codexHome, "auth.json"), makeAccountAuth("acct-work", "rt-current", "access-current"));
+
+  const responses = [
+    {
+      statusCode: 200,
+      body: JSON.stringify({
+        access_token: "access-rotated",
+        refresh_token: "rt-rotated",
+        id_token: "id-rotated",
+      }),
+      assertRequest: (options, body) => {
+        assert.equal(options.hostname, "auth.openai.com");
+        assert.match(body, /refresh_token=rt-current/);
+      },
+    },
+    {
+      statusCode: 200,
+      body: JSON.stringify({
+        plan_type: "plus",
+        rate_limit: {
+          primary_window: {
+            used_percent: 10,
+            reset_at: null,
+          },
+        },
+      }),
+      assertRequest: (options) => {
+        assert.equal(options.hostname, "chatgpt.com");
+        assert.equal(options.headers.Authorization, "Bearer access-rotated");
+        const savedWork = JSON.parse(fs.readFileSync(path.join(codexHome, "auth_work.json"), "utf-8"));
+        const currentAuth = JSON.parse(fs.readFileSync(path.join(codexHome, "auth.json"), "utf-8"));
+        assert.equal(savedWork.tokens.refresh_token, "rt-rotated");
+        assert.equal(currentAuth.tokens.refresh_token, "rt-rotated");
+      },
+    },
+  ];
+
+  await withMockedHttpsRequest(createQueuedHttpsMock(responses), async () => {
+    const result = await core.queryQuota("work");
+    assert.equal(result.kind, "ok");
+    assert.equal(result.info.plan, "plus");
+  });
+
+  const savedWork = JSON.parse(fs.readFileSync(path.join(codexHome, "auth_work.json"), "utf-8"));
+  assert.equal(savedWork.tokens.refresh_token, "rt-rotated");
+  assert.equal(savedWork.tokens.access_token, "access-rotated");
+  assert.equal(savedWork.tokens.id_token, "id-rotated");
+  assert.ok(typeof savedWork.last_refresh === "string");
+  assert.equal("refresh_token_expires_at" in savedWork, false);
+
+  const currentAuth = JSON.parse(fs.readFileSync(path.join(codexHome, "auth.json"), "utf-8"));
+  assert.equal(currentAuth.tokens.refresh_token, "rt-rotated");
+  assert.equal(currentAuth.tokens.access_token, "access-rotated");
+  assert.equal(currentAuth.tokens.id_token, "id-rotated");
+  assert.equal("refresh_token_expires_at" in currentAuth, false);
+});
+
+test("queryQuota proactively refreshes when last_refresh is older than one day", async () => {
+  const codexHome = createTempCodexHome();
+  process.env.CODEX_HOME = codexHome;
+
+  const staleRefresh = new Date(Date.now() - 25 * 3600 * 1000).toISOString();
+  writeJson(path.join(codexHome, "auth_work.json"), {
+    ...makeAccountAuth("acct-work", "rt-stale", "access-stale"),
+    last_refresh: staleRefresh,
+  });
+  writeJson(path.join(codexHome, "auth.json"), {
+    ...makeAccountAuth("acct-work", "rt-current", "access-current"),
+    last_refresh: staleRefresh,
+  });
+
+  const responses = [
+    {
+      statusCode: 200,
+      body: JSON.stringify({
+        access_token: "access-rotated",
+        refresh_token: "rt-rotated",
+      }),
+      assertRequest: (options, body) => {
+        assert.equal(options.hostname, "auth.openai.com");
+        assert.match(body, /refresh_token=rt-current/);
+      },
+    },
+    {
+      statusCode: 200,
+      body: JSON.stringify({
+        plan_type: "plus",
+      }),
+      assertRequest: (options) => {
+        assert.equal(options.hostname, "chatgpt.com");
+        assert.equal(options.headers.Authorization, "Bearer access-rotated");
+      },
+    },
+  ];
+
+  await withMockedHttpsRequest(createQueuedHttpsMock(responses), async () => {
+    const result = await core.queryQuota("work");
+    assert.equal(result.kind, "ok");
+  });
+});
+
+test("queryQuota skips proactive refresh when last_refresh is recent", async () => {
+  const codexHome = createTempCodexHome();
+  process.env.CODEX_HOME = codexHome;
+
+  const freshRefresh = new Date(Date.now() - 2 * 3600 * 1000).toISOString();
+  writeJson(path.join(codexHome, "auth_work.json"), {
+    ...makeAccountAuth("acct-work", "rt-work", "access-current"),
+    last_refresh: freshRefresh,
+  });
+  writeJson(path.join(codexHome, "auth.json"), {
+    ...makeAccountAuth("acct-work", "rt-work", "access-current"),
+    last_refresh: freshRefresh,
+  });
+
+  const responses = [
+    {
+      statusCode: 200,
+      body: JSON.stringify({
+        plan_type: "plus",
+      }),
+      assertRequest: (options) => {
+        assert.equal(options.hostname, "chatgpt.com");
+        assert.equal(options.headers.Authorization, "Bearer access-current");
+      },
+    },
+  ];
+
+  await withMockedHttpsRequest(createQueuedHttpsMock(responses), async () => {
+    const result = await core.queryQuota("work");
+    assert.equal(result.kind, "ok");
+  });
+});
+
+test("queryQuota refreshes on 401 and retries once when last_refresh is recent", async () => {
+  const codexHome = createTempCodexHome();
+  process.env.CODEX_HOME = codexHome;
+
+  const freshRefresh = new Date(Date.now() - 2 * 3600 * 1000).toISOString();
+  writeJson(path.join(codexHome, "auth_work.json"), {
+    ...makeAccountAuth("acct-work", "rt-stale", "access-stale"),
+    last_refresh: freshRefresh,
+  });
+  writeJson(path.join(codexHome, "auth.json"), {
+    ...makeAccountAuth("acct-work", "rt-current", "access-current"),
+    last_refresh: freshRefresh,
+  });
 
   const responses = [
     {
@@ -464,6 +628,10 @@ test("queryQuota persists tokens refreshed during quota lookup back to the saved
       assertRequest: (options) => {
         assert.equal(options.hostname, "chatgpt.com");
         assert.equal(options.headers.Authorization, "Bearer access-rotated");
+        const savedWork = JSON.parse(fs.readFileSync(path.join(codexHome, "auth_work.json"), "utf-8"));
+        const currentAuth = JSON.parse(fs.readFileSync(path.join(codexHome, "auth.json"), "utf-8"));
+        assert.equal(savedWork.tokens.refresh_token, "rt-rotated");
+        assert.equal(currentAuth.tokens.refresh_token, "rt-rotated");
       },
     },
   ];
@@ -479,11 +647,82 @@ test("queryQuota persists tokens refreshed during quota lookup back to the saved
   assert.equal(savedWork.tokens.access_token, "access-rotated");
   assert.equal(savedWork.tokens.id_token, "id-rotated");
   assert.ok(typeof savedWork.last_refresh === "string");
+  assert.equal("refresh_token_expires_at" in savedWork, false);
 
   const currentAuth = JSON.parse(fs.readFileSync(path.join(codexHome, "auth.json"), "utf-8"));
   assert.equal(currentAuth.tokens.refresh_token, "rt-rotated");
   assert.equal(currentAuth.tokens.access_token, "access-rotated");
   assert.equal(currentAuth.tokens.id_token, "id-rotated");
+  assert.equal("refresh_token_expires_at" in currentAuth, false);
+});
+
+test("queryQuota serializes concurrent refreshes for the same account", async () => {
+  const codexHome = createTempCodexHome();
+  process.env.CODEX_HOME = codexHome;
+
+  writeJson(path.join(codexHome, "auth_work.json"), makeAccountAuth("acct-work", "rt-current", "access-current"));
+  writeJson(path.join(codexHome, "auth.json"), makeAccountAuth("acct-work", "rt-current", "access-current"));
+
+  const responses = [
+    {
+      statusCode: 200,
+      body: JSON.stringify({
+        access_token: "access-rotated",
+        refresh_token: "rt-rotated",
+        id_token: "id-rotated",
+      }),
+      assertRequest: (options, body) => {
+        assert.equal(options.hostname, "auth.openai.com");
+        assert.match(body, /refresh_token=rt-current/);
+      },
+    },
+    {
+      statusCode: 200,
+      body: JSON.stringify({
+        plan_type: "plus",
+      }),
+      assertRequest: (options) => {
+        assert.equal(options.hostname, "chatgpt.com");
+        assert.equal(options.headers.Authorization, "Bearer access-rotated");
+      },
+    },
+    {
+      statusCode: 200,
+      body: JSON.stringify({
+        plan_type: "plus",
+      }),
+      assertRequest: (options) => {
+        assert.equal(options.hostname, "chatgpt.com");
+        assert.equal(options.headers.Authorization, "Bearer access-rotated");
+      },
+    },
+  ];
+
+  await withMockedHttpsRequest(createQueuedHttpsMock(responses), async () => {
+    const [first, second] = await Promise.all([core.queryQuota("work"), core.queryQuota("work")]);
+    assert.equal(first.kind, "ok");
+    assert.equal(second.kind, "ok");
+  });
+
+  const savedWork = JSON.parse(fs.readFileSync(path.join(codexHome, "auth_work.json"), "utf-8"));
+  assert.equal(savedWork.tokens.refresh_token, "rt-rotated");
+  assert.equal(savedWork.tokens.access_token, "access-rotated");
+});
+
+test("writeAuthFile strips legacy refresh_token_expires_at fields", () => {
+  const codexHome = createTempCodexHome();
+  process.env.CODEX_HOME = codexHome;
+
+  const authPath = path.join(codexHome, "auth_work.json");
+  core.writeAuthFile(authPath, {
+    ...makeAccountAuth("acct-work", "rt-work", "access-work"),
+    refresh_token_expires_at: "2099-01-01T00:00:00.000Z",
+    ignored_field: "ignored",
+  });
+
+  const saved = JSON.parse(fs.readFileSync(authPath, "utf-8"));
+  assert.equal(saved.refresh_token_expires_at, undefined);
+  assert.equal(saved.ignored_field, undefined);
 });
 
 test("switchMode removes leading blank lines from config.toml", () => {

@@ -2,6 +2,7 @@ import * as fs from "fs";
 import * as https from "https";
 import * as querystring from "querystring";
 import { AuthFile } from "./types";
+import { writeAuthFile } from "./auth";
 
 const TOKEN_URL = "https://auth.openai.com/oauth/token";
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -10,6 +11,21 @@ interface RefreshResponse {
   id_token?: string;
   access_token?: string;
   refresh_token?: string;
+}
+
+export function applyRefreshResponse(auth: AuthFile, result: RefreshResponse, now = Date.now()): void {
+  auth.tokens ??= {};
+  if (result.access_token) {
+    auth.tokens.access_token = result.access_token;
+  }
+  if (result.refresh_token) {
+    auth.tokens.refresh_token = result.refresh_token;
+  }
+  if (result.id_token) {
+    auth.tokens.id_token = result.id_token;
+  }
+
+  auth.last_refresh = new Date(now).toISOString();
 }
 
 function postForm(url: string, data: string): Promise<string> {
@@ -67,19 +83,8 @@ export async function refreshAccessToken(auth: AuthFile): Promise<RefreshRespons
 export async function refreshAndSave(authPath: string): Promise<AuthFile> {
   const auth = JSON.parse(fs.readFileSync(authPath, "utf-8")) as AuthFile;
   const result = await refreshAccessToken(auth);
+  applyRefreshResponse(auth, result);
 
-  auth.tokens ??= {};
-  if (result.access_token) {
-    auth.tokens.access_token = result.access_token;
-  }
-  if (result.refresh_token) {
-    auth.tokens.refresh_token = result.refresh_token;
-  }
-  if (result.id_token) {
-    auth.tokens.id_token = result.id_token;
-  }
-  auth.last_refresh = new Date().toISOString();
-
-  fs.writeFileSync(authPath, JSON.stringify(auth, null, 2), "utf-8");
+  writeAuthFile(authPath, auth);
   return auth;
 }
