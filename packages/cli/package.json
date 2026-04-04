@@ -1,6 +1,6 @@
 {
   "name": "codex-account-switch",
-  "version": "1.3.3",
+  "version": "1.3.4",
   "description": "Quick switch between multiple Codex CLI accounts",
   "main": "dist/index.js",
   "files": [
