@@ -9,6 +9,7 @@ import {
   QuotaInfo,
   WindowInfo,
 } from "@codex-account-switch/core";
+import { logInfo, logWarn } from "./log";
 
 interface QuotaState {
   info: QuotaInfo | null;
@@ -18,6 +19,7 @@ interface QuotaState {
 }
 
 export type AccountTreeNode = AccountTreeItem | AccountDetailItem;
+const LOG_PREFIX = "[codex-account-switch:vscode:accountTree]";
 
 function windowLabel(w: WindowInfo): string {
   if (w.windowSeconds == null) return "Quota";
@@ -211,13 +213,21 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
   }
 
   startAutoRefresh(context: vscode.ExtensionContext) {
-    void this.refreshQuota();
+    void this.refreshQuota().catch((error) => {
+      logWarn(LOG_PREFIX, "startup-refresh-failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
     this.restartTimer();
 
     this.configListener = vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration("codex-account-switch.quotaRefreshInterval")) {
         this.restartTimer();
-        void this.refreshQuota();
+        void this.refreshQuota().catch((error) => {
+          logWarn(LOG_PREFIX, "config-refresh-failed", {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
       }
     });
     context.subscriptions.push(this.configListener);
@@ -230,6 +240,12 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
     const accountsToRefresh = targetNames
       ? accounts.filter((account) => targetNames.has(account.name))
       : accounts;
+
+    logInfo(LOG_PREFIX, "refresh-start", {
+      targetName: targetName ?? null,
+      refreshVersion,
+      accounts: accountsToRefresh.map((account) => account.name),
+    });
 
     this.pruneQuotaState(accounts.map((account) => account.name));
     for (const account of accountsToRefresh) {
@@ -259,6 +275,14 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
             loading: false,
             updatedAt: result.kind === "ok" ? Date.now() : previous?.updatedAt ?? null,
           });
+          if (result.kind !== "ok") {
+            logWarn(LOG_PREFIX, "refresh-result-not-ok", {
+              account: account.name,
+              resultKind: result.kind,
+              message: "message" in result ? result.message : null,
+              refreshVersion,
+            });
+          }
         } catch {
           if (refreshVersion !== this.refreshVersion) {
             return;
@@ -271,6 +295,10 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
             loading: false,
             updatedAt: previous?.updatedAt ?? null,
           });
+          logWarn(LOG_PREFIX, "refresh-result-error", {
+            account: account.name,
+            refreshVersion,
+          });
         }
       })
     );
@@ -278,6 +306,10 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
     if (refreshVersion === this.refreshVersion) {
       this.syncRootItems();
       this._onDidChangeTreeData.fire(undefined);
+      logInfo(LOG_PREFIX, "refresh-finish", {
+        targetName: targetName ?? null,
+        refreshVersion,
+      });
     }
   }
 
@@ -318,7 +350,13 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
 
     const config = vscode.workspace.getConfiguration("codex-account-switch");
     const intervalSec = config.get<number>("quotaRefreshInterval", 300);
-    this.timer = setInterval(() => void this.refreshQuota(), intervalSec * 1000);
+    this.timer = setInterval(() => {
+      void this.refreshQuota().catch((error) => {
+        logWarn(LOG_PREFIX, "timer-refresh-failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    }, intervalSec * 1000);
   }
 
   private pruneQuotaState(validNames = listAccounts().map((account) => account.name)) {

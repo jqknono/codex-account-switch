@@ -1,9 +1,11 @@
 import * as vscode from "vscode";
-import { setNamedAuthDir } from "@codex-account-switch/core";
+import { DiagnosticLogLevel, setDiagnosticLogger, setNamedAuthDir } from "@codex-account-switch/core";
 import { AccountTreeProvider, AccountTreeNode } from "./accountTree";
 import { ProviderTreeProvider, ProviderTreeNode } from "./providerTree";
 import { StatusBarManager } from "./statusBar";
 import { registerCommands } from "./commands";
+import { disposeLogging, initializeLogging, logWarn, writeRawLog } from "./log";
+const LOG_PREFIX = "[codex-account-switch:vscode:extension]";
 
 function applyNamedAuthDirSetting() {
   const authDir = vscode.workspace
@@ -14,6 +16,10 @@ function applyNamedAuthDirSetting() {
 }
 
 export function activate(context: vscode.ExtensionContext) {
+  initializeLogging();
+  setDiagnosticLogger((level: DiagnosticLogLevel, line: string) => {
+    writeRawLog(level, line);
+  });
   applyNamedAuthDirSetting();
 
   const accountTree = new AccountTreeProvider();
@@ -33,8 +39,16 @@ export function activate(context: vscode.ExtensionContext) {
       applyNamedAuthDirSetting();
       accountTree.refresh();
       providerTree.refresh();
-      void accountTree.refreshQuota();
-      void statusBarManager.refreshNow();
+      void accountTree.refreshQuota().catch((error) => {
+        logWarn(LOG_PREFIX, "auth-directory-accountTree-refresh-failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+      void statusBarManager.refreshNow().catch((error) => {
+        logWarn(LOG_PREFIX, "auth-directory-statusBar-refresh-failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
     }
   });
 
@@ -54,5 +68,6 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 export function deactivate() {
-  // VS Code disposes registered subscriptions automatically.
+  setDiagnosticLogger(null);
+  disposeLogging();
 }

@@ -1,5 +1,7 @@
 import * as vscode from "vscode";
 import { queryQuota, getCurrentSelection, QuotaInfo, WindowInfo, getModeDisplayName } from "@codex-account-switch/core";
+import { logInfo, logWarn } from "./log";
+const LOG_PREFIX = "[codex-account-switch:vscode:statusBar]";
 
 function windowLabel(window: WindowInfo): string {
   if (window.windowSeconds == null) return "quota";
@@ -49,7 +51,11 @@ export class StatusBarManager implements vscode.Disposable {
   }
 
   startAutoRefresh(context: vscode.ExtensionContext) {
-    void this.refreshNow();
+    void this.refreshNow().catch((error) => {
+      logWarn(LOG_PREFIX, "startup-refresh-failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
     this.restartTimer();
 
     this.configListener = vscode.workspace.onDidChangeConfiguration((e) => {
@@ -69,11 +75,21 @@ export class StatusBarManager implements vscode.Disposable {
     }
     const config = vscode.workspace.getConfiguration("codex-account-switch");
     const intervalSec = config.get<number>("quotaRefreshInterval", 300);
-    this.timer = setInterval(() => void this.refreshNow(), intervalSec * 1000);
+    this.timer = setInterval(() => {
+      void this.refreshNow().catch((error) => {
+        logWarn(LOG_PREFIX, "timer-refresh-failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    }, intervalSec * 1000);
   }
 
   async refreshNow() {
     const selection = getCurrentSelection();
+    logInfo(LOG_PREFIX, "refresh-start", {
+      selectionKind: selection.kind,
+      name: "name" in selection ? selection.name : null,
+    });
 
     if (selection.kind === "provider") {
       const modeLabel = getModeDisplayName(selection.name);
@@ -94,6 +110,11 @@ export class StatusBarManager implements vscode.Disposable {
     try {
       const result = await queryQuota();
       if (result.kind !== "ok") {
+        logWarn(LOG_PREFIX, "refresh-result-not-ok", {
+          resultKind: result.kind,
+          message: result.message,
+          account: name,
+        });
         this.statusBarItem.text = `$(account) ${name}`;
         this.statusBarItem.tooltip = result.message;
         return;
@@ -124,7 +145,12 @@ export class StatusBarManager implements vscode.Disposable {
           ? `Account: ${name}\nEmail: ${info.email}\nPlan: ${info.plan}\nQuota: ${reason}`
           : `Account: ${name}\nEmail: ${info.email}\nPlan: ${info.plan}`;
       }
-    } catch {
+      logInfo(LOG_PREFIX, "refresh-finish", { account: name });
+    } catch (error) {
+      logWarn(LOG_PREFIX, "refresh-error", {
+        account: name,
+        error: error instanceof Error ? error.message : String(error),
+      });
       this.statusBarItem.text = `$(account) ${name}`;
       this.statusBarItem.tooltip = "Quota lookup failed";
     }

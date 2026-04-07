@@ -709,6 +709,112 @@ test("queryQuota serializes concurrent refreshes for the same account", async ()
   assert.equal(savedWork.tokens.access_token, "access-rotated");
 });
 
+test("queryQuota coalesces concurrent lookups for the same account", async () => {
+  const codexHome = createTempCodexHome();
+  process.env.CODEX_HOME = codexHome;
+
+  const freshRefresh = new Date(Date.now() - 2 * 3600 * 1000).toISOString();
+  writeJson(path.join(codexHome, "auth_work.json"), {
+    ...makeAccountAuth("acct-work", "rt-work", "access-current"),
+    last_refresh: freshRefresh,
+  });
+  writeJson(path.join(codexHome, "auth.json"), {
+    ...makeAccountAuth("acct-work", "rt-work", "access-current"),
+    last_refresh: freshRefresh,
+  });
+
+  let usageRequestCount = 0;
+  let releaseUsageResponse;
+
+  await withMockedHttpsRequest((options, handler) => {
+    assert.equal(options.hostname, "chatgpt.com");
+    usageRequestCount += 1;
+    assert.equal(usageRequestCount, 1, "concurrent quota lookups should share one usage request");
+
+    const response = new EventEmitter();
+    response.statusCode = 200;
+
+    const request = new EventEmitter();
+    request.setTimeout = () => request;
+    request.destroy = () => {};
+    request.write = () => {};
+    request.end = () => {
+      releaseUsageResponse = () => {
+        handler(response);
+        response.emit("data", JSON.stringify({ plan_type: "plus" }));
+        response.emit("end");
+      };
+    };
+
+    return request;
+  }, async () => {
+    const first = core.queryQuota("work");
+    const second = core.queryQuota("work");
+
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(typeof releaseUsageResponse, "function");
+
+    releaseUsageResponse();
+
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+    assert.equal(firstResult.kind, "ok");
+    assert.equal(secondResult.kind, "ok");
+  });
+
+  assert.equal(usageRequestCount, 1);
+});
+
+test("queryQuota removes a stale lock left by a dead process", async () => {
+  const codexHome = createTempCodexHome();
+  process.env.CODEX_HOME = codexHome;
+
+  const freshRefresh = new Date(Date.now() - 2 * 3600 * 1000).toISOString();
+  writeJson(path.join(codexHome, "auth_work.json"), {
+    ...makeAccountAuth("acct-work", "rt-work", "access-current"),
+    last_refresh: freshRefresh,
+  });
+  writeJson(path.join(codexHome, "auth.json"), {
+    ...makeAccountAuth("acct-work", "rt-work", "access-current"),
+    last_refresh: freshRefresh,
+  });
+
+  const locksDir = path.join(codexHome, ".locks");
+  fs.mkdirSync(locksDir, { recursive: true });
+  const staleLockPath = path.join(locksDir, "account-315faf43d55d5eea80186bb8a33c4abe6e2e05bd.lock");
+  writeJson(staleLockPath, {
+    pid: 999999,
+    startedAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+  });
+
+  await withMockedHttpsRequest(
+    createQueuedHttpsMock([
+      {
+        statusCode: 200,
+        body: JSON.stringify({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: 25,
+              reset_at: null,
+            },
+          },
+        }),
+        assertRequest: (options) => {
+          assert.equal(options.hostname, "chatgpt.com");
+          assert.equal(options.headers.Authorization, "Bearer access-current");
+        },
+      },
+    ]),
+    async () => {
+      const result = await core.queryQuota("work");
+      assert.equal(result.kind, "ok");
+      assert.equal(result.info.plan, "plus");
+    }
+  );
+
+  assert.equal(fs.existsSync(staleLockPath), false);
+});
+
 test("writeAuthFile strips legacy refresh_token_expires_at fields", () => {
   const codexHome = createTempCodexHome();
   process.env.CODEX_HOME = codexHome;

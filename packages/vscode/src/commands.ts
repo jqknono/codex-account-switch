@@ -28,6 +28,8 @@ import { AccountTreeProvider, AccountTreeItem, AccountTreeNode } from "./account
 import { ProviderDetailItem, ProviderTreeProvider } from "./providerTree";
 import { StatusBarManager } from "./statusBar";
 import { buildCompletedProviderProfile, readProviderProfileDraft } from "./providerProfile";
+import { logWarn, showLogs } from "./log";
+const LOG_PREFIX = "[codex-account-switch:vscode:commands]";
 
 function getUseDeviceAuthForLogin(): boolean {
   return vscode.workspace
@@ -46,8 +48,16 @@ function refreshAll(
 ) {
   accountTree.refresh();
   providerTree.refresh();
-  void accountTree.refreshQuota();
-  void statusBar.refreshNow();
+  void accountTree.refreshQuota().catch((error) => {
+    logWarn(LOG_PREFIX, "refresh-all-accountTree-failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
+  void statusBar.refreshNow().catch((error) => {
+    logWarn(LOG_PREFIX, "refresh-all-statusBar-failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
 }
 
 const DELETE_MODE_BUTTON: vscode.QuickInputButton = {
@@ -66,10 +76,7 @@ async function refreshTokenAndQuota(
   name?: string
 ) {
   accountTree.refresh();
-  await Promise.all([
-    accountTree.refreshQuota(name),
-    statusBar.refreshNow(),
-  ]);
+  await Promise.all([accountTree.refreshQuota(name), statusBar.refreshNow()]);
 }
 
 function getReloadBehavior(): "never" | "prompt" | "always" {
@@ -755,9 +762,32 @@ export function registerCommands(
         await vscode.window.withProgress(
           { location: vscode.ProgressLocation.Notification, title: "Refreshing token and quota..." },
           async () => {
-            const result = await refreshAccount(name);
+            let result;
+            try {
+              result = await refreshAccount(name);
+            } catch (error) {
+              logWarn(LOG_PREFIX, "refresh-token-command-failed", {
+                account: name ?? null,
+                error: error instanceof Error ? error.message : String(error),
+              });
+              vscode.window.showErrorMessage(
+                `Token refresh failed${name ? ` for "${name}"` : ""}: ${error instanceof Error ? error.message : error}`
+              );
+              return;
+            }
             if (result.success) {
-              await refreshTokenAndQuota(accountTree, statusBar, name);
+              try {
+                await refreshTokenAndQuota(accountTree, statusBar, name);
+              } catch (error) {
+                logWarn(LOG_PREFIX, "refresh-token-quota-followup-failed", {
+                  account: name ?? null,
+                  error: error instanceof Error ? error.message : String(error),
+                });
+                vscode.window.showWarningMessage(
+                  `Token refreshed${name ? ` for "${name}"` : ""}, but quota refresh failed: ${error instanceof Error ? error.message : error}`
+                );
+                return;
+              }
               vscode.window.showInformationMessage(`✓ ${result.message} and quota was refreshed`);
             } else if (result.unsupported) {
               vscode.window.showWarningMessage(result.message);
@@ -775,8 +805,20 @@ export function registerCommands(
     ),
 
     vscode.commands.registerCommand("codex-account-switch.refreshQuota", () => {
-      void accountTree.refreshQuota();
-      void statusBar.refreshNow();
+      void accountTree.refreshQuota().catch((error) => {
+        logWarn(LOG_PREFIX, "refresh-quota-command-accountTree-failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+      void statusBar.refreshNow().catch((error) => {
+        logWarn(LOG_PREFIX, "refresh-quota-command-statusBar-failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    }),
+
+    vscode.commands.registerCommand("codex-account-switch.showLogs", () => {
+      showLogs();
     }),
 
     vscode.commands.registerCommand("codex-account-switch.exportAccounts", async () => {

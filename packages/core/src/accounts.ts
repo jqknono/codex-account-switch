@@ -25,6 +25,7 @@ import { getQuotaInfo } from "./quota";
 import { AuthFile, AccountMeta, QuotaInfo, ExportData, CurrentSelection } from "./types";
 import { clearActiveModelProvider, getActiveModelProvider } from "./config";
 import { getModeDisplayName } from "./providers";
+import { writeDiagnosticLog } from "./log";
 
 export interface AccountInfo {
   name: string;
@@ -52,9 +53,17 @@ export type QuotaQueryResult =
 const QUOTA_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const ACCOUNT_LOCK_TIMEOUT_MS = 30 * 1000;
 const ACCOUNT_LOCK_RETRY_MS = 100;
+const STALE_ACCOUNT_LOCK_MS = 5 * 60 * 1000;
+const inflightQuotaQueries = new Map<string, Promise<QuotaQueryResult>>();
+const LOCK_LOG_PREFIX = "[codex-account-switch:lock]";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function logAccountLock(level: "info" | "warn" | "error", event: string, details: Record<string, unknown>): void {
+  const line = `${LOCK_LOG_PREFIX} ${event} ${JSON.stringify(details)}`;
+  writeDiagnosticLog(level, line);
 }
 
 function getAccountLockKey(auth: AuthFile): string {
@@ -76,10 +85,87 @@ function getAccountLockPath(auth: AuthFile): string {
   return path.join(getCodexConfigDir(), ".locks", `account-${getAccountLockKey(auth)}.lock`);
 }
 
-async function withAccountLock<T>(auth: AuthFile, fn: () => Promise<T>): Promise<T> {
+function readAccountLockDebugInfo(lockPath: string): Record<string, unknown> | null {
+  try {
+    const stat = fs.statSync(lockPath);
+    const raw = fs.readFileSync(lockPath, "utf-8");
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      parsed = { raw };
+    }
+
+    return {
+      ...(typeof parsed === "object" && parsed !== null ? parsed : { raw: String(parsed) }),
+      lockMtime: stat.mtime.toISOString(),
+      lockAgeMs: Math.max(0, Date.now() - stat.mtimeMs),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function isProcessRunning(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") {
+      return false;
+    }
+    return true;
+  }
+}
+
+function tryRemoveStaleAccountLock(
+  lockPath: string,
+  operation: string,
+  lockLabel: string,
+  lockKey: string
+): boolean {
+  const holder = readAccountLockDebugInfo(lockPath);
+  if (!holder) {
+    return false;
+  }
+
+  const holderPid = typeof holder.pid === "number" ? holder.pid : null;
+  const lockAgeMs = typeof holder.lockAgeMs === "number" ? holder.lockAgeMs : null;
+  const shouldRemove =
+    (holderPid != null && !isProcessRunning(holderPid)) ||
+    (lockAgeMs != null && lockAgeMs >= STALE_ACCOUNT_LOCK_MS);
+
+  if (!shouldRemove) {
+    return false;
+  }
+
+  try {
+    fs.unlinkSync(lockPath);
+    logAccountLock("warn", "stale-lock-removed", {
+      operation,
+      account: lockLabel,
+      lockKey,
+      lockPath,
+      holder,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function withAccountLock<T>(auth: AuthFile, operation: string, fn: () => Promise<T>): Promise<T> {
   const lockPath = getAccountLockPath(auth);
+  const lockKey = getAccountLockKey(auth);
+  const lockLabel = getAccountLockLabel(auth);
   fs.mkdirSync(path.dirname(lockPath), { recursive: true });
   const startedAt = Date.now();
+  let waitLogged = false;
 
   while (true) {
     let handle: number | null = null;
@@ -87,6 +173,16 @@ async function withAccountLock<T>(auth: AuthFile, fn: () => Promise<T>): Promise
     try {
       handle = fs.openSync(lockPath, "wx");
       fs.writeFileSync(handle, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }), "utf-8");
+      const waitedMs = Date.now() - startedAt;
+      if (waitedMs > 0) {
+        logAccountLock("info", "acquired", {
+          operation,
+          account: lockLabel,
+          lockKey,
+          lockPath,
+          waitedMs,
+        });
+      }
       try {
         return await fn();
       } finally {
@@ -95,6 +191,15 @@ async function withAccountLock<T>(auth: AuthFile, fn: () => Promise<T>): Promise
           fs.unlinkSync(lockPath);
         } catch {
           // Ignore lock cleanup races.
+        }
+        if (waitedMs > 0) {
+          logAccountLock("info", "released", {
+            operation,
+            account: lockLabel,
+            lockKey,
+            lockPath,
+            heldMs: Date.now() - startedAt,
+          });
         }
       }
     } catch (err) {
@@ -107,8 +212,35 @@ async function withAccountLock<T>(auth: AuthFile, fn: () => Promise<T>): Promise
         throw err;
       }
 
+      if (!waitLogged) {
+        waitLogged = true;
+        logAccountLock("warn", "waiting", {
+          operation,
+          account: lockLabel,
+          lockKey,
+          lockPath,
+          holder: readAccountLockDebugInfo(lockPath),
+        });
+      }
+
+      if (tryRemoveStaleAccountLock(lockPath, operation, lockLabel, lockKey)) {
+        waitLogged = false;
+        continue;
+      }
+
       if (Date.now() - startedAt >= ACCOUNT_LOCK_TIMEOUT_MS) {
-        throw new Error(`Timed out waiting for account lock for "${getAccountLockLabel(auth)}"`);
+        const holder = readAccountLockDebugInfo(lockPath);
+        logAccountLock("error", "timeout", {
+          operation,
+          account: lockLabel,
+          lockKey,
+          lockPath,
+          waitedMs: Date.now() - startedAt,
+          holder,
+        });
+        throw new Error(
+          `Timed out waiting for account lock for "${lockLabel}" (${operation}). Holder: ${JSON.stringify(holder)}`
+        );
       }
 
       await sleep(ACCOUNT_LOCK_RETRY_MS);
@@ -498,7 +630,18 @@ export async function queryQuota(name?: string): Promise<QuotaQueryResult> {
     return initialTarget;
   }
 
-  return withAccountLock(initialTarget.auth, async () => {
+  const lockKey = getAccountLockKey(initialTarget.auth);
+  const existingQuery = inflightQuotaQueries.get(lockKey);
+  if (existingQuery) {
+    logAccountLock("info", "reuse-inflight-quota", {
+      operation: "queryQuota",
+      account: getAccountLockLabel(initialTarget.auth),
+      lockKey,
+    });
+    return existingQuery;
+  }
+
+  const queryPromise: Promise<QuotaQueryResult> = withAccountLock(initialTarget.auth, "queryQuota", async () => {
     const target = resolveQuotaTarget(name);
     if (target.kind !== "ok") {
       return target;
@@ -525,8 +668,17 @@ export async function queryQuota(name?: string): Promise<QuotaQueryResult> {
     if (JSON.stringify(auth) !== authBefore) {
       await persistUpdatedAuth();
     }
-    return { kind: "ok", displayName, info };
+    return { kind: "ok" as const, displayName, info };
   });
+
+  inflightQuotaQueries.set(lockKey, queryPromise);
+  queryPromise.finally(() => {
+    if (inflightQuotaQueries.get(lockKey) === queryPromise) {
+      inflightQuotaQueries.delete(lockKey);
+    }
+  });
+
+  return queryPromise;
 }
 
 export async function refreshAccount(name?: string): Promise<{
@@ -541,35 +693,42 @@ export async function refreshAccount(name?: string): Promise<{
     return initialTarget;
   }
 
-  return withAccountLock(initialTarget.auth, async () => {
-    const target = resolveRefreshTarget(name);
-    if (target.kind !== "ok") {
-      return target;
-    }
-
-    const { authPath, displayName, shouldSyncCurrentAuth } = target;
-
-    try {
-      const updated = await refreshAndSave(authPath);
-
-      if (shouldSyncCurrentAuth) {
-        writeCurrentAuth(updated);
+  try {
+    return await withAccountLock(initialTarget.auth, "refreshAccount", async () => {
+      const target = resolveRefreshTarget(name);
+      if (target.kind !== "ok") {
+        return target;
       }
 
-      const meta = extractMeta(updated);
-      return {
-        success: true,
-        message: `Token for "${displayName}" was refreshed`,
-        meta,
-        lastRefresh: updated.last_refresh,
-      };
-    } catch (err) {
-      return {
-        success: false,
-        message: `Token refresh failed for "${displayName}": ${err instanceof Error ? err.message : err}`,
-      };
-    }
-  });
+      const { authPath, displayName, shouldSyncCurrentAuth } = target;
+
+      try {
+        const updated = await refreshAndSave(authPath);
+
+        if (shouldSyncCurrentAuth) {
+          writeCurrentAuth(updated);
+        }
+
+        const meta = extractMeta(updated);
+        return {
+          success: true,
+          message: `Token for "${displayName}" was refreshed`,
+          meta,
+          lastRefresh: updated.last_refresh,
+        };
+      } catch (err) {
+        return {
+          success: false,
+          message: `Token refresh failed for "${displayName}": ${err instanceof Error ? err.message : err}`,
+        };
+      }
+    });
+  } catch (err) {
+    return {
+      success: false,
+      message: `Token refresh failed: ${err instanceof Error ? err.message : err}`,
+    };
+  }
 }
 
 export function exportAccounts(names?: string[]): ExportData {

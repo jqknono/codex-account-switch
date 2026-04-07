@@ -2,7 +2,7 @@
   "name": "codex-account-switch-vscode",
   "displayName": "Codex Account Switch",
   "description": "Codex Account Switch - VS Code extension",
-  "version": "1.3.4",
+    "version": "1.3.6",
   "publisher": "techfetch-dev",
   "repository": {
     "type": "git",
@@ -139,6 +139,12 @@
         "title": "Reload Window",
         "category": "Codex Account Switch",
         "icon": "$(debug-restart)"
+      },
+      {
+        "command": "codex-account-switch.showLogs",
+        "title": "Show Logs",
+        "category": "Codex Account Switch",
+        "icon": "$(output)"
       },
       {
         "command": "codex-account-switch.copyProviderField",

@@ -120,6 +120,13 @@ function createVscodeMock(options) {
           name: "",
         };
       },
+      createOutputChannel() {
+        return {
+          appendLine() {},
+          show() {},
+          dispose() {},
+        };
+      },
       createTerminal() {
         return {
           show() {},
