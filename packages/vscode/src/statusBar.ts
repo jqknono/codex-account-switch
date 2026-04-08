@@ -42,9 +42,12 @@ export class StatusBarManager implements vscode.Disposable {
     this.updateVisibility();
   }
 
+  private isVisibleEnabled(): boolean {
+    return vscode.workspace.getConfiguration("codex-account-switch").get<boolean>("showStatusBar", true);
+  }
+
   private updateVisibility() {
-    const config = vscode.workspace.getConfiguration("codex-account-switch");
-    if (config.get<boolean>("showStatusBar", true)) {
+    if (this.isVisibleEnabled()) {
       this.statusBarItem.show();
     } else {
       this.statusBarItem.hide();
@@ -52,11 +55,13 @@ export class StatusBarManager implements vscode.Disposable {
   }
 
   startAutoRefresh(context: vscode.ExtensionContext) {
-    void this.refreshNow().catch((error) => {
-      logWarn(LOG_PREFIX, "startup-refresh-failed", {
-        error: error instanceof Error ? error.message : String(error),
+    if (this.isVisibleEnabled()) {
+      void this.refreshNow().catch((error) => {
+        logWarn(LOG_PREFIX, "startup-refresh-failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
       });
-    });
+    }
     this.restartTimer();
 
     this.configListener = vscode.workspace.onDidChangeConfiguration((e) => {
@@ -65,6 +70,14 @@ export class StatusBarManager implements vscode.Disposable {
       }
       if (e.affectsConfiguration("codex-account-switch.showStatusBar")) {
         this.updateVisibility();
+        this.restartTimer();
+        if (this.isVisibleEnabled()) {
+          void this.refreshNow().catch((error) => {
+            logWarn(LOG_PREFIX, "show-status-bar-refresh-failed", {
+              error: error instanceof Error ? error.message : String(error),
+            });
+          });
+        }
       }
     });
     context.subscriptions.push(this.configListener);
@@ -73,6 +86,10 @@ export class StatusBarManager implements vscode.Disposable {
   private restartTimer() {
     if (this.timer) {
       clearInterval(this.timer);
+    }
+    if (!this.isVisibleEnabled()) {
+      this.timer = undefined;
+      return;
     }
     const config = vscode.workspace.getConfiguration("codex-account-switch");
     const intervalSec = config.get<number>("quotaRefreshInterval", 300);
@@ -85,7 +102,11 @@ export class StatusBarManager implements vscode.Disposable {
     }, intervalSec * 1000);
   }
 
-  async refreshNow() {
+  async refreshNow(options?: { skipQuota?: boolean }) {
+    if (!this.isVisibleEnabled()) {
+      return;
+    }
+
     const selection = getSavedCurrentSelection();
     logInfo(LOG_PREFIX, "refresh-start", {
       selectionKind: selection.kind,
@@ -107,6 +128,12 @@ export class StatusBarManager implements vscode.Disposable {
     }
 
     const name = selection.name;
+    if (options?.skipQuota) {
+      this.statusBarItem.text = `$(account) ${name} [${selection.source}]`;
+      this.statusBarItem.tooltip = `Account: ${name}\nSource: ${selection.source}\nQuota refresh pending`;
+      return;
+    }
+
     const account = getSavedAccountEntry(name, selection.source);
     if (!account) {
       this.statusBarItem.text = `$(account) ${name}`;

@@ -255,16 +255,16 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
     context.subscriptions.push(this.configListener);
   }
 
-  async refreshQuota(targetName?: string): Promise<void> {
+  async refreshQuota(targetIds?: Iterable<string>): Promise<void> {
     const accounts = listSavedAccounts();
     const refreshVersion = ++this.refreshVersion;
-    const targetNames = targetName ? new Set([targetName]) : null;
-    const accountsToRefresh = targetNames
-      ? accounts.filter((account) => targetNames.has(account.id) && account.storageState === "ready")
+    const targetIdSet = targetIds ? new Set(targetIds) : null;
+    const accountsToRefresh = targetIdSet
+      ? accounts.filter((account) => targetIdSet.has(account.id) && account.storageState === "ready")
       : accounts.filter((account) => account.storageState === "ready");
 
     logInfo(LOG_PREFIX, "refresh-start", {
-      targetName: targetName ?? null,
+      targetIds: targetIdSet ? [...targetIdSet] : null,
       refreshVersion,
       accounts: accountsToRefresh.map((account) => account.name),
     });
@@ -329,7 +329,7 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
       this.syncRootItems();
       this._onDidChangeTreeData.fire(undefined);
       logInfo(LOG_PREFIX, "refresh-finish", {
-        targetName: targetName ?? null,
+        targetIds: targetIdSet ? [...targetIdSet] : null,
         refreshVersion,
       });
     }

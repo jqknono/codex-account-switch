@@ -92,7 +92,7 @@ test("storage target settings are contributed", () => {
   );
   assert.equal(
     properties["codex-account-switch.cloudTokenAutoUpdate"]?.default,
-    false
+    true
   );
   assert.equal(
     properties["codex-account-switch.cloudTokenAutoUpdateIntervalHours"]?.type,

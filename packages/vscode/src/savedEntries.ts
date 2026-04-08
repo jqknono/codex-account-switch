@@ -94,6 +94,7 @@ const CURRENT_SELECTION_KEY = "codex-account-switch.currentSavedSelection";
 const DEFAULT_CLOUD_TOKEN_AUTO_UPDATE_INTERVAL_HOURS = 24;
 const QUOTA_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
+const inflightCloudQuotaQueries = new Map<string, Promise<QuotaQueryResult>>();
 
 let extensionContext: vscode.ExtensionContext | null = null;
 
@@ -378,11 +379,12 @@ function shouldAutoPersistCloudTokens(auth: AuthFile): boolean {
     return false;
   }
 
-  if (!auth.last_cloud_token_sync) {
+  const lastCloudTokenSync = auth.last_cloud_token_sync;
+  if (typeof lastCloudTokenSync !== "string" || lastCloudTokenSync.length === 0) {
     return true;
   }
 
-  const lastSyncTime = Date.parse(auth.last_cloud_token_sync);
+  const lastSyncTime = Date.parse(lastCloudTokenSync);
   if (Number.isNaN(lastSyncTime)) {
     return true;
   }
@@ -605,6 +607,11 @@ export async function querySavedAccountQuota(account: SavedAccountInfo): Promise
     return core.queryQuota(account.name);
   }
 
+  const existingQuery = inflightCloudQuotaQueries.get(account.id);
+  if (existingQuery) {
+    return existingQuery;
+  }
+
   if (account.storageState !== "ready" || !account.auth) {
     return {
       kind: "not_found",
@@ -612,27 +619,39 @@ export async function querySavedAccountQuota(account: SavedAccountInfo): Promise
     };
   }
 
-  const auth = clone(account.auth);
-  const persist = async (mode: "manual" | "automatic"): Promise<void> => {
-    await persistCloudAccountAuth(account.name, auth, mode);
-    const current = getSavedCurrentSelection();
-    if (current.kind === "account" && current.source === "cloud" && current.name === account.name) {
-      writeCurrentAuth(auth);
+  const initialAuth = account.auth;
+  const queryPromise = (async (): Promise<QuotaQueryResult> => {
+    const auth = clone(initialAuth);
+    const persist = async (mode: "manual" | "automatic"): Promise<void> => {
+      await persistCloudAccountAuth(account.name, auth, mode);
+      const current = getSavedCurrentSelection();
+      if (current.kind === "account" && current.source === "cloud" && current.name === account.name) {
+        writeCurrentAuth(auth);
+      }
+    };
+
+    if (shouldRefreshBeforeQuota(auth)) {
+      const refreshed = await refreshAccessToken(auth);
+      applyRefreshResponse(auth, refreshed);
+      await persist("automatic");
     }
-  };
 
-  if (shouldRefreshBeforeQuota(auth)) {
-    const refreshed = await refreshAccessToken(auth);
-    applyRefreshResponse(auth, refreshed);
-    await persist("automatic");
-  }
+    const info = await getQuotaInfo(auth, () => persist("automatic"));
+    return {
+      kind: "ok",
+      displayName: account.name,
+      info,
+    };
+  })();
 
-  const info = await getQuotaInfo(auth, () => persist("automatic"));
-  return {
-    kind: "ok",
-    displayName: account.name,
-    info,
-  };
+  inflightCloudQuotaQueries.set(account.id, queryPromise);
+  queryPromise.finally(() => {
+    if (inflightCloudQuotaQueries.get(account.id) === queryPromise) {
+      inflightCloudQuotaQueries.delete(account.id);
+    }
+  });
+
+  return queryPromise;
 }
 
 export async function refreshSavedAccountEntry(account: SavedAccountInfo): Promise<{
