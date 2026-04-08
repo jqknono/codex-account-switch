@@ -2,7 +2,7 @@
   "name": "codex-account-switch-vscode",
   "displayName": "Codex Account Switch",
   "description": "Codex Account Switch - VS Code extension",
-    "version": "1.4.0",
+    "version": "1.4.1",
   "publisher": "techfetch-dev",
   "repository": {
     "type": "git",
@@ -147,6 +147,12 @@
         "icon": "$(output)"
       },
       {
+        "command": "codex-account-switch.unlockStorage",
+        "title": "Unlock Storage",
+        "category": "Codex Account Switch",
+        "icon": "$(unlock)"
+      },
+      {
         "command": "codex-account-switch.setStoragePassword",
         "title": "Set Storage Password",
         "category": "Codex Account Switch",
@@ -261,11 +267,6 @@
           "group": "inline@2"
         },
         {
-          "command": "codex-account-switch.removeAccount",
-          "when": "view == codexAccountSwitchAccounts && (viewItem == accountLocal || viewItem == accountCloud)",
-          "group": "inline@3"
-        },
-        {
           "command": "codex-account-switch.reloginAccount",
           "when": "view == codexAccountSwitchAccounts && (viewItem == accountLocal || viewItem == accountCloud)",
           "group": "context@1"
@@ -289,6 +290,11 @@
           "command": "codex-account-switch.moveAccountToLocal",
           "when": "view == codexAccountSwitchAccounts && viewItem == accountCloud",
           "group": "context@4"
+        },
+        {
+          "command": "codex-account-switch.unlockStorage",
+          "when": "view == codexAccountSwitchAccounts && viewItem == accountCloudLocked",
+          "group": "context@1"
         },
         {
           "command": "codex-account-switch.moveProviderToCloud",

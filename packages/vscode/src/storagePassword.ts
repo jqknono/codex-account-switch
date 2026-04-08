@@ -12,6 +12,8 @@ async function promptForPassword(prompt: string, placeHolder: string): Promise<s
   });
 }
 
+export type UnlockSavedAuthResult = "already-unlocked" | "unlocked" | "cancelled";
+
 export async function restoreSavedAuthPassphrase(
   context: vscode.ExtensionContext,
   options?: { promptIfMissing?: boolean; promptForLockedStorage?: boolean }
@@ -48,6 +50,18 @@ export async function ensureSavedAuthPassphrase(context: vscode.ExtensionContext
 
   const result = await promptAndStoreSavedAuthPassphrase(context, "set");
   return result.stored;
+}
+
+export async function unlockSavedAuthStorage(context: vscode.ExtensionContext): Promise<UnlockSavedAuthResult> {
+  if (getSavedAuthPassphrase()) {
+    return "already-unlocked";
+  }
+
+  const restored = await restoreSavedAuthPassphrase(context, {
+    promptIfMissing: true,
+    promptForLockedStorage: true,
+  });
+  return restored ? "unlocked" : "cancelled";
 }
 
 export async function promptAndStoreSavedAuthPassphrase(

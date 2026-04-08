@@ -159,7 +159,12 @@ export class AccountTreeItem extends vscode.TreeItem {
     }
 
     this.description = parts.join(" · ");
-    this.contextValue = account.source === "cloud" ? "accountCloud" : "accountLocal";
+    this.contextValue =
+      account.source === "cloud" && account.storageState === "locked"
+        ? "accountCloudLocked"
+        : account.source === "cloud"
+          ? "accountCloud"
+          : "accountLocal";
 
     if (account.isCurrent) {
       this.iconPath = new vscode.ThemeIcon("pass-filled", new vscode.ThemeColor("charts.green"));

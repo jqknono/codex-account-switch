@@ -17,6 +17,7 @@ import {
   ensureSavedAuthPassphrase,
   forgetSavedAuthPassphrase,
   promptAndStoreSavedAuthPassphrase,
+  unlockSavedAuthStorage,
 } from "./storagePassword";
 import {
   buildProviderProfileForSource,
@@ -172,6 +173,76 @@ function resolveAccountFromItem(item?: AccountTreeItem): SavedAccountInfo | unde
     return account;
   }
   return getSavedAccountEntry(account.name, "local") ?? getSavedAccountEntry(account.name, "cloud") ?? undefined;
+}
+
+async function unlockStorageIfNeeded(
+  context: vscode.ExtensionContext,
+  accountTree: AccountTreeProvider,
+  providerTree: ProviderTreeProvider,
+  statusBar: StatusBarManager
+): Promise<boolean> {
+  const result = await unlockSavedAuthStorage(context);
+  if (result === "cancelled") {
+    return false;
+  }
+  refreshAll(accountTree, providerTree, statusBar);
+  return true;
+}
+
+async function ensureAccountAvailable(
+  context: vscode.ExtensionContext,
+  accountTree: AccountTreeProvider,
+  providerTree: ProviderTreeProvider,
+  statusBar: StatusBarManager,
+  account: SavedAccountInfo,
+): Promise<SavedAccountInfo | undefined> {
+  if (account.storageState === "ready") {
+    return account;
+  }
+
+  if (account.storageState === "locked") {
+    const unlocked = await unlockStorageIfNeeded(context, accountTree, providerTree, statusBar);
+    if (!unlocked) {
+      return undefined;
+    }
+
+    const refreshed = getSavedAccountEntry(account.name, account.source);
+    if (refreshed?.storageState === "ready") {
+      return refreshed;
+    }
+
+    account = refreshed ?? account;
+  }
+
+  vscode.window.showErrorMessage(account.storageMessage ?? `Saved account "${account.name}" is unavailable.`);
+  return undefined;
+}
+
+async function ensureProviderAvailable(
+  context: vscode.ExtensionContext,
+  accountTree: AccountTreeProvider,
+  providerTree: ProviderTreeProvider,
+  statusBar: StatusBarManager,
+  provider: SavedProviderInfo,
+): Promise<SavedProviderInfo | undefined> {
+  if (!provider.locked) {
+    return provider;
+  }
+
+  const unlocked = await unlockStorageIfNeeded(context, accountTree, providerTree, statusBar);
+  if (!unlocked) {
+    return undefined;
+  }
+
+  const refreshed = getSavedProviderEntry(provider.name, provider.source);
+  if (refreshed && !refreshed.locked) {
+    return refreshed;
+  }
+
+  vscode.window.showErrorMessage(
+    (refreshed ?? provider).storageMessage ?? `Provider "${provider.name}" is unavailable.`
+  );
+  return undefined;
 }
 
 async function pickSavedAccount(item: AccountTreeItem | undefined, placeHolder: string): Promise<SavedAccountInfo | undefined> {
@@ -575,10 +646,10 @@ export function registerCommands(
     vscode.commands.registerCommand(
       "codex-account-switch.reloginAccount",
       async (item?: AccountTreeItem) => {
-        const account = await pickSavedAccount(item, "Select an account to re-login");
+        let account = await pickSavedAccount(item, "Select an account to re-login");
         if (!account) return;
-        if (account.storageState !== "ready") {
-          vscode.window.showErrorMessage(account.storageMessage ?? `Saved account "${account.name}" is unavailable.`);
+        account = await ensureAccountAvailable(context, accountTree, providerTree, statusBar, account);
+        if (!account) {
           return;
         }
 
@@ -675,8 +746,12 @@ export function registerCommands(
     vscode.commands.registerCommand(
       "codex-account-switch.useAccount",
       async (item?: AccountTreeItem) => {
-        const account = await pickSavedAccount(item, "Select an account to switch to");
+        let account = await pickSavedAccount(item, "Select an account to switch to");
         if (!account) return;
+        account = await ensureAccountAvailable(context, accountTree, providerTree, statusBar, account);
+        if (!account) {
+          return;
+        }
 
         const result = await useSavedAccountEntry(account);
         if (result.success) {
@@ -750,7 +825,20 @@ export function registerCommands(
       }
 
       if (picked.provider.locked) {
-        vscode.window.showErrorMessage(picked.provider.storageMessage ?? `Provider "${picked.provider.name}" is unavailable.`);
+        const provider = await ensureProviderAvailable(
+          context,
+          accountTree,
+          providerTree,
+          statusBar,
+          picked.provider
+        );
+        if (!provider) {
+          return;
+        }
+        picked.provider = provider;
+      }
+
+      if (picked.provider.locked) {
         return;
       }
 
@@ -781,8 +869,12 @@ export function registerCommands(
     vscode.commands.registerCommand(
       "codex-account-switch.refreshToken",
       async (item?: AccountTreeItem) => {
-        const account = await pickSavedAccount(item, "Select an account to refresh");
+        let account = await pickSavedAccount(item, "Select an account to refresh");
         if (!account) return;
+        account = await ensureAccountAvailable(context, accountTree, providerTree, statusBar, account);
+        if (!account) {
+          return;
+        }
 
         await vscode.window.withProgress(
           { location: vscode.ProgressLocation.Notification, title: "Refreshing token and quota..." },
@@ -830,8 +922,12 @@ export function registerCommands(
     ),
 
     vscode.commands.registerCommand("codex-account-switch.moveAccountToCloud", async (item?: AccountTreeItem) => {
-      const account = await pickSavedAccount(item, "Select a local account to move to cloud storage");
+      let account = await pickSavedAccount(item, "Select a local account to move to cloud storage");
       if (!account) return;
+      account = await ensureAccountAvailable(context, accountTree, providerTree, statusBar, account);
+      if (!account) {
+        return;
+      }
       if (!(await ensureSavedAuthPassphrase(context))) {
         vscode.window.showWarningMessage("Cloud storage requires a local storage password.");
         return;
@@ -846,8 +942,12 @@ export function registerCommands(
     }),
 
     vscode.commands.registerCommand("codex-account-switch.moveAccountToLocal", async (item?: AccountTreeItem) => {
-      const account = await pickSavedAccount(item, "Select a cloud account to move to local storage");
+      let account = await pickSavedAccount(item, "Select a cloud account to move to local storage");
       if (!account) return;
+      account = await ensureAccountAvailable(context, accountTree, providerTree, statusBar, account);
+      if (!account) {
+        return;
+      }
       const result = await moveSavedAccountEntry(account, "local");
       if (!result.success) {
         vscode.window.showErrorMessage(result.message);
@@ -858,8 +958,12 @@ export function registerCommands(
     }),
 
     vscode.commands.registerCommand("codex-account-switch.moveProviderToCloud", async (item?: ProviderTreeItem) => {
-      const provider = await pickSavedProvider(item, "Select a local provider to move to cloud storage");
+      let provider = await pickSavedProvider(item, "Select a local provider to move to cloud storage");
       if (!provider) return;
+      provider = await ensureProviderAvailable(context, accountTree, providerTree, statusBar, provider);
+      if (!provider) {
+        return;
+      }
       if (!(await ensureSavedAuthPassphrase(context))) {
         vscode.window.showWarningMessage("Cloud storage requires a local storage password.");
         return;
@@ -874,8 +978,12 @@ export function registerCommands(
     }),
 
     vscode.commands.registerCommand("codex-account-switch.moveProviderToLocal", async (item?: ProviderTreeItem) => {
-      const provider = await pickSavedProvider(item, "Select a cloud provider to move to local storage");
+      let provider = await pickSavedProvider(item, "Select a cloud provider to move to local storage");
       if (!provider) return;
+      provider = await ensureProviderAvailable(context, accountTree, providerTree, statusBar, provider);
+      if (!provider) {
+        return;
+      }
       const result = await moveSavedProviderEntry(provider, "local");
       if (!result.success) {
         vscode.window.showErrorMessage(result.message);
@@ -988,6 +1096,19 @@ export function registerCommands(
 
     vscode.commands.registerCommand("codex-account-switch.reloadWindow", async () => {
       await reloadWindow();
+    }),
+
+    vscode.commands.registerCommand("codex-account-switch.unlockStorage", async () => {
+      const result = await unlockSavedAuthStorage(context);
+      if (result === "cancelled") {
+        return;
+      }
+      refreshAll(accountTree, providerTree, statusBar);
+      vscode.window.showInformationMessage(
+        result === "already-unlocked"
+          ? "Saved auth storage is already unlocked on this machine."
+          : "Saved auth storage is unlocked on this machine."
+      );
     }),
 
     vscode.commands.registerCommand("codex-account-switch.setStoragePassword", async () => {

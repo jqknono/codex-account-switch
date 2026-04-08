@@ -54,6 +54,10 @@ test("storage password commands are contributed", () => {
   const byId = new Map(commands.map((command) => [command.command, command]));
 
   assert.equal(
+    byId.get("codex-account-switch.unlockStorage")?.title,
+    "Unlock Storage"
+  );
+  assert.equal(
     byId.get("codex-account-switch.setStoragePassword")?.title,
     "Set Storage Password"
   );
@@ -103,4 +107,35 @@ test("storage migration commands are contributed", () => {
     byId.get("codex-account-switch.moveProviderToLocal")?.title,
     "Move Provider To Local"
   );
+});
+
+test("account inline actions do not include remove", () => {
+  const contextMenus = manifest.contributes.menus["view/item/context"] ?? [];
+  const inlineAccountActions = contextMenus.filter(
+    (item) =>
+      item.when ===
+        "view == codexAccountSwitchAccounts && (viewItem == accountLocal || viewItem == accountCloud)" &&
+      typeof item.group === "string" &&
+      item.group.startsWith("inline@")
+  );
+
+  assert.deepEqual(
+    inlineAccountActions.map((item) => item.command).sort(),
+    [
+      "codex-account-switch.refreshToken",
+      "codex-account-switch.useAccount",
+    ]
+  );
+});
+
+test("locked cloud accounts expose unlock in the context menu", () => {
+  const contextMenus = manifest.contributes.menus["view/item/context"] ?? [];
+  const unlockMenuItem = contextMenus.find(
+    (item) =>
+      item.command === "codex-account-switch.unlockStorage" &&
+      item.when ===
+        "view == codexAccountSwitchAccounts && viewItem == accountCloudLocked"
+  );
+
+  assert.equal(unlockMenuItem?.group, "context@1");
 });

@@ -535,8 +535,160 @@ test("forget storage password removes the local secret and locks encrypted saved
           account: { name: "work" },
         });
 
-        assert.match(mocked.errorMessages.at(-1)?.message ?? "", /saved auth storage is locked/i);
+        assert.match(mocked.warningMessages.at(-1)?.message ?? "", /remains locked/i);
         assert.equal(mocked.secretState.has(STORAGE_SECRET_KEY), false);
+        assert.equal(fs.existsSync(path.join(codexHome, "auth.json")), false);
+
+        for (const subscription of context.subscriptions.reverse()) {
+          subscription?.dispose?.();
+        }
+        await waitForBackgroundWork();
+      })
+    );
+  } finally {
+    core.setSavedAuthPassphrase(null);
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+});
+
+test("unlock command restores access to locked cloud accounts", async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-storage-unlock-command-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  const authDir = path.join(tempRoot, "saved-auth");
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(authDir, { recursive: true });
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  try {
+    core.setSavedAuthPassphrase("unlock-passphrase");
+    const syncedStorage = {
+      version: 1,
+      accounts: {
+        "sync-user": core.serializeSavedValue("saved_auth", makeAuthFile("acct-sync"), {
+          requireEncryption: true,
+        }),
+      },
+      providers: {},
+    };
+    core.setSavedAuthPassphrase(null);
+
+    const mocked = createVscodeMock({
+      authDirectory: authDir,
+      syncedStorage,
+      inputBoxResponses: [undefined, "unlock-passphrase"],
+    });
+
+    await withDisabledIntervals(() =>
+      withSuccessfulHttps(async () => {
+        const extension = loadExtensionWithMockedVscode(mocked.vscode);
+        const context = createExtensionContext(mocked);
+        await extension.activate(context);
+
+        const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
+        const [lockedItem] = accountTreeView.treeDataProvider
+          .getChildren()
+          .filter((item) => item.account.name === "sync-user");
+
+        assert.equal(lockedItem.account.storageState, "locked");
+        assert.equal(lockedItem.contextValue, "accountCloudLocked");
+
+        await mocked.registeredCommands.get("codex-account-switch.unlockStorage")();
+
+        const [unlockedItem] = accountTreeView.treeDataProvider
+          .getChildren()
+          .filter((item) => item.account.name === "sync-user");
+
+        assert.equal(mocked.secretState.get(STORAGE_SECRET_KEY), "unlock-passphrase");
+        assert.equal(unlockedItem.account.storageState, "ready");
+        assert.match(
+          mocked.informationMessages.at(-1)?.message ?? "",
+          /saved auth storage is unlocked/i
+        );
+
+        for (const subscription of context.subscriptions.reverse()) {
+          subscription?.dispose?.();
+        }
+        await waitForBackgroundWork();
+      })
+    );
+  } finally {
+    core.setSavedAuthPassphrase(null);
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+});
+
+test("useAccount prompts again to unlock locked cloud auth after activation was skipped", async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-storage-unlock-use-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  const authDir = path.join(tempRoot, "saved-auth");
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(authDir, { recursive: true });
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  try {
+    core.setSavedAuthPassphrase("unlock-passphrase");
+    const syncedStorage = {
+      version: 1,
+      accounts: {
+        "sync-user": core.serializeSavedValue("saved_auth", makeAuthFile("acct-sync"), {
+          requireEncryption: true,
+        }),
+      },
+      providers: {},
+    };
+    core.setSavedAuthPassphrase(null);
+
+    const mocked = createVscodeMock({
+      authDirectory: authDir,
+      syncedStorage,
+      inputBoxResponses: [undefined, "unlock-passphrase"],
+    });
+
+    await withDisabledIntervals(() =>
+      withSuccessfulHttps(async () => {
+        const extension = loadExtensionWithMockedVscode(mocked.vscode);
+        const context = createExtensionContext(mocked);
+        await extension.activate(context);
+
+        const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
+        const [lockedItem] = accountTreeView.treeDataProvider
+          .getChildren()
+          .filter((item) => item.account.name === "sync-user");
+
+        await mocked.registeredCommands.get("codex-account-switch.useAccount")(lockedItem);
+
+        const currentAuth = JSON.parse(fs.readFileSync(path.join(codexHome, "auth.json"), "utf-8"));
+        assert.equal(currentAuth.tokens.account_id, "acct-sync");
+        assert.equal(mocked.secretState.get(STORAGE_SECRET_KEY), "unlock-passphrase");
+        assert.equal(mocked.errorMessages.length, 0);
 
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();

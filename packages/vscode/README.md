@@ -12,6 +12,7 @@ Codex Account Switch gives you a dedicated Activity Bar view for saved accounts,
 - Switch the active account with one click
 - Refresh expired tokens for saved accounts
 - Inspect current quota usage in the account list and status bar
+- Unlock locked saved storage after entering the local storage password
 - Import and export account backups as JSON
 - Prompt to reload the window after account changes when the Codex extension needs to re-read auth state
 
@@ -22,7 +23,7 @@ Open the **Codex Account Switch** view from the Activity Bar to:
 - See all saved accounts
 - Identify the currently active account
 - Inspect account email, plan, and quota usage
-- Run inline actions such as switch, refresh, and remove
+- Run inline actions such as switch and refresh
 
 ## Commands
 
