@@ -1,61 +1,32 @@
 import * as vscode from "vscode";
-import {
-  getCurrentSelection,
-  getNamedProviderPath,
-  listProviderModes,
-  readProviderProfile,
-} from "@codex-account-switch/core";
-import {
-  formatProviderFieldValue,
-  readProviderProfileDraft,
-} from "./providerProfile";
-
-interface ProviderSnapshot {
-  name: string;
-  isCurrent: boolean;
-  invalid: boolean;
-  auth: Record<string, unknown>;
-  config: Record<string, unknown>;
-}
+import { formatProviderFieldValue } from "./providerProfile";
+import { listSavedProviders, SavedProviderInfo } from "./savedEntries";
 
 export type ProviderTreeNode = ProviderTreeItem | ProviderDetailItem;
 
-function getProviderSnapshots(): ProviderSnapshot[] {
-  const selection = getCurrentSelection();
-  return listProviderModes().map((name) => {
-    const profile = readProviderProfile(name);
-    const draft = readProviderProfileDraft(getNamedProviderPath(name), name);
-    return {
-      name,
-      isCurrent: selection.kind === "provider" && selection.name === name,
-      invalid: draft.invalid || !profile,
-      auth: profile?.auth ?? draft.auth,
-      config: profile ? { ...profile.config } : draft.config,
-    };
-  });
-}
-
-function describeProvider(snapshot: ProviderSnapshot): string {
-  if (snapshot.invalid) {
-    return "Invalid profile";
+function describeProvider(provider: SavedProviderInfo): string {
+  if (provider.locked) {
+    return `${provider.source} · Storage locked`;
+  }
+  if (provider.invalid) {
+    return `${provider.source} · Invalid profile`;
   }
 
-  const parts: string[] = [];
-  const authKeys = Object.keys(snapshot.auth).filter((key) => {
-    const value = snapshot.auth[key];
+  const parts: string[] = [provider.source];
+  const authKeys = Object.keys(provider.auth).filter((key) => {
+    const value = provider.auth[key];
     return value != null && String(value).trim() !== "";
   });
   parts.push(authKeys.length > 0 ? `${authKeys.length} auth field${authKeys.length === 1 ? "" : "s"}` : "No auth");
 
   const wireApi =
-    typeof snapshot.config.wire_api === "string" && snapshot.config.wire_api.trim()
-      ? snapshot.config.wire_api.trim()
+    typeof provider.config.wire_api === "string" && provider.config.wire_api.trim()
+      ? provider.config.wire_api.trim()
       : null;
   if (wireApi) {
     parts.push(wireApi);
   }
-
-  if (snapshot.isCurrent) {
+  if (provider.isCurrent) {
     parts.push("Active");
   }
 
@@ -74,7 +45,7 @@ export class ProviderDetailItem extends vscode.TreeItem {
     description?: string,
     tooltip?: string,
     public readonly parent?: ProviderTreeItem,
-    public readonly rawValue?: string
+    public readonly rawValue?: string,
   ) {
     super(label, vscode.TreeItemCollapsibleState.None);
     this.description = description;
@@ -84,13 +55,15 @@ export class ProviderDetailItem extends vscode.TreeItem {
 }
 
 export class ProviderTreeItem extends vscode.TreeItem {
-  constructor(public readonly provider: ProviderSnapshot) {
+  constructor(public readonly provider: SavedProviderInfo) {
     super(provider.name, vscode.TreeItemCollapsibleState.Expanded);
 
     this.description = describeProvider(provider);
-    this.contextValue = "provider";
+    this.contextValue = provider.source === "cloud" ? "providerCloud" : "providerLocal";
 
-    if (provider.invalid) {
+    if (provider.locked) {
+      this.iconPath = new vscode.ThemeIcon("lock");
+    } else if (provider.invalid) {
       this.iconPath = new vscode.ThemeIcon("warning", new vscode.ThemeColor("errorForeground"));
     } else if (provider.isCurrent) {
       this.iconPath = new vscode.ThemeIcon("plug", new vscode.ThemeColor("charts.green"));
@@ -98,10 +71,15 @@ export class ProviderTreeItem extends vscode.TreeItem {
       this.iconPath = new vscode.ThemeIcon("plug");
     }
 
-    const tooltipLines = [`Provider: ${provider.name}`];
-    tooltipLines.push(provider.invalid ? "Status: Invalid provider profile" : "Status: Ready");
+    const tooltipLines = [`Provider: ${provider.name}`, `Source: ${provider.source}`];
+    tooltipLines.push(
+      provider.locked ? "Status: Storage locked" : provider.invalid ? "Status: Invalid provider profile" : "Status: Ready",
+    );
     if (provider.isCurrent) {
       tooltipLines.push("Active: Yes");
+    }
+    if (provider.storageMessage) {
+      tooltipLines.push(provider.storageMessage);
     }
 
     const baseUrl =
@@ -146,11 +124,9 @@ export class ProviderTreeProvider implements vscode.TreeDataProvider<ProviderTre
     if (!element) {
       return this.getRootItems();
     }
-
     if (element instanceof ProviderDetailItem) {
       return [];
     }
-
     return this.getProviderDetails(element);
   }
 
@@ -163,7 +139,7 @@ export class ProviderTreeProvider implements vscode.TreeDataProvider<ProviderTre
 
   getRootItems(): ProviderTreeItem[] {
     if (this.rootItems.length === 0) {
-      this.rootItems = getProviderSnapshots().map((provider) => new ProviderTreeItem(provider));
+      this.rootItems = listSavedProviders().map((provider) => new ProviderTreeItem(provider));
     }
     return this.rootItems;
   }
@@ -178,16 +154,26 @@ export class ProviderTreeProvider implements vscode.TreeDataProvider<ProviderTre
 
     const statusItem = new ProviderDetailItem(
       "Status",
-      provider.invalid ? "Invalid" : provider.isCurrent ? "Active" : "Saved",
-      provider.invalid ? "Provider profile is invalid or incomplete" : undefined,
-      parent
+      provider.locked ? "Locked" : provider.invalid ? "Invalid" : provider.isCurrent ? "Active" : "Saved",
+      provider.locked ? provider.storageMessage : provider.invalid ? "Provider profile is invalid or incomplete" : undefined,
+      parent,
     );
-    statusItem.iconPath = provider.invalid
-      ? new vscode.ThemeIcon("warning", new vscode.ThemeColor("errorForeground"))
-      : provider.isCurrent
-        ? new vscode.ThemeIcon("check", new vscode.ThemeColor("charts.green"))
-        : new vscode.ThemeIcon("circle-large-outline");
+    statusItem.iconPath = provider.locked
+      ? new vscode.ThemeIcon("lock")
+      : provider.invalid
+        ? new vscode.ThemeIcon("warning", new vscode.ThemeColor("errorForeground"))
+        : provider.isCurrent
+          ? new vscode.ThemeIcon("check", new vscode.ThemeColor("charts.green"))
+          : new vscode.ThemeIcon("circle-large-outline");
     items.push(statusItem);
+
+    const sourceItem = new ProviderDetailItem("Source", provider.source, provider.source, parent);
+    sourceItem.iconPath = new vscode.ThemeIcon(provider.source === "cloud" ? "cloud" : "device-desktop");
+    items.push(sourceItem);
+
+    if (provider.locked) {
+      return items;
+    }
 
     const configEntries = Object.entries(provider.config)
       .filter(([key]) => key !== "name")
@@ -195,20 +181,13 @@ export class ProviderTreeProvider implements vscode.TreeDataProvider<ProviderTre
     for (const [key, value] of configEntries) {
       const isCopyable = key === "base_url";
       const rawValue = typeof value === "string" ? value : undefined;
-      const item = new ProviderDetailItem(
-        key,
-        formatProviderFieldValue(key, value),
-        undefined,
-        parent,
-        rawValue
-      );
+      const item = new ProviderDetailItem(key, formatProviderFieldValue(key, value), undefined, parent, rawValue);
       if (isCopyable && rawValue) {
         item.contextValue = "providerCopyableField";
       }
-      item.iconPath =
-        key === "base_url"
-          ? new vscode.ThemeIcon("link")
-          : new vscode.ThemeIcon("settings-gear");
+      item.iconPath = key === "base_url"
+        ? new vscode.ThemeIcon("link")
+        : new vscode.ThemeIcon("settings-gear");
       items.push(item);
     }
 
@@ -221,24 +200,23 @@ export class ProviderTreeProvider implements vscode.TreeDataProvider<ProviderTre
         formatProviderFieldValue(key, value, { revealSecrets: isCopyable }),
         undefined,
         parent,
-        rawValue
+        rawValue,
       );
       if (isCopyable && rawValue) {
         item.contextValue = "providerCopyableField";
       }
-      item.iconPath =
-        key === "OPENAI_API_KEY"
-          ? new vscode.ThemeIcon("key")
-          : new vscode.ThemeIcon("shield");
+      item.iconPath = key === "OPENAI_API_KEY"
+        ? new vscode.ThemeIcon("key")
+        : new vscode.ThemeIcon("shield");
       items.push(item);
     }
 
-    if (items.length === 1) {
+    if (items.length === 2) {
       const emptyItem = new ProviderDetailItem(
         "Profile",
         "No saved fields",
         "This provider profile does not contain config or auth data yet",
-        parent
+        parent,
       );
       emptyItem.iconPath = new vscode.ThemeIcon("circle-slash");
       items.push(emptyItem);

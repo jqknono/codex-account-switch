@@ -1,15 +1,13 @@
 import * as vscode from "vscode";
 import {
-  listAccounts,
-  AccountInfo,
   getTokenExpiry,
   formatTokenExpiry,
   formatRefreshTokenStatus,
-  queryQuota,
   QuotaInfo,
   WindowInfo,
 } from "@codex-account-switch/core";
 import { logInfo, logWarn } from "./log";
+import { listSavedAccounts, querySavedAccountQuota, SavedAccountInfo } from "./savedEntries";
 
 interface QuotaState {
   info: QuotaInfo | null;
@@ -136,15 +134,19 @@ class AccountDetailItem extends vscode.TreeItem {
 }
 
 export class AccountTreeItem extends vscode.TreeItem {
-  constructor(public readonly account: AccountInfo, public readonly quotaState?: QuotaState) {
+  constructor(public readonly account: SavedAccountInfo, public readonly quotaState?: QuotaState) {
     super(account.name, vscode.TreeItemCollapsibleState.Expanded);
 
     const email = account.meta?.email ?? "unknown";
     const plan = account.meta?.plan ?? "unknown";
-    const parts: string[] = [];
+    const parts: string[] = [account.source];
     const quotaSummary = formatQuotaSummary(quotaState?.info ?? null);
 
-    if (quotaState?.loading) {
+    if (account.storageState === "locked") {
+      parts.push("Storage locked");
+    } else if (account.storageState === "invalid") {
+      parts.push("Invalid saved auth");
+    } else if (quotaState?.loading) {
       parts.push("Refreshing quota");
     } else if (quotaSummary) {
       parts.push(quotaSummary);
@@ -157,15 +159,30 @@ export class AccountTreeItem extends vscode.TreeItem {
     }
 
     this.description = parts.join(" · ");
-    this.contextValue = "account";
+    this.contextValue = account.source === "cloud" ? "accountCloud" : "accountLocal";
 
     if (account.isCurrent) {
       this.iconPath = new vscode.ThemeIcon("pass-filled", new vscode.ThemeColor("charts.green"));
+    } else if (account.storageState === "locked") {
+      this.iconPath = new vscode.ThemeIcon("lock");
+    } else if (account.storageState === "invalid") {
+      this.iconPath = new vscode.ThemeIcon("warning", new vscode.ThemeColor("errorForeground"));
     } else {
       this.iconPath = new vscode.ThemeIcon("account");
     }
 
-    const tooltipLines = [`Account: ${account.name}`, `Email: ${email}`, `Plan: ${plan}`];
+    const tooltipLines = [
+      `Account: ${account.name}`,
+      `Source: ${account.source}`,
+      `Email: ${email}`,
+      `Plan: ${plan}`,
+    ];
+
+    if (account.storageState !== "ready") {
+      tooltipLines.push(account.storageMessage ?? "Saved auth is unavailable");
+      this.tooltip = tooltipLines.join("\n");
+      return;
+    }
 
     if (account.auth) {
       const expiry = getTokenExpiry(account.auth);
@@ -234,12 +251,12 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
   }
 
   async refreshQuota(targetName?: string): Promise<void> {
-    const accounts = listAccounts();
+    const accounts = listSavedAccounts();
     const refreshVersion = ++this.refreshVersion;
     const targetNames = targetName ? new Set([targetName]) : null;
     const accountsToRefresh = targetNames
-      ? accounts.filter((account) => targetNames.has(account.name))
-      : accounts;
+      ? accounts.filter((account) => targetNames.has(account.id) && account.storageState === "ready")
+      : accounts.filter((account) => account.storageState === "ready");
 
     logInfo(LOG_PREFIX, "refresh-start", {
       targetName: targetName ?? null,
@@ -247,10 +264,10 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
       accounts: accountsToRefresh.map((account) => account.name),
     });
 
-    this.pruneQuotaState(accounts.map((account) => account.name));
+    this.pruneQuotaState(accounts.map((account) => account.id));
     for (const account of accountsToRefresh) {
-      const previous = this.quotaState.get(account.name);
-      this.quotaState.set(account.name, {
+      const previous = this.quotaState.get(account.id);
+      this.quotaState.set(account.id, {
         info: previous?.info ?? null,
         error: false,
         loading: true,
@@ -263,13 +280,13 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
     await Promise.all(
       accountsToRefresh.map(async (account) => {
         try {
-          const result = await queryQuota(account.name);
+          const result = await querySavedAccountQuota(account);
           if (refreshVersion !== this.refreshVersion) {
             return;
           }
 
-          const previous = this.quotaState.get(account.name);
-          this.quotaState.set(account.name, {
+          const previous = this.quotaState.get(account.id);
+          this.quotaState.set(account.id, {
             info: result.kind === "ok" ? result.info : null,
             error: result.kind !== "ok",
             loading: false,
@@ -277,7 +294,7 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
           });
           if (result.kind !== "ok") {
             logWarn(LOG_PREFIX, "refresh-result-not-ok", {
-              account: account.name,
+              account: account.id,
               resultKind: result.kind,
               message: "message" in result ? result.message : null,
               refreshVersion,
@@ -288,15 +305,15 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
             return;
           }
 
-          const previous = this.quotaState.get(account.name);
-          this.quotaState.set(account.name, {
+          const previous = this.quotaState.get(account.id);
+          this.quotaState.set(account.id, {
             info: previous?.info ?? null,
             error: true,
             loading: false,
             updatedAt: previous?.updatedAt ?? null,
           });
           logWarn(LOG_PREFIX, "refresh-result-error", {
-            account: account.name,
+            account: account.id,
             refreshVersion,
           });
         }
@@ -359,11 +376,11 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
     }, intervalSec * 1000);
   }
 
-  private pruneQuotaState(validNames = listAccounts().map((account) => account.name)) {
-    const validNameSet = new Set(validNames);
-    for (const name of this.quotaState.keys()) {
-      if (!validNameSet.has(name)) {
-        this.quotaState.delete(name);
+  private pruneQuotaState(validIds = listSavedAccounts().map((account) => account.id)) {
+    const validIdSet = new Set(validIds);
+    for (const id of this.quotaState.keys()) {
+      if (!validIdSet.has(id)) {
+        this.quotaState.delete(id);
       }
     }
   }
@@ -375,9 +392,9 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
     return this.rootItems;
   }
 
-  private syncRootItems(accounts = listAccounts()) {
+  private syncRootItems(accounts = listSavedAccounts()) {
     this.rootItems = accounts.map(
-      (account) => new AccountTreeItem(account, this.quotaState.get(account.name))
+      (account) => new AccountTreeItem(account, this.quotaState.get(account.id))
     );
   }
 
@@ -391,9 +408,28 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
     emailItem.iconPath = new vscode.ThemeIcon("mail");
     items.push(emailItem);
 
+    const sourceItem = new AccountDetailItem("Source", account.source, account.source, parent);
+    sourceItem.iconPath = new vscode.ThemeIcon(account.source === "cloud" ? "cloud" : "device-desktop");
+    items.push(sourceItem);
+
     const planItem = new AccountDetailItem("Plan", plan, plan, parent);
     planItem.iconPath = new vscode.ThemeIcon("tag");
     items.push(planItem);
+
+    if (account.storageState !== "ready") {
+      const storageItem = new AccountDetailItem(
+        "Storage",
+        account.storageState === "locked" ? "Locked" : "Invalid",
+        account.storageMessage,
+        parent
+      );
+      storageItem.iconPath =
+        account.storageState === "locked"
+          ? new vscode.ThemeIcon("lock")
+          : new vscode.ThemeIcon("warning", new vscode.ThemeColor("errorForeground"));
+      items.push(storageItem);
+      return items;
+    }
 
     if (account.auth) {
       const tokenStatus = formatTokenExpiry(account.auth);

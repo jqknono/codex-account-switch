@@ -3,6 +3,7 @@ import { syncCurrentAuthToSavedAccount, writeCurrentAuth } from "./auth";
 import { activateProviderConfig, clearActiveModelProvider, getActiveModelProvider, removeProviderConfig } from "./config";
 import { getNamedAuthDir, getNamedProviderPath, listNamedProviderFiles } from "./paths";
 import { ProviderProfile } from "./types";
+import { readSavedJsonFile, SavedStorageReadResult, writeSavedJsonFile } from "./savedStorage";
 
 export interface SwitchModeResult {
   success: boolean;
@@ -38,36 +39,39 @@ export function getDefaultProviderProfile(name: string): ProviderProfile {
   };
 }
 
-export function readProviderProfile(name: string): ProviderProfile | null {
+export function readProviderProfileResult(name: string): SavedStorageReadResult<ProviderProfile> {
   const providerPath = getNamedProviderPath(name);
-  if (!fs.existsSync(providerPath)) {
-    return null;
+  const result = readSavedJsonFile<ProviderProfile>(providerPath, "saved_provider");
+  if (result.status !== "ok") {
+    return result;
   }
 
-  try {
-    const parsed = JSON.parse(fs.readFileSync(providerPath, "utf-8")) as unknown;
-    if (!isRecord(parsed)) {
-      return null;
-    }
-    if (parsed.kind !== "provider" || parsed.name !== name) {
-      return null;
-    }
-    if (!isRecord(parsed.auth) || !isRecord(parsed.config)) {
-      return null;
-    }
+  const parsed = result.value as unknown;
+  if (!isRecord(parsed)) {
+    return { status: "invalid", encrypted: result.encrypted, message: "Provider profile is not a JSON object." };
+  }
+  if (parsed.kind !== "provider" || parsed.name !== name) {
+    return { status: "invalid", encrypted: result.encrypted, message: `Provider "${name}" is invalid.` };
+  }
+  if (!isRecord(parsed.auth) || !isRecord(parsed.config)) {
+    return { status: "invalid", encrypted: result.encrypted, message: `Provider "${name}" is invalid.` };
+  }
 
-    const providerName = parsed.config.name;
-    const baseUrl = parsed.config.base_url;
-    const wireApi = parsed.config.wire_api;
-    if (
-      typeof providerName !== "string" ||
-      typeof baseUrl !== "string" ||
-      typeof wireApi !== "string"
-    ) {
-      return null;
-    }
+  const providerName = parsed.config.name;
+  const baseUrl = parsed.config.base_url;
+  const wireApi = parsed.config.wire_api;
+  if (
+    typeof providerName !== "string" ||
+    typeof baseUrl !== "string" ||
+    typeof wireApi !== "string"
+  ) {
+    return { status: "invalid", encrypted: result.encrypted, message: `Provider "${name}" is invalid.` };
+  }
 
-    return {
+  return {
+    status: "ok",
+    encrypted: result.encrypted,
+    value: {
       kind: "provider",
       name,
       auth: parsed.auth,
@@ -76,15 +80,18 @@ export function readProviderProfile(name: string): ProviderProfile | null {
         base_url: baseUrl,
         wire_api: wireApi,
       },
-    };
-  } catch {
-    return null;
-  }
+    },
+  };
+}
+
+export function readProviderProfile(name: string): ProviderProfile | null {
+  const result = readProviderProfileResult(name);
+  return result.status === "ok" ? result.value : null;
 }
 
 export function writeProviderProfile(profile: ProviderProfile): void {
   fs.mkdirSync(getNamedAuthDir(), { recursive: true });
-  fs.writeFileSync(getNamedProviderPath(profile.name), JSON.stringify(profile, null, 2), "utf-8");
+  writeSavedJsonFile(getNamedProviderPath(profile.name), "saved_provider", profile as unknown as Record<string, unknown>);
 }
 
 export function deleteProviderProfile(name: string): DeleteProviderResult {
@@ -138,14 +145,18 @@ export function switchMode(name: string): SwitchModeResult {
     return { success: true, message: "Switched to account mode" };
   }
 
-  const profile = readProviderProfile(name);
-  if (!profile) {
+  const profileResult = readProviderProfileResult(name);
+  if (profileResult.status !== "ok") {
     const providerPath = getNamedProviderPath(name);
     return {
       success: false,
-      message: `Provider "${name}" does not exist or is invalid. Create ${providerPath} first or run the mode command to configure it.`,
+      message:
+        profileResult.status === "missing"
+          ? `Provider "${name}" does not exist or is invalid. Create ${providerPath} first or run the mode command to configure it.`
+          : profileResult.message,
     };
   }
+  const profile = profileResult.value;
 
   fs.mkdirSync(getNamedAuthDir(), { recursive: true });
   syncCurrentAuthToSavedAccount();

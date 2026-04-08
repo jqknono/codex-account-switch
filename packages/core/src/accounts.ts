@@ -11,6 +11,7 @@ import {
 import {
   readCurrentAuth,
   readAuthFile,
+  readSavedAuthFileResult,
   extractMeta,
   getAccountIdentity,
   hasAccountAuthTokens,
@@ -19,6 +20,7 @@ import {
   syncCurrentAuthToSavedAccount,
   writeAuthFile,
   writeCurrentAuth,
+  writeSavedAuthFile,
 } from "./auth";
 import { applyRefreshResponse, refreshAccessToken, refreshAndSave } from "./refresh";
 import { getQuotaInfo } from "./quota";
@@ -26,12 +28,16 @@ import { AuthFile, AccountMeta, QuotaInfo, ExportData, CurrentSelection } from "
 import { clearActiveModelProvider, getActiveModelProvider } from "./config";
 import { getModeDisplayName } from "./providers";
 import { writeDiagnosticLog } from "./log";
+import { SavedStorageReadResult } from "./savedStorage";
 
 export interface AccountInfo {
   name: string;
   meta: AccountMeta | null;
   auth: AuthFile | null;
   isCurrent: boolean;
+  storageState: "ready" | "locked" | "invalid";
+  storageMessage?: string;
+  encrypted: boolean;
 }
 
 export type QuotaQueryResult =
@@ -56,6 +62,42 @@ const ACCOUNT_LOCK_RETRY_MS = 100;
 const STALE_ACCOUNT_LOCK_MS = 5 * 60 * 1000;
 const inflightQuotaQueries = new Map<string, Promise<QuotaQueryResult>>();
 const LOCK_LOG_PREFIX = "[codex-account-switch:lock]";
+
+function getSavedAuthReadErrorMessage(result: SavedStorageReadResult<AuthFile>, name: string): string {
+  if (result.status === "locked" || result.status === "invalid") {
+    return `Saved account "${name}" is unavailable: ${result.message}`;
+  }
+  return `Account "${name}" does not exist.`;
+}
+
+function readNamedAuthResult(name: string): SavedStorageReadResult<AuthFile> {
+  return readSavedAuthFileResult(getNamedAuthPath(name));
+}
+
+function toAccountInfo(name: string, isCurrent: boolean): AccountInfo {
+  const result = readNamedAuthResult(name);
+  if (result.status === "ok") {
+    return {
+      name,
+      meta: extractMeta(result.value),
+      auth: result.value,
+      isCurrent,
+      storageState: "ready",
+      storageMessage: undefined,
+      encrypted: result.encrypted,
+    };
+  }
+
+  return {
+    name,
+    meta: null,
+    auth: null,
+    isCurrent,
+    storageState: result.status === "locked" ? "locked" : "invalid",
+    storageMessage: "message" in result ? result.message : undefined,
+    encrypted: result.encrypted,
+  };
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -187,6 +229,7 @@ async function withAccountLock<T>(auth: AuthFile, operation: string, fn: () => P
         return await fn();
       } finally {
         fs.closeSync(handle);
+        handle = null;
         try {
           fs.unlinkSync(lockPath);
         } catch {
@@ -273,9 +316,13 @@ function resolveQuotaTarget(
       return { kind: "not_found", message: `Account "${name}" does not exist.` };
     }
     const synced = syncCurrentAuthToSavedAccount();
-    const auth = synced?.name === name ? synced.auth : readNamedAuth(name);
+    const savedResult = synced?.name === name ? null : readNamedAuthResult(name);
+    const auth = synced?.name === name ? synced.auth : savedResult?.status === "ok" ? savedResult.value : null;
     if (!auth) {
-      return { kind: "not_found", message: "No auth information found." };
+      return {
+        kind: "not_found",
+        message: savedResult ? getSavedAuthReadErrorMessage(savedResult, name) : "No auth information found.",
+      };
     }
     return {
       kind: "ok",
@@ -298,9 +345,13 @@ function resolveQuotaTarget(
   if (selection.kind === "account") {
     const authPath = getNamedAuthPath(selection.name);
     const synced = syncCurrentAuthToSavedAccount();
-    const auth = synced?.name === selection.name ? synced.auth : readNamedAuth(selection.name);
+    const savedResult = synced?.name === selection.name ? null : readNamedAuthResult(selection.name);
+    const auth = synced?.name === selection.name ? synced.auth : savedResult?.status === "ok" ? savedResult.value : null;
     if (!auth) {
-      return { kind: "not_found", message: "No auth information found." };
+      return {
+        kind: "not_found",
+        message: savedResult ? getSavedAuthReadErrorMessage(savedResult, selection.name) : "No auth information found.",
+      };
     }
     return {
       kind: "ok",
@@ -347,13 +398,13 @@ function resolveRefreshTarget(
       return { kind: "error", success: false, message: `Account "${name}" does not exist.` };
     }
     syncCurrentAuthToSavedAccount();
-    const auth = readNamedAuth(name);
-    if (!auth) {
-      return { kind: "error", success: false, message: "Auth file was not found." };
+    const savedResult = readNamedAuthResult(name);
+    if (savedResult.status !== "ok") {
+      return { kind: "error", success: false, message: getSavedAuthReadErrorMessage(savedResult, name) };
     }
     return {
       kind: "ok",
-      auth,
+      auth: savedResult.value,
       authPath,
       displayName: name,
       shouldSyncCurrentAuth: detectCurrentName() === name,
@@ -373,13 +424,17 @@ function resolveRefreshTarget(
   if (selection.kind === "account") {
     const authPath = getNamedAuthPath(selection.name);
     syncCurrentAuthToSavedAccount();
-    const auth = readNamedAuth(selection.name);
-    if (!auth) {
-      return { kind: "error", success: false, message: "Auth file was not found." };
+    const savedResult = readNamedAuthResult(selection.name);
+    if (savedResult.status !== "ok") {
+      return {
+        kind: "error",
+        success: false,
+        message: getSavedAuthReadErrorMessage(savedResult, selection.name),
+      };
     }
     return {
       kind: "ok",
-      auth,
+      auth: savedResult.value,
       authPath,
       displayName: selection.name,
       shouldSyncCurrentAuth: true,
@@ -423,26 +478,27 @@ function shouldRefreshBeforeQuota(auth: AuthFile): boolean {
 
 function getSavedAccountsSnapshot(): Array<{ name: string; meta: AccountMeta | null; auth: AuthFile | null }> {
   return listNamedAuthFiles().map((name) => {
-    const auth = readNamedAuth(name);
-    const meta = auth ? extractMeta(auth) : null;
-    return { name, meta, auth };
+    const info = toAccountInfo(name, false);
+    return { name, meta: info.meta, auth: info.auth };
   });
 }
 
 function findAccountByIdentity(identity: string, excludeName?: string): AccountInfo | null {
-  for (const account of getSavedAccountsSnapshot()) {
-    if (excludeName && account.name === excludeName) {
+  for (const name of listNamedAuthFiles()) {
+    if (excludeName && name === excludeName) {
       continue;
     }
+    const account = toAccountInfo(name, false);
     if (getAccountIdentity(account.auth) === identity) {
-      return { ...account, isCurrent: false };
+      return account;
     }
   }
   return null;
 }
 
 export function readNamedAuth(name: string): AuthFile | null {
-  return readAuthFile(getNamedAuthPath(name));
+  const result = readNamedAuthResult(name);
+  return result.status === "ok" ? result.value : null;
 }
 
 export function detectCurrentName(): string | null {
@@ -477,9 +533,7 @@ export function getCurrentSelection(): CurrentSelection {
 
 export function listAccounts(): AccountInfo[] {
   const currentName = detectCurrentName();
-  return getSavedAccountsSnapshot().map(({ name, meta, auth }) => {
-    return { name, meta, auth, isCurrent: name === currentName };
-  });
+  return listNamedAuthFiles().map((name) => toAccountInfo(name, name === currentName));
 }
 
 export function addAccountFromAuth(name: string): { success: boolean; message: string; meta?: AccountMeta } {
@@ -500,7 +554,15 @@ export function addAccountFromAuth(name: string): { success: boolean; message: s
   const identity = getAccountIdentity(auth);
   const dest = getNamedAuthPath(name);
   if (fs.existsSync(dest)) {
-    const existingAuth = readNamedAuth(name);
+    const existingResult = readNamedAuthResult(name);
+    if (existingResult.status !== "ok") {
+      return {
+        success: false,
+        message: getSavedAuthReadErrorMessage(existingResult, name),
+        meta,
+      };
+    }
+    const existingAuth = existingResult.value;
     const existingMeta = existingAuth ? extractMeta(existingAuth) : null;
     const existingIdentity = getAccountIdentity(existingAuth);
 
@@ -543,7 +605,7 @@ export function addAccountFromAuth(name: string): { success: boolean; message: s
   }
 
   fs.mkdirSync(getNamedAuthDir(), { recursive: true });
-  fs.copyFileSync(getCodexAuthPath(), dest);
+  writeSavedAuthFile(dest, auth);
 
   return { success: true, message: `Account "${name}" was saved`, meta };
 }
@@ -602,11 +664,14 @@ export function useAccount(name: string): { success: boolean; message: string; m
   }
 
   syncCurrentAuthToSavedAccount();
-  fs.copyFileSync(src, getCodexAuthPath());
+  const result = readNamedAuthResult(name);
+  if (result.status !== "ok") {
+    return { success: false, message: getSavedAuthReadErrorMessage(result, name) };
+  }
+  writeCurrentAuth(result.value);
   clearActiveModelProvider();
 
-  const auth = readNamedAuth(name);
-  const meta = auth ? extractMeta(auth) : undefined;
+  const meta = extractMeta(result.value);
 
   return { success: true, message: `Switched to account "${name}"`, meta };
 }
@@ -647,13 +712,13 @@ export async function queryQuota(name?: string): Promise<QuotaQueryResult> {
       return target;
     }
 
-    const { auth, authPath, displayName, shouldSyncCurrentAuth } = target;
-    const persistUpdatedAuth = async (): Promise<void> => {
-      if (authPath) {
-        writeAuthFile(authPath, auth);
-      }
-      if (!authPath || shouldSyncCurrentAuth) {
-        writeCurrentAuth(auth);
+      const { auth, authPath, displayName, shouldSyncCurrentAuth } = target;
+      const persistUpdatedAuth = async (): Promise<void> => {
+        if (authPath) {
+          writeSavedAuthFile(authPath, auth);
+        }
+        if (!authPath || shouldSyncCurrentAuth) {
+          writeCurrentAuth(auth);
       }
     };
 
@@ -703,7 +768,7 @@ export async function refreshAccount(name?: string): Promise<{
       const { authPath, displayName, shouldSyncCurrentAuth } = target;
 
       try {
-        const updated = await refreshAndSave(authPath);
+        const updated = await refreshAndSave(authPath, { saved: authPath !== getCodexAuthPath() });
 
         if (shouldSyncCurrentAuth) {
           writeCurrentAuth(updated);
@@ -733,13 +798,13 @@ export async function refreshAccount(name?: string): Promise<{
 
 export function exportAccounts(names?: string[]): ExportData {
   const allNames = names ?? listNamedAuthFiles();
-  const accounts = allNames
-    .map((name) => {
-      const auth = readNamedAuth(name);
-      if (!auth) return null;
-      return { name, auth };
-    })
-    .filter((a): a is { name: string; auth: AuthFile } => a !== null);
+  const accounts = allNames.map((name) => {
+    const result = readNamedAuthResult(name);
+    if (result.status !== "ok") {
+      throw new Error(getSavedAuthReadErrorMessage(result, name));
+    }
+    return { name, auth: result.value };
+  });
 
   return {
     version: 1,
@@ -768,7 +833,7 @@ export function importAccounts(
         skipped.push(account.name);
         continue;
       }
-      writeAuthFile(dest, account.auth);
+      writeSavedAuthFile(dest, account.auth);
       imported.push(account.name);
     } catch (err) {
       errors.push(`${account.name}: ${err instanceof Error ? err.message : String(err)}`);

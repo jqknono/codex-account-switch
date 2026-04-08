@@ -49,3 +49,58 @@ test("device auth login setting is opt-in", () => {
   assert.equal(setting?.default, false);
   assert.match(setting?.description ?? "", /device code authorization/i);
 });
+
+test("storage password commands are contributed", () => {
+  const byId = new Map(commands.map((command) => [command.command, command]));
+
+  assert.equal(
+    byId.get("codex-account-switch.setStoragePassword")?.title,
+    "Set Storage Password"
+  );
+  assert.equal(
+    byId.get("codex-account-switch.changeStoragePassword")?.title,
+    "Change Storage Password"
+  );
+  assert.equal(
+    byId.get("codex-account-switch.forgetStoragePassword")?.title,
+    "Forget Local Storage Password"
+  );
+});
+
+test("storage target settings are contributed", () => {
+  const properties = manifest.contributes.configuration.properties;
+
+  assert.equal(
+    properties["codex-account-switch.defaultSaveTarget"]?.default,
+    "local"
+  );
+  assert.deepEqual(
+    properties["codex-account-switch.defaultSaveTarget"]?.enum,
+    ["local", "cloud"]
+  );
+  assert.equal(
+    properties["codex-account-switch.syncedStorage"]?.type,
+    "object"
+  );
+});
+
+test("storage migration commands are contributed", () => {
+  const byId = new Map(commands.map((command) => [command.command, command]));
+
+  assert.equal(
+    byId.get("codex-account-switch.moveAccountToCloud")?.title,
+    "Move Account To Cloud"
+  );
+  assert.equal(
+    byId.get("codex-account-switch.moveAccountToLocal")?.title,
+    "Move Account To Local"
+  );
+  assert.equal(
+    byId.get("codex-account-switch.moveProviderToCloud")?.title,
+    "Move Provider To Cloud"
+  );
+  assert.equal(
+    byId.get("codex-account-switch.moveProviderToLocal")?.title,
+    "Move Provider To Local"
+  );
+});

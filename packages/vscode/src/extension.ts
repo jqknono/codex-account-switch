@@ -5,6 +5,8 @@ import { ProviderTreeProvider, ProviderTreeNode } from "./providerTree";
 import { StatusBarManager } from "./statusBar";
 import { registerCommands } from "./commands";
 import { disposeLogging, initializeLogging, logWarn, writeRawLog } from "./log";
+import { restoreSavedAuthPassphrase } from "./storagePassword";
+import { hasEncryptedSyncedEntries, initializeSavedEntries } from "./savedEntries";
 const LOG_PREFIX = "[codex-account-switch:vscode:extension]";
 
 function applyNamedAuthDirSetting() {
@@ -15,12 +17,17 @@ function applyNamedAuthDirSetting() {
   setNamedAuthDir(authDir);
 }
 
-export function activate(context: vscode.ExtensionContext) {
+export async function activate(context: vscode.ExtensionContext) {
   initializeLogging();
   setDiagnosticLogger((level: DiagnosticLogLevel, line: string) => {
     writeRawLog(level, line);
   });
   applyNamedAuthDirSetting();
+  initializeSavedEntries(context);
+  await restoreSavedAuthPassphrase(context, {
+    promptIfMissing: true,
+    promptForLockedStorage: hasEncryptedSyncedEntries(),
+  });
 
   const accountTree = new AccountTreeProvider();
   const providerTree = new ProviderTreeProvider();
@@ -35,8 +42,16 @@ export function activate(context: vscode.ExtensionContext) {
   });
 
   const configListener = vscode.workspace.onDidChangeConfiguration((e) => {
-    if (e.affectsConfiguration("codex-account-switch.authDirectory")) {
+    if (
+      e.affectsConfiguration("codex-account-switch.authDirectory")
+      || e.affectsConfiguration("codex-account-switch.syncedStorage")
+      || e.affectsConfiguration("codex-account-switch.defaultSaveTarget")
+    ) {
       applyNamedAuthDirSetting();
+      void restoreSavedAuthPassphrase(context, {
+        promptIfMissing: true,
+        promptForLockedStorage: hasEncryptedSyncedEntries(),
+      });
       accountTree.refresh();
       providerTree.refresh();
       void accountTree.refreshQuota().catch((error) => {

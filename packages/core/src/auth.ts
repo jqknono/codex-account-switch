@@ -2,6 +2,7 @@ import * as fs from "fs";
 import { jwtDecode } from "jwt-decode";
 import { getCodexAuthPath, getNamedAuthPath, listNamedAuthFiles } from "./paths";
 import { AuthFile, IdTokenPayload, AccountMeta } from "./types";
+import { readSavedJsonFile, SavedStorageReadResult, writeSavedJsonFile } from "./savedStorage";
 
 function parseAuthJson(raw: string): AuthFile | null {
   try {
@@ -70,6 +71,22 @@ export function readAuthFile(filePath: string): AuthFile | null {
 
 export function writeAuthFile(filePath: string, auth: AuthFile): void {
   fs.writeFileSync(filePath, JSON.stringify(sanitizeAuthFile(auth), null, 2), "utf-8");
+}
+
+export function readSavedAuthFileResult(filePath: string): SavedStorageReadResult<AuthFile> {
+  const result = readSavedJsonFile<AuthFile>(filePath, "saved_auth");
+  if (result.status !== "ok") {
+    return result;
+  }
+
+  return {
+    ...result,
+    value: sanitizeAuthFile(result.value),
+  };
+}
+
+export function writeSavedAuthFile(filePath: string, auth: AuthFile): void {
+  writeSavedJsonFile(filePath, "saved_auth", sanitizeAuthFile(auth));
 }
 
 export function writeCurrentAuth(auth: AuthFile): void {
@@ -191,8 +208,8 @@ export function findMatchingNamedAuthName(auth: AuthFile | null | undefined): st
   const accountId = auth?.tokens?.account_id;
   if (accountId) {
     for (const name of listNamedAuthFiles()) {
-      const named = readAuthFile(getNamedAuthPath(name));
-      if (named?.tokens?.account_id === accountId) {
+      const namedResult = readSavedAuthFileResult(getNamedAuthPath(name));
+      if (namedResult.status === "ok" && namedResult.value.tokens?.account_id === accountId) {
         return name;
       }
     }
@@ -204,8 +221,8 @@ export function findMatchingNamedAuthName(auth: AuthFile | null | undefined): st
   }
 
   for (const name of listNamedAuthFiles()) {
-    const named = readAuthFile(getNamedAuthPath(name));
-    if (getAccountIdentityFromMeta(named ? extractMeta(named) : null) === identity) {
+    const namedResult = readSavedAuthFileResult(getNamedAuthPath(name));
+    if (namedResult.status === "ok" && getAccountIdentityFromMeta(extractMeta(namedResult.value)) === identity) {
       return name;
     }
   }
@@ -224,6 +241,6 @@ export function syncCurrentAuthToSavedAccount(): { name: string; auth: AuthFile 
     return null;
   }
 
-  writeAuthFile(getNamedAuthPath(name), auth);
+  writeSavedAuthFile(getNamedAuthPath(name), auth);
   return { name, auth };
 }

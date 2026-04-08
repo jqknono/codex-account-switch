@@ -1,34 +1,43 @@
 import * as vscode from "vscode";
 import * as fs from "fs";
 import {
-  addAccountFromAuth,
-  removeAccount,
-  renameAccount,
-  useAccount,
-  refreshAccount,
   exportAccounts,
   importAccounts,
-  listAccounts,
   ExportData,
-  getNamedAuthPath,
-  getNamedProviderPath,
-  readNamedAuth,
-  formatTokenExpiry,
-  listModes,
-  switchMode,
-  getCurrentSelection,
-  readProviderProfile,
-  writeProviderProfile,
-  deleteProviderProfile,
-  getDefaultProviderProfile,
   ProviderProfile,
   getModeDisplayName,
+  switchMode,
 } from "@codex-account-switch/core";
 import { AccountTreeProvider, AccountTreeItem, AccountTreeNode } from "./accountTree";
-import { ProviderDetailItem, ProviderTreeProvider } from "./providerTree";
+import { ProviderDetailItem, ProviderTreeItem, ProviderTreeProvider } from "./providerTree";
 import { StatusBarManager } from "./statusBar";
-import { buildCompletedProviderProfile, readProviderProfileDraft } from "./providerProfile";
+import { buildCompletedProviderProfile } from "./providerProfile";
 import { logWarn, showLogs } from "./log";
+import {
+  ensureSavedAuthPassphrase,
+  forgetSavedAuthPassphrase,
+  promptAndStoreSavedAuthPassphrase,
+} from "./storagePassword";
+import {
+  buildProviderProfileForSource,
+  getSavedAccountEntry,
+  getSavedCurrentSelection,
+  getSavedProviderEntry,
+  listSavedAccounts,
+  listSavedProviders,
+  moveSavedAccountEntry,
+  moveSavedProviderEntry,
+  refreshSavedAccountEntry,
+  renameSavedAccountEntry,
+  removeSavedAccountEntry,
+  saveCurrentAuthAsAccount,
+  saveProviderProfileToSource,
+  SavedAccountInfo,
+  SavedProviderInfo,
+  StorageSource,
+  switchToSavedProviderEntry,
+  useSavedAccountEntry,
+} from "./savedEntries";
 const LOG_PREFIX = "[codex-account-switch:vscode:commands]";
 
 function getUseDeviceAuthForLogin(): boolean {
@@ -58,16 +67,6 @@ function refreshAll(
       error: error instanceof Error ? error.message : String(error),
     });
   });
-}
-
-const DELETE_MODE_BUTTON: vscode.QuickInputButton = {
-  iconPath: new vscode.ThemeIcon("trash"),
-  tooltip: "Delete provider mode",
-};
-
-interface ModeQuickPickItem extends vscode.QuickPickItem {
-  modeName: string;
-  intent: "switch" | "create";
 }
 
 async function refreshTokenAndQuota(
@@ -142,8 +141,88 @@ async function runCodexLogin(options?: { useDeviceAuth?: boolean }): Promise<boo
   return action === "Done";
 }
 
-function exitProviderModeForLogin(): { previousSelection: ReturnType<typeof getCurrentSelection>; switched: boolean } | null {
-  const previousSelection = getCurrentSelection();
+function getSourceLabel(source: StorageSource): string {
+  return source === "cloud" ? "cloud" : "local";
+}
+
+function formatAccountChoice(account: SavedAccountInfo): string {
+  const parts = [account.meta?.email ?? "unknown"];
+  if (account.meta?.plan) {
+    parts.push(account.meta.plan);
+  }
+  return `${parts.join(" · ")} · ${getSourceLabel(account.source)}`;
+}
+
+function formatProviderChoice(provider: SavedProviderInfo): string {
+  const parts = [getSourceLabel(provider.source)];
+  if (provider.locked) {
+    parts.push("locked");
+  } else if (provider.invalid) {
+    parts.push("invalid");
+  }
+  return parts.join(" · ");
+}
+
+function resolveAccountFromItem(item?: AccountTreeItem): SavedAccountInfo | undefined {
+  const account = item?.account;
+  if (!account) {
+    return undefined;
+  }
+  if (account.source === "local" || account.source === "cloud") {
+    return account;
+  }
+  return getSavedAccountEntry(account.name, "local") ?? getSavedAccountEntry(account.name, "cloud") ?? undefined;
+}
+
+async function pickSavedAccount(item: AccountTreeItem | undefined, placeHolder: string): Promise<SavedAccountInfo | undefined> {
+  const existing = resolveAccountFromItem(item);
+  if (existing) {
+    return existing;
+  }
+
+  const accounts = listSavedAccounts();
+  if (accounts.length === 0) {
+    vscode.window.showWarningMessage("No saved accounts");
+    return undefined;
+  }
+
+  const picked = await vscode.window.showQuickPick(
+    accounts.map((account) => ({
+      label: account.isCurrent ? `$(pass-filled) ${account.name}` : account.name,
+      description: formatAccountChoice(account),
+      account,
+    })),
+    { placeHolder },
+  );
+
+  return picked?.account;
+}
+
+async function pickSavedProvider(item: ProviderTreeItem | undefined, placeHolder: string): Promise<SavedProviderInfo | undefined> {
+  if (item) {
+    return item.provider;
+  }
+
+  const providers = listSavedProviders();
+  if (providers.length === 0) {
+    vscode.window.showWarningMessage("No saved providers");
+    return undefined;
+  }
+
+  const picked = await vscode.window.showQuickPick(
+    providers.map((provider) => ({
+      label: provider.isCurrent ? `$(plug) ${getModeDisplayName(provider.name)}` : getModeDisplayName(provider.name),
+      description: formatProviderChoice(provider),
+      provider,
+    })),
+    { placeHolder },
+  );
+
+  return picked?.provider;
+}
+
+function exitProviderModeForLogin(): { previousSelection: ReturnType<typeof getSavedCurrentSelection>; switched: boolean } | null {
+  const previousSelection = getSavedCurrentSelection();
   if (previousSelection.kind !== "provider") {
     return { previousSelection, switched: false };
   }
@@ -160,37 +239,33 @@ function exitProviderModeForLogin(): { previousSelection: ReturnType<typeof getC
   return { previousSelection, switched: true };
 }
 
-function restoreProviderModeAfterFailedLogin(previousSelection: ReturnType<typeof getCurrentSelection>, switched: boolean) {
+async function restoreProviderModeAfterFailedLogin(previousSelection: ReturnType<typeof getSavedCurrentSelection>, switched: boolean) {
   if (!switched || previousSelection.kind !== "provider") {
     return;
   }
 
-  const restored = switchMode(previousSelection.name);
+  const restored =
+    previousSelection.source === "local"
+      ? switchMode(previousSelection.name)
+      : await switchToSavedProviderEntry(
+          getSavedProviderEntry(previousSelection.name, "cloud") ?? {
+            id: `cloud:${previousSelection.name}`,
+            name: previousSelection.name,
+            source: "cloud",
+            isCurrent: false,
+            invalid: true,
+            locked: false,
+            encrypted: false,
+            auth: {},
+            config: {},
+            profile: null,
+          },
+        );
   if (!restored.success) {
     void vscode.window.showWarningMessage(
       `Restoring mode "${getModeDisplayName(previousSelection.name)}" failed: ${restored.message}`
     );
   }
-}
-
-async function pickAccountName(
-  item: AccountTreeItem | undefined,
-  placeHolder: string
-): Promise<string | undefined> {
-  if (item) {
-    return item.account.name;
-  }
-
-  const accounts = listAccounts();
-  if (accounts.length === 0) {
-    vscode.window.showWarningMessage("No saved accounts");
-    return undefined;
-  }
-
-  return vscode.window.showQuickPick(
-    accounts.map((account) => account.name),
-    { placeHolder }
-  );
 }
 
 async function promptLoginMethod(
@@ -213,137 +288,93 @@ async function promptLoginMethod(
   return "cancel";
 }
 
-async function pickModeAction(
-  currentMode: string,
-  modes: string[]
-): Promise<
-  | { action: "switch"; modeName: string }
-  | { action: "delete"; modeName: string }
-  | { action: "create" }
+async function pickModeAction(): Promise<
+  | { action: "switch"; provider: SavedProviderInfo | null }
+  | { action: "create"; source: StorageSource }
   | undefined
 > {
-  return new Promise((resolve) => {
-    const quickPick = vscode.window.createQuickPick<ModeQuickPickItem>();
-    let settled = false;
+  const currentSelection = getSavedCurrentSelection();
+  const providers = listSavedProviders();
+  const items = [
+    {
+      label: currentSelection.kind === "account" ? "$(check) Account Mode" : "Account Mode",
+      description: "Use saved account auth",
+      action: "switch" as const,
+      provider: null,
+    },
+    ...providers.map((provider) => ({
+      label:
+        currentSelection.kind === "provider"
+          && currentSelection.name === provider.name
+          && currentSelection.source === provider.source
+          ? `$(check) ${getModeDisplayName(provider.name)}`
+          : getModeDisplayName(provider.name),
+      description: formatProviderChoice(provider),
+      action: "switch" as const,
+      provider,
+    })),
+    {
+      label: "$(add) New Provider (Local)",
+      description: "Create a local provider profile",
+      action: "create" as const,
+      source: "local" as const,
+    },
+    {
+      label: "$(add) New Provider (Cloud)",
+      description: "Create a synced provider profile",
+      action: "create" as const,
+      source: "cloud" as const,
+    },
+  ];
 
-    const finish = (
-      result:
-        | { action: "switch"; modeName: string }
-        | { action: "delete"; modeName: string }
-        | { action: "create" }
-        | undefined
-    ) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      resolve(result);
-      quickPick.hide();
-      quickPick.dispose();
-    };
-
-    quickPick.items = [
-      ...modes.map((modeName) => ({
-        label: modeName === currentMode ? `$(check) ${getModeDisplayName(modeName)}` : getModeDisplayName(modeName),
-        description: modeName === "account" ? "Account mode" : "Provider mode",
-        modeName,
-        intent: "switch" as const,
-        buttons: modeName === "account" ? undefined : [DELETE_MODE_BUTTON],
-      })),
-      {
-        label: "$(add) New Provider...",
-        description: "Create a new provider profile",
-        modeName: "__new_provider__",
-        intent: "create" as const,
-      },
-    ];
-    quickPick.placeholder = "Select a mode to switch to";
-    quickPick.matchOnDescription = true;
-
-    quickPick.onDidAccept(() => {
-      const selected = quickPick.selectedItems[0];
-      if (!selected) {
-        return;
-      }
-
-      if (selected.intent === "create") {
-        finish({ action: "create" });
-        return;
-      }
-
-      finish({ action: "switch", modeName: selected.modeName });
-    });
-
-    quickPick.onDidTriggerItemButton(({ item }) => {
-      if (item.intent !== "switch" || item.modeName === "account") {
-        return;
-      }
-      finish({ action: "delete", modeName: item.modeName });
-    });
-
-    quickPick.onDidHide(() => finish(undefined));
-    quickPick.show();
+  const picked = await vscode.window.showQuickPick(items, {
+    placeHolder: "Select a mode to switch to",
   });
-}
-
-async function promptToDeleteMode(
-  accountTree: AccountTreeProvider,
-  providerTree: ProviderTreeProvider,
-  statusBar: StatusBarManager,
-  modeName: string
-) {
-  const selection = getCurrentSelection();
-  const isActiveMode = selection.kind === "provider" && selection.name === modeName;
-  if (isActiveMode) {
-    vscode.window.showWarningMessage(
-      `Provider mode "${getModeDisplayName(modeName)}" is currently in use and cannot be removed.`
-    );
-    return;
+  if (!picked) {
+    return undefined;
   }
-
-  const action = await vscode.window.showWarningMessage(
-    `Delete provider mode "${getModeDisplayName(modeName)}"? This removes its saved profile.`,
-    { modal: true },
-    "Delete"
-  );
-  if (action !== "Delete") {
-    return;
+  if (picked.action === "create") {
+    return { action: "create", source: picked.source };
   }
-
-  const result = deleteProviderProfile(modeName);
-  if (!result.success) {
-    vscode.window.showErrorMessage(result.message);
-    return;
-  }
-
-  vscode.window.showInformationMessage(`✓ ${result.message}`);
-  refreshAll(accountTree, providerTree, statusBar);
+  return { action: "switch", provider: picked.provider };
 }
 
 async function restoreSelectionAfterLogin(
-  previousSelection: ReturnType<typeof getCurrentSelection>,
-  targetName: string
+  previousSelection: ReturnType<typeof getSavedCurrentSelection>,
+  targetAccount: SavedAccountInfo,
 ) {
-  if (previousSelection.kind === "account" && previousSelection.name === targetName) {
+  if (
+    previousSelection.kind === "account"
+    && previousSelection.name === targetAccount.name
+    && previousSelection.source === targetAccount.source
+  ) {
     return { restored: false, restoredLabel: undefined as string | undefined };
   }
 
   if (previousSelection.kind === "account") {
-    const restored = useAccount(previousSelection.name);
+    const previousAccount = getSavedAccountEntry(previousSelection.name, previousSelection.source);
+    if (!previousAccount) {
+      return { restored: false, restoredLabel: undefined as string | undefined };
+    }
+    const restored = await useSavedAccountEntry(previousAccount);
     if (!restored.success) {
       vscode.window.showWarningMessage(
-        `Saved account "${targetName}" was updated, but restoring account "${previousSelection.name}" failed: ${restored.message}`
+        `Saved account "${targetAccount.name}" was updated, but restoring account "${previousSelection.name}" failed: ${restored.message}`,
       );
       return { restored: false, restoredLabel: undefined as string | undefined };
     }
-    return { restored: true, restoredLabel: previousSelection.name };
+    return { restored: true, restoredLabel: `${previousSelection.name} (${getSourceLabel(previousSelection.source)})` };
   }
 
   if (previousSelection.kind === "provider") {
-    const restored = switchMode(previousSelection.name);
+    const previousProvider = getSavedProviderEntry(previousSelection.name, previousSelection.source);
+    if (!previousProvider) {
+      return { restored: false, restoredLabel: undefined as string | undefined };
+    }
+    const restored = await switchToSavedProviderEntry(previousProvider);
     if (!restored.success) {
       vscode.window.showWarningMessage(
-        `Saved account "${targetName}" was updated, but restoring mode "${getModeDisplayName(previousSelection.name)}" failed: ${restored.message}`
+        `Saved account "${targetAccount.name}" was updated, but restoring mode "${getModeDisplayName(previousSelection.name)}" failed: ${restored.message}`,
       );
       return { restored: false, restoredLabel: undefined as string | undefined };
     }
@@ -361,20 +392,20 @@ function refreshFailureSupportsRelogin(message: string): boolean {
   return normalized.includes("refresh_token_reused") || normalized.includes("sign in again");
 }
 
-async function promptForAccountRename(currentName: string): Promise<string | undefined> {
+async function promptForAccountRename(account: SavedAccountInfo): Promise<string | undefined> {
   return vscode.window.showInputBox({
-    prompt: `Rename account "${currentName}"`,
+    prompt: `Rename account "${account.name}"`,
     placeHolder: "Enter a new account name",
-    value: currentName,
+    value: account.name,
     validateInput: (value) => {
       const trimmed = value.trim();
       if (!trimmed) {
         return "Name is required";
       }
-      if (trimmed === currentName) {
+      if (trimmed === account.name) {
         return "Enter a different name";
       }
-      if (listAccounts().some((account) => account.name === trimmed)) {
+      if (listSavedAccounts().some((candidate) => candidate.source === account.source && candidate.name === trimmed)) {
         return `Account "${trimmed}" already exists`;
       }
       return null;
@@ -397,37 +428,19 @@ async function askRequiredValue(options: {
   });
 }
 
-async function ensureProviderProfile(name: string): Promise<ProviderProfile | null> {
-  const existing = readProviderProfile(name);
-  if (existing) {
-    return existing;
-  }
-
-  const defaults = getDefaultProviderProfile(name);
-  const draft = readProviderProfileDraft(getNamedProviderPath(name), name);
-  if (draft.invalid) {
-    void vscode.window.showWarningMessage(
-      `Provider "${name}" is incomplete or invalid. Required fields will be prompted and the profile will be updated.`
-    );
-  }
-
-  const existingApiKey =
-    typeof draft.auth.OPENAI_API_KEY === "string" && draft.auth.OPENAI_API_KEY.trim()
-      ? draft.auth.OPENAI_API_KEY
-      : undefined;
-  const existingBaseUrl =
-    typeof draft.config.base_url === "string" && draft.config.base_url.trim()
-      ? draft.config.base_url
-      : defaults.config.base_url || undefined;
-  const existingWireApi =
-    typeof draft.config.wire_api === "string" && draft.config.wire_api.trim()
-      ? draft.config.wire_api
-      : defaults.config.wire_api;
+async function ensureProviderProfile(name: string, source: StorageSource): Promise<ProviderProfile | null> {
+  const defaults = await buildProviderProfileForSource(name, source);
+  const draft = {
+    auth: defaults.auth as Record<string, unknown>,
+    config: defaults.config as unknown as Record<string, unknown>,
+    exists: true,
+    invalid: false,
+  };
 
   const apiKey = await askRequiredValue({
     prompt: `Configure provider "${name}": OPENAI_API_KEY`,
     placeHolder: "sk-...",
-    value: existingApiKey,
+    value: typeof defaults.auth.OPENAI_API_KEY === "string" ? defaults.auth.OPENAI_API_KEY : undefined,
     password: true,
   });
   if (!apiKey) {
@@ -437,7 +450,7 @@ async function ensureProviderProfile(name: string): Promise<ProviderProfile | nu
   const baseUrl = await askRequiredValue({
     prompt: `Configure provider "${name}": base_url`,
     placeHolder: "https://api.example.com/v1",
-    value: existingBaseUrl,
+    value: defaults.config.base_url || undefined,
   });
   if (!baseUrl) {
     return null;
@@ -446,7 +459,7 @@ async function ensureProviderProfile(name: string): Promise<ProviderProfile | nu
   const wireApi = await askRequiredValue({
     prompt: `Configure provider "${name}": wire_api`,
     placeHolder: defaults.config.wire_api,
-    value: existingWireApi,
+    value: defaults.config.wire_api,
   });
   if (!wireApi) {
     return null;
@@ -458,9 +471,9 @@ async function ensureProviderProfile(name: string): Promise<ProviderProfile | nu
     wireApi,
   });
 
-  writeProviderProfile(profile);
+  await saveProviderProfileToSource(profile, source);
   vscode.window.showInformationMessage(
-    `${draft.exists ? "Updated" : "Created"} provider profile for "${name}".`
+    `${draft.exists ? "Updated" : "Created"} provider profile for "${name}" in ${getSourceLabel(source)} storage.`,
   );
   return profile;
 }
@@ -481,55 +494,62 @@ export function registerCommands(
       });
       if (!name) return;
 
-      const dest = getNamedAuthPath(name.trim());
-      if (fs.existsSync(dest)) {
-        const existingName = name.trim();
-        const refreshResult = await vscode.window.withProgress(
-          { location: vscode.ProgressLocation.Notification, title: `Refreshing token for "${existingName}"...` },
-          async () => refreshAccount(existingName)
-        );
+      const trimmedName = name.trim();
+      const target: StorageSource = vscode.workspace
+        .getConfiguration("codex-account-switch")
+        .get<StorageSource>("defaultSaveTarget", "local");
+      if (target === "cloud" && !(await ensureSavedAuthPassphrase(context))) {
+        vscode.window.showWarningMessage("Cloud storage requires a local storage password.");
+        return;
+      }
 
+      const existing = getSavedAccountEntry(trimmedName, target);
+      if (existing) {
+        if (existing.storageState !== "ready") {
+          vscode.window.showErrorMessage(existing.storageMessage ?? `Saved account "${trimmedName}" is unavailable.`);
+          return;
+        }
+
+        const refreshResult = await vscode.window.withProgress(
+          { location: vscode.ProgressLocation.Notification, title: `Refreshing token for "${trimmedName}"...` },
+          async () => refreshSavedAccountEntry(existing),
+        );
         if (refreshResult.success) {
-          const refreshedAuth = readNamedAuth(existingName);
-          const tokenStatus = refreshedAuth ? formatTokenExpiry(refreshedAuth) : undefined;
-          vscode.window.showInformationMessage(
-            tokenStatus
-              ? `Account "${existingName}" already exists. Token refreshed. Remaining validity: ${tokenStatus}.`
-              : `Account "${existingName}" already exists. Token refreshed.`
-          );
+          await refreshTokenAndQuota(accountTree, statusBar, existing.id);
+          vscode.window.showInformationMessage(`Account "${trimmedName}" already exists in ${getSourceLabel(target)} storage. Token refreshed.`);
           refreshAll(accountTree, providerTree, statusBar);
           return;
         }
 
-        const loginMethod = await promptLoginMethod(
-          `Account "${existingName}" already exists and token refresh failed. Start login and overwrite it?`,
-          "Login and overwrite"
+        const overwriteMethod = await promptLoginMethod(
+          `Account "${trimmedName}" already exists in ${getSourceLabel(target)} storage and token refresh failed. Start login and overwrite it?`,
+          "Login and overwrite",
         );
-        if (loginMethod === "cancel") return;
+        if (overwriteMethod === "cancel") return;
 
         const loginState = exitProviderModeForLogin();
         if (!loginState) return;
 
-        const completed = await runCodexLogin({ useDeviceAuth: loginMethod === "device-auth" });
+        const completed = await runCodexLogin({ useDeviceAuth: overwriteMethod === "device-auth" });
         if (!completed) {
-          restoreProviderModeAfterFailedLogin(loginState.previousSelection, loginState.switched);
+          await restoreProviderModeAfterFailedLogin(loginState.previousSelection, loginState.switched);
           return;
         }
 
-        const result = addAccountFromAuth(name.trim());
+        const result = await saveCurrentAuthAsAccount(trimmedName, target);
         if (result.success) {
           refreshAll(accountTree, providerTree, statusBar);
-          await promptReloadWindowAfterAdd(name.trim(), result.meta?.email);
+          await promptReloadWindowAfterAdd(trimmedName, result.meta?.email);
         } else {
-          restoreProviderModeAfterFailedLogin(loginState.previousSelection, loginState.switched);
+          await restoreProviderModeAfterFailedLogin(loginState.previousSelection, loginState.switched);
           vscode.window.showErrorMessage(result.message);
         }
         return;
       }
 
       const loginMethod = await promptLoginMethod(
-        `Add account "${name.trim()}". Use device auth for this login?`,
-        "Login"
+        `Add account "${trimmedName}" to ${getSourceLabel(target)} storage. Use device auth for this login?`,
+        "Login",
       );
       if (loginMethod === "cancel") return;
 
@@ -538,16 +558,16 @@ export function registerCommands(
 
       const completed = await runCodexLogin({ useDeviceAuth: loginMethod === "device-auth" });
       if (!completed) {
-        restoreProviderModeAfterFailedLogin(loginState.previousSelection, loginState.switched);
+        await restoreProviderModeAfterFailedLogin(loginState.previousSelection, loginState.switched);
         return;
       }
 
-      const result = addAccountFromAuth(name.trim());
+      const result = await saveCurrentAuthAsAccount(trimmedName, target);
       if (result.success) {
         refreshAll(accountTree, providerTree, statusBar);
-        await promptReloadWindowAfterAdd(name.trim(), result.meta?.email);
+        await promptReloadWindowAfterAdd(trimmedName, result.meta?.email);
       } else {
-        restoreProviderModeAfterFailedLogin(loginState.previousSelection, loginState.switched);
+        await restoreProviderModeAfterFailedLogin(loginState.previousSelection, loginState.switched);
         vscode.window.showErrorMessage(result.message);
       }
     }),
@@ -555,12 +575,16 @@ export function registerCommands(
     vscode.commands.registerCommand(
       "codex-account-switch.reloginAccount",
       async (item?: AccountTreeItem) => {
-        const name = await pickAccountName(item, "Select an account to re-login");
-        if (!name) return;
+        const account = await pickSavedAccount(item, "Select an account to re-login");
+        if (!account) return;
+        if (account.storageState !== "ready") {
+          vscode.window.showErrorMessage(account.storageMessage ?? `Saved account "${account.name}" is unavailable.`);
+          return;
+        }
 
         const loginMethod = await promptLoginMethod(
-          `Re-login account "${name}" and overwrite its saved auth.json?`,
-          "Re-login"
+          `Re-login account "${account.name}" and overwrite its saved auth in ${getSourceLabel(account.source)} storage?`,
+          "Re-login",
         );
         if (loginMethod === "cancel") return;
 
@@ -570,27 +594,32 @@ export function registerCommands(
         const previousSelection = loginState.previousSelection;
         const completed = await runCodexLogin({ useDeviceAuth: loginMethod === "device-auth" });
         if (!completed) {
-          restoreProviderModeAfterFailedLogin(previousSelection, loginState.switched);
+          await restoreProviderModeAfterFailedLogin(previousSelection, loginState.switched);
           return;
         }
 
-        const result = addAccountFromAuth(name);
+        const result = await saveCurrentAuthAsAccount(account.name, account.source);
+        const updatedAccount = getSavedAccountEntry(account.name, account.source) ?? account;
         const shouldRestore =
           previousSelection.kind !== "unknown" &&
-          !(previousSelection.kind === "account" && previousSelection.name === name);
+          !(
+            previousSelection.kind === "account"
+            && previousSelection.name === account.name
+            && previousSelection.source === account.source
+          );
         const restoreResult = shouldRestore
-          ? await restoreSelectionAfterLogin(previousSelection, name)
+          ? await restoreSelectionAfterLogin(previousSelection, updatedAccount)
           : { restored: false, restoredLabel: undefined as string | undefined };
 
         if (result.success) {
           refreshAll(accountTree, providerTree, statusBar);
           if (restoreResult.restored) {
             const savedMessage = result.meta?.email
-              ? `✓ Account "${name}" was updated (${result.meta.email}). Active selection stayed on "${restoreResult.restoredLabel}".`
-              : `✓ Account "${name}" was updated. Active selection stayed on "${restoreResult.restoredLabel}".`;
+              ? `✓ Account "${account.name}" was updated (${result.meta.email}). Active selection stayed on "${restoreResult.restoredLabel}".`
+              : `✓ Account "${account.name}" was updated. Active selection stayed on "${restoreResult.restoredLabel}".`;
             vscode.window.showInformationMessage(savedMessage);
           } else {
-            await promptReloadWindowAfterAdd(name, result.meta?.email);
+            await promptReloadWindowAfterAdd(account.name, result.meta?.email);
           }
         } else {
           if (restoreResult.restored) {
@@ -604,13 +633,13 @@ export function registerCommands(
     vscode.commands.registerCommand(
       "codex-account-switch.renameAccount",
       async (item?: AccountTreeItem) => {
-        const name = await pickAccountName(item, "Select an account to rename");
-        if (!name) return;
+        const account = await pickSavedAccount(item, "Select an account to rename");
+        if (!account) return;
 
-        const newName = await promptForAccountRename(name);
+        const newName = await promptForAccountRename(account);
         if (!newName) return;
 
-        const result = renameAccount(name, newName);
+        const result = await renameSavedAccountEntry(account, newName);
         if (result.success) {
           vscode.window.showInformationMessage(`✓ ${result.message}`);
           refreshAll(accountTree, providerTree, statusBar);
@@ -623,38 +652,17 @@ export function registerCommands(
     vscode.commands.registerCommand(
       "codex-account-switch.removeAccount",
       async (item?: AccountTreeItem) => {
-        let name: string | undefined;
-
-        if (item) {
-          name = item.account.name;
-        } else {
-          const accounts = listAccounts();
-          if (accounts.length === 0) {
-            vscode.window.showWarningMessage("No saved accounts");
-            return;
-          }
-          name = await vscode.window.showQuickPick(
-            accounts.map((a) => a.name),
-            { placeHolder: "Select an account to remove" }
-          );
-        }
-
-        if (!name) return;
-
-        const selection = getCurrentSelection();
-        if (selection.kind === "account" && selection.name === name) {
-          vscode.window.showWarningMessage(`Account "${name}" is currently in use and cannot be removed.`);
-          return;
-        }
+        const account = await pickSavedAccount(item, "Select an account to remove");
+        if (!account) return;
 
         const confirm = await vscode.window.showWarningMessage(
-          `Remove account "${name}"?`,
+          `Remove account "${account.name}" from ${getSourceLabel(account.source)} storage?`,
           "Remove",
-          "Cancel"
+          "Cancel",
         );
         if (confirm !== "Remove") return;
 
-        const result = removeAccount(name);
+        const result = await removeSavedAccountEntry(account);
         if (result.success) {
           vscode.window.showInformationMessage(`✓ ${result.message}`);
           refreshAll(accountTree, providerTree, statusBar);
@@ -667,36 +675,16 @@ export function registerCommands(
     vscode.commands.registerCommand(
       "codex-account-switch.useAccount",
       async (item?: AccountTreeItem) => {
-        let name: string | undefined;
+        const account = await pickSavedAccount(item, "Select an account to switch to");
+        if (!account) return;
 
-        if (item) {
-          name = item.account.name;
-        } else {
-          const accounts = listAccounts();
-          if (accounts.length === 0) {
-            vscode.window.showWarningMessage("No saved accounts");
-            return;
-          }
-          const items = accounts.map((a) => ({
-            label: a.isCurrent ? `$(pass-filled) ${a.name}` : a.name,
-            description: `${a.meta?.email ?? ""} (${a.meta?.plan ?? ""})`,
-            name: a.name,
-          }));
-          const picked = await vscode.window.showQuickPick(items, {
-            placeHolder: "Select an account to switch to",
-          });
-          name = picked?.name;
-        }
-
-        if (!name) return;
-
-        const result = useAccount(name);
+        const result = await useSavedAccountEntry(account);
         if (result.success) {
           vscode.window.showInformationMessage(
             `✓ ${result.message} (${result.meta?.email ?? "unknown"})`
           );
           refreshAll(accountTree, providerTree, statusBar);
-          await maybeReloadWindowAfterSwitch(name, "account");
+          await maybeReloadWindowAfterSwitch(account.name, "account");
         } else {
           vscode.window.showErrorMessage(result.message);
         }
@@ -704,21 +692,16 @@ export function registerCommands(
     ),
 
     vscode.commands.registerCommand("codex-account-switch.switchMode", async () => {
-      const selection = getCurrentSelection();
-      const currentMode = selection.kind === "provider" ? selection.name : "account";
-      const modes = Array.from(new Set([...listModes(), ...(selection.kind === "provider" ? [selection.name] : [])]));
-      const picked = await pickModeAction(currentMode, modes);
+      const picked = await pickModeAction();
       if (!picked) {
         return;
       }
 
-      if (picked.action === "delete") {
-        await promptToDeleteMode(accountTree, providerTree, statusBar, picked.modeName);
-        return;
-      }
-
-      let targetName = picked.action === "switch" ? picked.modeName : "";
       if (picked.action === "create") {
+        if (picked.source === "cloud" && !(await ensureSavedAuthPassphrase(context))) {
+          vscode.window.showWarningMessage("Cloud storage requires a local storage password.");
+          return;
+        }
         const newName = await vscode.window.showInputBox({
           prompt: "Enter a name for the new provider",
           placeHolder: "e.g. my-proxy, local-api",
@@ -733,17 +716,58 @@ export function registerCommands(
         if (!newName) {
           return;
         }
-        targetName = newName.trim();
+        const targetName = newName.trim();
+        const created = await ensureProviderProfile(targetName, picked.source);
+        if (!created) {
+          return;
+        }
+        const provider = getSavedProviderEntry(targetName, picked.source);
+        if (!provider) {
+          vscode.window.showErrorMessage(`Provider "${targetName}" was not found after saving.`);
+          return;
+        }
+        const result = await switchToSavedProviderEntry(provider);
+        if (!result.success) {
+          vscode.window.showErrorMessage(result.message);
+          return;
+        }
+        vscode.window.showInformationMessage(`✓ ${result.message}`);
+        refreshAll(accountTree, providerTree, statusBar);
+        await maybeReloadWindowAfterSwitch(targetName, "mode");
+        return;
       }
 
-      if (targetName !== "account" && !readProviderProfile(targetName)) {
-        const created = await ensureProviderProfile(targetName);
+      if (!picked.provider) {
+        const result = switchMode("account");
+        if (!result.success) {
+          vscode.window.showErrorMessage(result.message);
+          return;
+        }
+        vscode.window.showInformationMessage(`✓ ${result.message}`);
+        refreshAll(accountTree, providerTree, statusBar);
+        await maybeReloadWindowAfterSwitch("account", "mode");
+        return;
+      }
+
+      if (picked.provider.locked) {
+        vscode.window.showErrorMessage(picked.provider.storageMessage ?? `Provider "${picked.provider.name}" is unavailable.`);
+        return;
+      }
+
+      if (picked.provider.invalid || !picked.provider.profile) {
+        const created = await ensureProviderProfile(picked.provider.name, picked.provider.source);
         if (!created) {
           return;
         }
       }
 
-      const result = switchMode(targetName);
+      const provider = getSavedProviderEntry(picked.provider.name, picked.provider.source);
+      if (!provider) {
+        vscode.window.showErrorMessage(`Provider "${picked.provider.name}" is unavailable.`);
+        return;
+      }
+
+      const result = await switchToSavedProviderEntry(provider);
       if (!result.success) {
         vscode.window.showErrorMessage(result.message);
         return;
@@ -751,47 +775,48 @@ export function registerCommands(
 
       vscode.window.showInformationMessage(`✓ ${result.message}`);
       refreshAll(accountTree, providerTree, statusBar);
-      await maybeReloadWindowAfterSwitch(targetName, "mode");
+      await maybeReloadWindowAfterSwitch(provider.name, "mode");
     }),
 
     vscode.commands.registerCommand(
       "codex-account-switch.refreshToken",
       async (item?: AccountTreeItem) => {
-        const name = item?.account.name;
+        const account = await pickSavedAccount(item, "Select an account to refresh");
+        if (!account) return;
 
         await vscode.window.withProgress(
           { location: vscode.ProgressLocation.Notification, title: "Refreshing token and quota..." },
           async () => {
             let result;
             try {
-              result = await refreshAccount(name);
+              result = await refreshSavedAccountEntry(account);
             } catch (error) {
               logWarn(LOG_PREFIX, "refresh-token-command-failed", {
-                account: name ?? null,
+                account: account.id,
                 error: error instanceof Error ? error.message : String(error),
               });
               vscode.window.showErrorMessage(
-                `Token refresh failed${name ? ` for "${name}"` : ""}: ${error instanceof Error ? error.message : error}`
+                `Token refresh failed for "${account.name}": ${error instanceof Error ? error.message : error}`,
               );
               return;
             }
             if (result.success) {
               try {
-                await refreshTokenAndQuota(accountTree, statusBar, name);
+                await refreshTokenAndQuota(accountTree, statusBar, account.id);
               } catch (error) {
                 logWarn(LOG_PREFIX, "refresh-token-quota-followup-failed", {
-                  account: name ?? null,
+                  account: account.id,
                   error: error instanceof Error ? error.message : String(error),
                 });
                 vscode.window.showWarningMessage(
-                  `Token refreshed${name ? ` for "${name}"` : ""}, but quota refresh failed: ${error instanceof Error ? error.message : error}`
+                  `Token refreshed for "${account.name}", but quota refresh failed: ${error instanceof Error ? error.message : error}`,
                 );
                 return;
               }
               vscode.window.showInformationMessage(`✓ ${result.message} and quota was refreshed`);
             } else if (result.unsupported) {
               vscode.window.showWarningMessage(result.message);
-            } else if (name && refreshFailureSupportsRelogin(result.message)) {
+            } else if (refreshFailureSupportsRelogin(result.message)) {
               const action = await vscode.window.showErrorMessage(result.message, "Re-login");
               if (action === "Re-login") {
                 await vscode.commands.executeCommand("codex-account-switch.reloginAccount", item);
@@ -803,6 +828,62 @@ export function registerCommands(
         );
       }
     ),
+
+    vscode.commands.registerCommand("codex-account-switch.moveAccountToCloud", async (item?: AccountTreeItem) => {
+      const account = await pickSavedAccount(item, "Select a local account to move to cloud storage");
+      if (!account) return;
+      if (!(await ensureSavedAuthPassphrase(context))) {
+        vscode.window.showWarningMessage("Cloud storage requires a local storage password.");
+        return;
+      }
+      const result = await moveSavedAccountEntry(account, "cloud");
+      if (!result.success) {
+        vscode.window.showErrorMessage(result.message);
+        return;
+      }
+      vscode.window.showInformationMessage(`✓ ${result.message}`);
+      refreshAll(accountTree, providerTree, statusBar);
+    }),
+
+    vscode.commands.registerCommand("codex-account-switch.moveAccountToLocal", async (item?: AccountTreeItem) => {
+      const account = await pickSavedAccount(item, "Select a cloud account to move to local storage");
+      if (!account) return;
+      const result = await moveSavedAccountEntry(account, "local");
+      if (!result.success) {
+        vscode.window.showErrorMessage(result.message);
+        return;
+      }
+      vscode.window.showInformationMessage(`✓ ${result.message}`);
+      refreshAll(accountTree, providerTree, statusBar);
+    }),
+
+    vscode.commands.registerCommand("codex-account-switch.moveProviderToCloud", async (item?: ProviderTreeItem) => {
+      const provider = await pickSavedProvider(item, "Select a local provider to move to cloud storage");
+      if (!provider) return;
+      if (!(await ensureSavedAuthPassphrase(context))) {
+        vscode.window.showWarningMessage("Cloud storage requires a local storage password.");
+        return;
+      }
+      const result = await moveSavedProviderEntry(provider, "cloud");
+      if (!result.success) {
+        vscode.window.showErrorMessage(result.message);
+        return;
+      }
+      vscode.window.showInformationMessage(`✓ ${result.message}`);
+      refreshAll(accountTree, providerTree, statusBar);
+    }),
+
+    vscode.commands.registerCommand("codex-account-switch.moveProviderToLocal", async (item?: ProviderTreeItem) => {
+      const provider = await pickSavedProvider(item, "Select a cloud provider to move to local storage");
+      if (!provider) return;
+      const result = await moveSavedProviderEntry(provider, "local");
+      if (!result.success) {
+        vscode.window.showErrorMessage(result.message);
+        return;
+      }
+      vscode.window.showInformationMessage(`✓ ${result.message}`);
+      refreshAll(accountTree, providerTree, statusBar);
+    }),
 
     vscode.commands.registerCommand("codex-account-switch.refreshQuota", () => {
       void accountTree.refreshQuota().catch((error) => {
@@ -828,7 +909,13 @@ export function registerCommands(
       });
       if (!uri) return;
 
-      const data = exportAccounts();
+      let data;
+      try {
+        data = exportAccounts();
+      } catch (error) {
+        vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
+        return;
+      }
       if (data.accounts.length === 0) {
         vscode.window.showWarningMessage("No accounts to export");
         return;
@@ -901,6 +988,34 @@ export function registerCommands(
 
     vscode.commands.registerCommand("codex-account-switch.reloadWindow", async () => {
       await reloadWindow();
+    }),
+
+    vscode.commands.registerCommand("codex-account-switch.setStoragePassword", async () => {
+      const result = await promptAndStoreSavedAuthPassphrase(context, "set");
+      if (!result.stored) {
+        return;
+      }
+      vscode.window.showInformationMessage("Stored the local storage password on this machine.");
+      refreshAll(accountTree, providerTree, statusBar);
+    }),
+
+    vscode.commands.registerCommand("codex-account-switch.changeStoragePassword", async () => {
+      const result = await promptAndStoreSavedAuthPassphrase(context, "change");
+      if (!result.stored) {
+        return;
+      }
+      const suffix =
+        result.rewritten > 0
+          ? ` Re-encrypted ${result.rewritten} saved file${result.rewritten === 1 ? "" : "s"}.`
+          : "";
+      vscode.window.showInformationMessage(`Updated the local storage password on this machine.${suffix}`);
+      refreshAll(accountTree, providerTree, statusBar);
+    }),
+
+    vscode.commands.registerCommand("codex-account-switch.forgetStoragePassword", async () => {
+      await forgetSavedAuthPassphrase(context);
+      vscode.window.showInformationMessage("Forgot the local storage password on this machine.");
+      refreshAll(accountTree, providerTree, statusBar);
     }),
 
     vscode.commands.registerCommand("codex-account-switch.copyProviderField", async (item?: ProviderDetailItem) => {

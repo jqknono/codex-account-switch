@@ -25,6 +25,7 @@ import {
   listModes,
   switchMode,
   readProviderProfile,
+  readProviderProfileResult,
   writeProviderProfile,
   getDefaultProviderProfile,
   getNamedProviderPath,
@@ -148,9 +149,13 @@ function readProviderProfileDraft(name: string): {
 }
 
 async function ensureProviderProfile(name: string): Promise<ProviderProfile | null> {
-  const existing = readProviderProfile(name);
-  if (existing) {
-    return existing;
+  const existingResult = readProviderProfileResult(name);
+  if (existingResult.status === "ok") {
+    return existingResult.value;
+  }
+  if (existingResult.status === "locked") {
+    console.log(chalk.red(existingResult.message));
+    return null;
   }
 
   const defaults = getDefaultProviderProfile(name);
@@ -225,9 +230,14 @@ export function cmdList(): void {
     const paddedName = account.name.padEnd(maxNameLen);
     const email = account.meta?.email ?? "unknown";
     const plan = account.meta?.plan ?? "unknown";
-    const tokenStatus = account.auth
-      ? `${formatTokenStatusTag("access", account.auth)}${formatTokenStatusTag("refresh", account.auth)}`
-      : "";
+    const tokenStatus =
+      account.storageState === "ready" && account.auth
+        ? `${formatTokenStatusTag("access", account.auth)}${formatTokenStatusTag("refresh", account.auth)}`
+        : account.storageState === "locked"
+          ? ` [storage: ${chalk.yellow("locked")}]`
+          : account.storageState === "invalid"
+            ? ` [storage: ${chalk.red("invalid")}]`
+            : "";
 
     console.log(
       `${marker}${chalk.bold(paddedName)}  ${chalk.dim(email)}  ${chalk.cyan(plan)}${tokenStatus}${tag}`
@@ -416,7 +426,13 @@ export async function cmdMode(name?: string): Promise<void> {
 
   const resolvedName = resolveModeNameInput(name);
 
-  if (resolvedName !== "account" && !readProviderProfile(resolvedName)) {
+  const providerResult = resolvedName === "account" ? null : readProviderProfileResult(resolvedName);
+  if (providerResult?.status === "locked") {
+    console.log(chalk.red(providerResult.message));
+    return;
+  }
+
+  if (resolvedName !== "account" && providerResult?.status !== "ok") {
     const created = await ensureProviderProfile(resolvedName);
     if (!created) {
       console.log(chalk.red(`Failed to create provider "${resolvedName}".`));
@@ -587,7 +603,13 @@ export async function cmdRefresh(name?: string): Promise<void> {
 
 export function cmdExport(file?: string, names?: string[]): void {
   const outputPath = file ?? "codex-accounts.json";
-  const data = exportAccounts(names);
+  let data: ExportData;
+  try {
+    data = exportAccounts(names);
+  } catch (error) {
+    console.log(chalk.red(error instanceof Error ? error.message : String(error)));
+    return;
+  }
 
   if (data.accounts.length === 0) {
     console.log(chalk.yellow("No accounts available to export."));

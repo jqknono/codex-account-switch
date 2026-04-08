@@ -831,6 +831,116 @@ test("writeAuthFile strips legacy refresh_token_expires_at fields", () => {
   assert.equal(saved.ignored_field, undefined);
 });
 
+test("saved auth files can be encrypted and later unlocked with a passphrase", () => {
+  const codexHome = createTempCodexHome();
+  process.env.CODEX_HOME = codexHome;
+
+  const authPath = path.join(codexHome, "auth_work.json");
+  core.setSavedAuthPassphrase("test-passphrase");
+  core.writeSavedAuthFile(authPath, makeAccountAuth("acct-work", "rt-work", "access-work"));
+
+  const raw = JSON.parse(fs.readFileSync(authPath, "utf-8"));
+  assert.equal(raw.kind, "saved_auth");
+  assert.equal(core.hasEncryptedSavedFiles(), true);
+
+  core.setSavedAuthPassphrase(null);
+  const locked = core.readSavedAuthFileResult(authPath);
+  assert.equal(locked.status, "locked");
+
+  core.setSavedAuthPassphrase("test-passphrase");
+  const reopened = core.readSavedAuthFileResult(authPath);
+  assert.equal(reopened.status, "ok");
+  assert.equal(reopened.value.tokens.account_id, "acct-work");
+});
+
+test("useAccount reports locked storage when the saved account is encrypted but no passphrase is loaded", () => {
+  const codexHome = createTempCodexHome();
+  process.env.CODEX_HOME = codexHome;
+
+  const authPath = path.join(codexHome, "auth_work.json");
+  core.setSavedAuthPassphrase("test-passphrase");
+  core.writeSavedAuthFile(authPath, makeAccountAuth("acct-work", "rt-work", "access-work"));
+  core.setSavedAuthPassphrase(null);
+
+  const accounts = core.listAccounts();
+  assert.equal(accounts[0].storageState, "locked");
+
+  const result = core.useAccount("work");
+  assert.equal(result.success, false);
+  assert.match(result.message, /saved auth storage is locked/i);
+  assert.equal(fs.existsSync(path.join(codexHome, "auth.json")), false);
+});
+
+test("useAccount decrypts encrypted saved auth while keeping the current auth file plaintext", () => {
+  const codexHome = createTempCodexHome();
+  process.env.CODEX_HOME = codexHome;
+
+  const authPath = path.join(codexHome, "auth_work.json");
+  core.setSavedAuthPassphrase("test-passphrase");
+  core.writeSavedAuthFile(authPath, makeAccountAuth("acct-work", "rt-work", "access-work"));
+
+  const result = core.useAccount("work");
+  assert.equal(result.success, true);
+
+  const currentAuth = JSON.parse(fs.readFileSync(path.join(codexHome, "auth.json"), "utf-8"));
+  assert.equal(currentAuth.tokens.account_id, "acct-work");
+
+  const rawSaved = JSON.parse(fs.readFileSync(authPath, "utf-8"));
+  assert.equal(rawSaved.kind, "saved_auth");
+});
+
+test("provider profiles can be encrypted and report locked storage without a passphrase", () => {
+  const codexHome = createTempCodexHome();
+  process.env.CODEX_HOME = codexHome;
+
+  core.setSavedAuthPassphrase("test-passphrase");
+  core.writeProviderProfile({
+    kind: "provider",
+    name: "corp",
+    auth: { OPENAI_API_KEY: "sk-corp" },
+    config: { name: "corp", base_url: "http://corp.local/v1", wire_api: "responses" },
+  });
+
+  const providerPath = path.join(codexHome, "provider_corp.json");
+  const raw = JSON.parse(fs.readFileSync(providerPath, "utf-8"));
+  assert.equal(raw.kind, "saved_provider");
+
+  core.setSavedAuthPassphrase(null);
+  const locked = core.readProviderProfileResult("corp");
+  assert.equal(locked.status, "locked");
+
+  const switchLocked = core.switchMode("corp");
+  assert.equal(switchLocked.success, false);
+  assert.match(switchLocked.message, /saved auth storage is locked/i);
+
+  core.setSavedAuthPassphrase("test-passphrase");
+  const switchUnlocked = core.switchMode("corp");
+  assert.equal(switchUnlocked.success, true);
+  const currentAuth = JSON.parse(fs.readFileSync(path.join(codexHome, "auth.json"), "utf-8"));
+  assert.equal(currentAuth.OPENAI_API_KEY, "sk-corp");
+});
+
+test("changeSavedAuthPassphrase rewrites encrypted saved files to the new passphrase", () => {
+  const codexHome = createTempCodexHome();
+  process.env.CODEX_HOME = codexHome;
+
+  const authPath = path.join(codexHome, "auth_work.json");
+  core.setSavedAuthPassphrase("old-passphrase");
+  core.writeSavedAuthFile(authPath, makeAccountAuth("acct-work", "rt-work", "access-work"));
+
+  const result = core.changeSavedAuthPassphrase("new-passphrase");
+  assert.equal(result.rewritten, 1);
+
+  core.setSavedAuthPassphrase("old-passphrase");
+  const oldPassRead = core.readSavedAuthFileResult(authPath);
+  assert.equal(oldPassRead.status, "locked");
+
+  core.setSavedAuthPassphrase("new-passphrase");
+  const newPassRead = core.readSavedAuthFileResult(authPath);
+  assert.equal(newPassRead.status, "ok");
+  assert.equal(newPassRead.value.tokens.account_id, "acct-work");
+});
+
 test("switchMode removes leading blank lines from config.toml", () => {
   const codexHome = createTempCodexHome();
   process.env.CODEX_HOME = codexHome;

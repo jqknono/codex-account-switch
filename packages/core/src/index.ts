@@ -1,5 +1,6 @@
 export * from "./types";
 export * from "./paths";
+export * from "./savedStorage";
 export * from "./auth";
 export * from "./config";
 export * from "./providers";

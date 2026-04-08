@@ -2,7 +2,7 @@ import * as fs from "fs";
 import * as https from "https";
 import * as querystring from "querystring";
 import { AuthFile } from "./types";
-import { writeAuthFile } from "./auth";
+import { readSavedAuthFileResult, writeAuthFile, writeSavedAuthFile } from "./auth";
 
 const TOKEN_URL = "https://auth.openai.com/oauth/token";
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -80,11 +80,23 @@ export async function refreshAccessToken(auth: AuthFile): Promise<RefreshRespons
   return JSON.parse(raw) as RefreshResponse;
 }
 
-export async function refreshAndSave(authPath: string): Promise<AuthFile> {
-  const auth = JSON.parse(fs.readFileSync(authPath, "utf-8")) as AuthFile;
+export async function refreshAndSave(authPath: string, options?: { saved?: boolean }): Promise<AuthFile> {
+  const auth = options?.saved
+    ? (() => {
+        const result = readSavedAuthFileResult(authPath);
+        if (result.status !== "ok") {
+          throw new Error("message" in result ? result.message : "Saved auth file was not found.");
+        }
+        return result.value;
+      })()
+    : (JSON.parse(fs.readFileSync(authPath, "utf-8")) as AuthFile);
   const result = await refreshAccessToken(auth);
   applyRefreshResponse(auth, result);
 
-  writeAuthFile(authPath, auth);
+  if (options?.saved) {
+    writeSavedAuthFile(authPath, auth);
+  } else {
+    writeAuthFile(authPath, auth);
+  }
   return auth;
 }
