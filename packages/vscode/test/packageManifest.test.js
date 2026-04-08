@@ -86,6 +86,26 @@ test("storage target settings are contributed", () => {
     properties["codex-account-switch.syncedStorage"]?.type,
     "object"
   );
+  assert.equal(
+    properties["codex-account-switch.cloudTokenAutoUpdate"]?.type,
+    "boolean"
+  );
+  assert.equal(
+    properties["codex-account-switch.cloudTokenAutoUpdate"]?.default,
+    false
+  );
+  assert.equal(
+    properties["codex-account-switch.cloudTokenAutoUpdateIntervalHours"]?.type,
+    "number"
+  );
+  assert.equal(
+    properties["codex-account-switch.cloudTokenAutoUpdateIntervalHours"]?.default,
+    24
+  );
+  assert.equal(
+    properties["codex-account-switch.cloudTokenAutoUpdateIntervalHours"]?.minimum,
+    1
+  );
 });
 
 test("storage migration commands are contributed", () => {

@@ -88,8 +88,12 @@ interface CurrentSelectionMarker {
 
 const SYNCED_STORAGE_SETTING = "syncedStorage";
 const DEFAULT_TARGET_SETTING = "defaultSaveTarget";
+const CLOUD_TOKEN_AUTO_UPDATE_SETTING = "cloudTokenAutoUpdate";
+const CLOUD_TOKEN_AUTO_UPDATE_INTERVAL_HOURS_SETTING = "cloudTokenAutoUpdateIntervalHours";
 const CURRENT_SELECTION_KEY = "codex-account-switch.currentSavedSelection";
+const DEFAULT_CLOUD_TOKEN_AUTO_UPDATE_INTERVAL_HOURS = 24;
 const QUOTA_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
 
 let extensionContext: vscode.ExtensionContext | null = null;
 
@@ -353,6 +357,53 @@ export function getDefaultSaveTarget(): SaveTarget {
   return getConfiguration().get<SaveTarget>(DEFAULT_TARGET_SETTING, "local");
 }
 
+function getCloudTokenAutoUpdate(): boolean {
+  return getConfiguration().get<boolean>(CLOUD_TOKEN_AUTO_UPDATE_SETTING, false);
+}
+
+function getCloudTokenAutoUpdateIntervalHours(): number {
+  const raw = getConfiguration().get<number>(
+    CLOUD_TOKEN_AUTO_UPDATE_INTERVAL_HOURS_SETTING,
+    DEFAULT_CLOUD_TOKEN_AUTO_UPDATE_INTERVAL_HOURS,
+  );
+  return Number.isFinite(raw) && raw >= 1 ? raw : DEFAULT_CLOUD_TOKEN_AUTO_UPDATE_INTERVAL_HOURS;
+}
+
+function markCloudTokenSync(auth: AuthFile): void {
+  auth.last_cloud_token_sync = new Date().toISOString();
+}
+
+function shouldAutoPersistCloudTokens(auth: AuthFile): boolean {
+  if (!getCloudTokenAutoUpdate()) {
+    return false;
+  }
+
+  if (!auth.last_cloud_token_sync) {
+    return true;
+  }
+
+  const lastSyncTime = Date.parse(auth.last_cloud_token_sync);
+  if (Number.isNaN(lastSyncTime)) {
+    return true;
+  }
+
+  return Date.now() - lastSyncTime >= getCloudTokenAutoUpdateIntervalHours() * HOUR_MS;
+}
+
+async function persistCloudAccountAuth(
+  name: string,
+  auth: AuthFile,
+  mode: "manual" | "automatic",
+): Promise<boolean> {
+  if (mode === "automatic" && !shouldAutoPersistCloudTokens(auth)) {
+    return false;
+  }
+
+  markCloudTokenSync(auth);
+  await writeCloudAccount(name, auth);
+  return true;
+}
+
 function getReadyAccounts(): SavedAccountInfo[] {
   return listSavedAccounts().filter((account) => account.storageState === "ready" && account.auth);
 }
@@ -428,7 +479,7 @@ export async function syncCurrentAuthToSavedSelection(): Promise<void> {
   if (marker.kind === "account") {
     const auth = readCurrentAuth();
     if (auth && hasAccountAuthTokens(auth)) {
-      await writeCloudAccount(marker.name, auth);
+      await persistCloudAccountAuth(marker.name, auth, "automatic");
     }
     return;
   }
@@ -501,6 +552,7 @@ export async function saveCurrentAuthAsAccount(
     }
   }
 
+  markCloudTokenSync(auth);
   await writeCloudAccount(name, auth);
   return { success: true, message: `Account "${name}" was saved to cloud storage`, meta };
 }
@@ -561,8 +613,8 @@ export async function querySavedAccountQuota(account: SavedAccountInfo): Promise
   }
 
   const auth = clone(account.auth);
-  const persist = async (): Promise<void> => {
-    await writeCloudAccount(account.name, auth);
+  const persist = async (mode: "manual" | "automatic"): Promise<void> => {
+    await persistCloudAccountAuth(account.name, auth, mode);
     const current = getSavedCurrentSelection();
     if (current.kind === "account" && current.source === "cloud" && current.name === account.name) {
       writeCurrentAuth(auth);
@@ -572,10 +624,10 @@ export async function querySavedAccountQuota(account: SavedAccountInfo): Promise
   if (shouldRefreshBeforeQuota(auth)) {
     const refreshed = await refreshAccessToken(auth);
     applyRefreshResponse(auth, refreshed);
-    await persist();
+    await persist("automatic");
   }
 
-  const info = await getQuotaInfo(auth, persist);
+  const info = await getQuotaInfo(auth, () => persist("automatic"));
   return {
     kind: "ok",
     displayName: account.name,
@@ -602,7 +654,7 @@ export async function refreshSavedAccountEntry(account: SavedAccountInfo): Promi
   try {
     const refreshed = await refreshAccessToken(auth);
     applyRefreshResponse(auth, refreshed);
-    await writeCloudAccount(account.name, auth);
+    await persistCloudAccountAuth(account.name, auth, "manual");
     const current = getSavedCurrentSelection();
     if (current.kind === "account" && current.source === "cloud" && current.name === account.name) {
       writeCurrentAuth(auth);
@@ -698,7 +750,9 @@ export async function moveSavedAccountEntry(
     await removeCloudAccountEntry(account.name);
   } else {
     requireCloudPassphrase();
-    await writeCloudAccount(account.name, account.auth);
+    const auth = clone(account.auth);
+    markCloudTokenSync(auth);
+    await writeCloudAccount(account.name, auth);
     await removeLocalAccountFile(account.name);
   }
 

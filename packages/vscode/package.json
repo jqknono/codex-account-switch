@@ -2,7 +2,7 @@
   "name": "codex-account-switch-vscode",
   "displayName": "Codex Account Switch",
   "description": "Codex Account Switch - VS Code extension",
-    "version": "1.4.1",
+    "version": "1.4.2",
   "publisher": "techfetch-dev",
   "repository": {
     "type": "git",
@@ -369,6 +369,17 @@
             "Save new accounts and providers to synced settings by default"
           ],
           "description": "Default storage target used when saving accounts or provider profiles."
+        },
+        "codex-account-switch.cloudTokenAutoUpdate": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically write refreshed access and refresh tokens back to synced cloud accounts."
+        },
+        "codex-account-switch.cloudTokenAutoUpdateIntervalHours": {
+          "type": "number",
+          "default": 24,
+          "minimum": 1,
+          "description": "Minimum interval between automatic cloud token updates, in hours."
         },
         "codex-account-switch.syncedStorage": {
           "type": "object",
