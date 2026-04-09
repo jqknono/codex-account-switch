@@ -2,12 +2,12 @@ import * as vscode from "vscode";
 import { DiagnosticLogLevel, setDiagnosticLogger, setNamedAuthDir } from "@codex-account-switch/core";
 import { AccountTreeProvider, AccountTreeNode } from "./accountTree";
 import { ProviderTreeProvider, ProviderTreeNode } from "./providerTree";
+import { RefreshCoordinator } from "./refreshCoordinator";
 import { StatusBarManager } from "./statusBar";
 import { registerCommands } from "./commands";
-import { disposeLogging, initializeLogging, logWarn, writeRawLog } from "./log";
+import { disposeLogging, initializeLogging, writeRawLog } from "./log";
 import { restoreSavedAuthPassphrase } from "./storagePassword";
 import { hasEncryptedSyncedEntries, initializeSavedEntries } from "./savedEntries";
-const LOG_PREFIX = "[codex-account-switch:vscode:extension]";
 
 function applyNamedAuthDirSetting() {
   const authDir = vscode.workspace
@@ -32,6 +32,7 @@ export async function activate(context: vscode.ExtensionContext) {
   const accountTree = new AccountTreeProvider();
   const providerTree = new ProviderTreeProvider();
   const statusBarManager = new StatusBarManager();
+  const refreshCoordinator = new RefreshCoordinator(accountTree, providerTree, statusBarManager);
   const accountTreeView = vscode.window.createTreeView<AccountTreeNode>("codexAccountSwitchAccounts", {
     treeDataProvider: accountTree,
     showCollapseAll: true,
@@ -52,18 +53,18 @@ export async function activate(context: vscode.ExtensionContext) {
         promptIfMissing: true,
         promptForLockedStorage: hasEncryptedSyncedEntries(),
       });
-      accountTree.refresh();
-      providerTree.refresh();
-      void accountTree.refreshQuota().catch((error) => {
-        logWarn(LOG_PREFIX, "auth-directory-accountTree-refresh-failed", {
-          error: error instanceof Error ? error.message : String(error),
-        });
-      });
-      void statusBarManager.refreshNow().catch((error) => {
-        logWarn(LOG_PREFIX, "auth-directory-statusBar-refresh-failed", {
-          error: error instanceof Error ? error.message : String(error),
-        });
-      });
+      refreshCoordinator.refreshViews();
+
+      if (e.affectsConfiguration("codex-account-switch.syncedStorage")) {
+        const prepared = refreshCoordinator.consumePreparedConfigurationRefresh();
+        if (prepared?.skipQuota) {
+          return;
+        }
+        refreshCoordinator.scheduleQuotaRefresh(prepared?.targetIds);
+        return;
+      }
+
+      refreshCoordinator.scheduleQuotaRefresh();
     }
   });
 
@@ -73,10 +74,11 @@ export async function activate(context: vscode.ExtensionContext) {
     accountTree,
     providerTree,
     statusBarManager,
+    refreshCoordinator,
     configListener,
   );
 
-  registerCommands(context, accountTree, providerTree, statusBarManager, accountTreeView);
+  registerCommands(context, accountTree, providerTree, statusBarManager, accountTreeView, refreshCoordinator);
 
   accountTree.startAutoRefresh(context);
   statusBarManager.startAutoRefresh(context);

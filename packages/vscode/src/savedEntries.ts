@@ -1,4 +1,5 @@
 import * as fs from "fs";
+import * as os from "os";
 import * as vscode from "vscode";
 import {
   AccountMeta,
@@ -53,6 +54,11 @@ export interface SavedAccountInfo {
   storageState: "ready" | "locked" | "invalid";
   storageMessage?: string;
   encrypted: boolean;
+  syncVersion: number | null;
+  syncUpdatedAt: string | null;
+  currentDeviceName: string | null;
+  effectiveAutoRefreshDeviceName: string | null;
+  autoRefreshAllowed: boolean | null;
 }
 
 export interface SavedProviderInfo {
@@ -67,6 +73,30 @@ export interface SavedProviderInfo {
   auth: Record<string, unknown>;
   config: Record<string, unknown>;
   profile: ProviderProfile | null;
+  syncVersion: number | null;
+  syncUpdatedAt: string | null;
+}
+
+export interface CloudSyncConflict {
+  entryType: "account" | "provider";
+  name: string;
+  expectedEntryVersion: number | null;
+  expectedUpdatedAt: string | null;
+  currentEntryVersion: number | null;
+  currentUpdatedAt: string | null;
+}
+
+interface SavedStorageSyncMetadata {
+  entryVersion: number | null;
+  updatedAt: string | null;
+}
+
+interface CloudMutationResult {
+  success: boolean;
+  message: string;
+  conflict?: CloudSyncConflict;
+  syncVersion?: number | null;
+  syncUpdatedAt?: string | null;
 }
 
 export type SavedSelection =
@@ -78,12 +108,16 @@ interface SyncedStorageData {
   version: 1;
   accounts: Record<string, unknown>;
   providers: Record<string, unknown>;
+  devices: string[];
+  autoRefreshDeviceName: string | null;
 }
 
 interface CurrentSelectionMarker {
   kind: "account" | "provider";
   name: string;
   source: StorageSource;
+  entryVersion?: number | null;
+  updatedAt?: string | null;
 }
 
 const SYNCED_STORAGE_SETTING = "syncedStorage";
@@ -94,6 +128,12 @@ const CURRENT_SELECTION_KEY = "codex-account-switch.currentSavedSelection";
 const DEFAULT_CLOUD_TOKEN_AUTO_UPDATE_INTERVAL_HOURS = 24;
 const QUOTA_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
+const inflightCloudQuotaQueries = new Map<string, Promise<QuotaQueryResult>>();
+let inflightAutoRefreshDevicePrompt: Promise<string | null> | null = null;
+const EMPTY_SYNC_METADATA: SavedStorageSyncMetadata = {
+  entryVersion: null,
+  updatedAt: null,
+};
 
 let extensionContext: vscode.ExtensionContext | null = null;
 
@@ -107,6 +147,114 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function getSyncMetadata(value: unknown): SavedStorageSyncMetadata {
+  if (!isRecord(value)) {
+    return {
+      entryVersion: null,
+      updatedAt: null,
+    };
+  }
+
+  return {
+    entryVersion:
+      Number.isInteger(value.entryVersion) && (value.entryVersion as number) >= 1
+        ? (value.entryVersion as number)
+        : null,
+    updatedAt: typeof value.updatedAt === "string" && value.updatedAt.length > 0 ? value.updatedAt : null,
+  };
+}
+
+function nextSyncMetadata(current: SavedStorageSyncMetadata): SavedStorageSyncMetadata {
+  return {
+    entryVersion: current.entryVersion == null ? 1 : current.entryVersion + 1,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function normalizeDeviceNames(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const normalized: string[] = [];
+  for (const item of value) {
+    if (typeof item !== "string") {
+      continue;
+    }
+    const trimmed = item.trim();
+    if (!trimmed || normalized.includes(trimmed)) {
+      continue;
+    }
+    normalized.push(trimmed);
+  }
+  return normalized;
+}
+
+function getNormalizedAutoRefreshDeviceName(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function applySyncMetadata(value: Record<string, unknown>, metadata: SavedStorageSyncMetadata): Record<string, unknown> {
+  value.entryVersion = metadata.entryVersion;
+  value.updatedAt = metadata.updatedAt;
+  return value;
+}
+
+function hasSyncConflict(expectedEntryVersion: number | null | undefined, current: SavedStorageSyncMetadata): boolean {
+  return expectedEntryVersion != null && current.entryVersion !== expectedEntryVersion;
+}
+
+function readLocalFileSnapshot(filePath: string): Buffer | null {
+  return fs.existsSync(filePath) ? fs.readFileSync(filePath) : null;
+}
+
+function restoreLocalFileSnapshot(filePath: string, snapshot: Buffer | null): void {
+  if (snapshot) {
+    fs.writeFileSync(filePath, snapshot);
+    return;
+  }
+  if (fs.existsSync(filePath)) {
+    fs.unlinkSync(filePath);
+  }
+}
+
+function buildConflict(
+  entryType: "account" | "provider",
+  name: string,
+  expected: SavedStorageSyncMetadata,
+  current: SavedStorageSyncMetadata,
+): CloudSyncConflict {
+  return {
+    entryType,
+    name,
+    expectedEntryVersion: expected.entryVersion,
+    expectedUpdatedAt: expected.updatedAt,
+    currentEntryVersion: current.entryVersion,
+    currentUpdatedAt: current.updatedAt,
+  };
+}
+
+function formatConflictResult(conflict: CloudSyncConflict): CloudMutationResult {
+  const label = conflict.entryType === "account" ? "Cloud account" : "Cloud provider";
+  const expectedVersion = conflict.expectedEntryVersion ?? "unknown";
+  const currentVersion = conflict.currentEntryVersion ?? "unknown";
+  const expectedUpdatedAt = conflict.expectedUpdatedAt ?? "unknown";
+  const currentUpdatedAt = conflict.currentUpdatedAt ?? "unknown";
+  return {
+    success: false,
+    message:
+      `${label} "${conflict.name}" has a sync conflict: `
+      + `expected version ${expectedVersion} (${expectedUpdatedAt}), `
+      + `current version ${currentVersion} (${currentUpdatedAt}). `
+      + "Refresh the list before retrying.",
+    conflict,
+  };
 }
 
 function requireContext(): vscode.ExtensionContext {
@@ -124,6 +272,22 @@ async function setMarker(marker: CurrentSelectionMarker | null): Promise<void> {
   await requireContext().globalState.update(CURRENT_SELECTION_KEY, marker ?? undefined);
 }
 
+async function updateMarkerSyncMetadata(
+  kind: "account" | "provider",
+  name: string,
+  metadata: SavedStorageSyncMetadata,
+): Promise<void> {
+  const marker = getMarker();
+  if (!marker || marker.source !== "cloud" || marker.kind !== kind || marker.name !== name) {
+    return;
+  }
+  await setMarker({
+    ...marker,
+    entryVersion: metadata.entryVersion,
+    updatedAt: metadata.updatedAt,
+  });
+}
+
 export function initializeSavedEntries(context: vscode.ExtensionContext): void {
   extensionContext = context;
 }
@@ -133,6 +297,8 @@ function getDefaultSyncedStorage(): SyncedStorageData {
     version: 1,
     accounts: {},
     providers: {},
+    devices: [],
+    autoRefreshDeviceName: null,
   };
 }
 
@@ -146,6 +312,8 @@ function readSyncedStorage(): SyncedStorageData {
     version: 1,
     accounts: isRecord(raw.accounts) ? clone(raw.accounts) : {},
     providers: isRecord(raw.providers) ? clone(raw.providers) : {},
+    devices: normalizeDeviceNames(raw.devices),
+    autoRefreshDeviceName: getNormalizedAutoRefreshDeviceName(raw.autoRefreshDeviceName),
   };
 }
 
@@ -161,6 +329,113 @@ export function hasEncryptedSyncedEntries(): boolean {
   const storage = readSyncedStorage();
   return Object.values(storage.accounts).some((value) => isSerializedSavedValueEncrypted(value))
     || Object.values(storage.providers).some((value) => isSerializedSavedValueEncrypted(value));
+}
+
+export function getCurrentDeviceName(): string {
+  const hostname = os.hostname().trim();
+  return hostname.length > 0 ? hostname : "unknown-device";
+}
+
+export function getEffectiveAutoRefreshDeviceName(storage = readSyncedStorage()): string | null {
+  if (storage.autoRefreshDeviceName && storage.devices.includes(storage.autoRefreshDeviceName)) {
+    return storage.autoRefreshDeviceName;
+  }
+  return storage.devices[0] ?? null;
+}
+
+export function canCurrentDeviceAutoRefresh(storage = readSyncedStorage()): boolean {
+  return getEffectiveAutoRefreshDeviceName(storage) === getCurrentDeviceName();
+}
+
+export function listSyncedDevices(): string[] {
+  return [...readSyncedStorage().devices];
+}
+
+function hasSyncedDeviceState(storage: SyncedStorageData): boolean {
+  return (
+    storage.devices.length > 0
+    || storage.autoRefreshDeviceName != null
+    || Object.keys(storage.accounts).length > 0
+    || Object.keys(storage.providers).length > 0
+  );
+}
+
+export async function ensureCurrentDeviceRegistered(options?: { onActivate?: boolean }): Promise<SyncedStorageData> {
+  const storage = readSyncedStorage();
+  if (options?.onActivate && !hasSyncedDeviceState(storage)) {
+    return storage;
+  }
+
+  const currentDeviceName = getCurrentDeviceName();
+  if (storage.devices.includes(currentDeviceName)) {
+    return storage;
+  }
+
+  storage.devices = [...storage.devices, currentDeviceName];
+  await writeSyncedStorage(storage);
+  return storage;
+}
+
+export async function setAutoRefreshDeviceName(deviceName: string | null): Promise<void> {
+  const storage = await ensureCurrentDeviceRegistered();
+  const normalized = typeof deviceName === "string" ? deviceName.trim() : "";
+  storage.autoRefreshDeviceName = normalized && storage.devices.includes(normalized) ? normalized : null;
+  await writeSyncedStorage(storage);
+}
+
+async function promptForAutoRefreshDevice(devices: string[]): Promise<string | null> {
+  const currentDeviceName = getCurrentDeviceName();
+  const options = normalizeDeviceNames([...devices, currentDeviceName]);
+  if (options.length === 0) {
+    return null;
+  }
+  if (inflightAutoRefreshDevicePrompt) {
+    return inflightAutoRefreshDevicePrompt;
+  }
+
+  inflightAutoRefreshDevicePrompt = (async () => {
+    const picked = await vscode.window.showQuickPick(
+      options.map((deviceName) => ({
+        label: deviceName,
+        description: deviceName === currentDeviceName ? "Current device" : undefined,
+        deviceName,
+      })),
+      {
+        placeHolder: "Select the synced device that is allowed to automatically refresh cloud tokens",
+      },
+    );
+    if (!picked) {
+      return null;
+    }
+    await setAutoRefreshDeviceName(picked.deviceName);
+    return picked.deviceName;
+  })();
+
+  try {
+    return await inflightAutoRefreshDevicePrompt;
+  } finally {
+    inflightAutoRefreshDevicePrompt = null;
+  }
+}
+
+async function resolveAutomaticRefreshAuthority(): Promise<{ allowed: boolean; storage: SyncedStorageData }> {
+  let storage = readSyncedStorage();
+
+  if (storage.autoRefreshDeviceName && !storage.devices.includes(storage.autoRefreshDeviceName)) {
+    const selectedDeviceName = await promptForAutoRefreshDevice(storage.devices);
+    storage = readSyncedStorage();
+    if (!selectedDeviceName) {
+      return {
+        allowed: false,
+        storage,
+      };
+    }
+  }
+
+  return {
+    allowed: canCurrentDeviceAutoRefresh(storage),
+    storage,
+  };
 }
 
 function requireCloudPassphrase(): void {
@@ -207,12 +482,20 @@ function getCloudProviderNames(): string[] {
   return Object.keys(readSyncedStorage().providers).sort();
 }
 
+function getStoredCloudAccountRaw(name: string): unknown {
+  return readSyncedStorage().accounts[name];
+}
+
+function getStoredCloudProviderRaw(name: string): unknown {
+  return readSyncedStorage().providers[name];
+}
+
 function readCloudAccount(name: string) {
-  return deserializeSavedValue<AuthFile>(readSyncedStorage().accounts[name], "saved_auth");
+  return deserializeSavedValue<AuthFile>(getStoredCloudAccountRaw(name), "saved_auth");
 }
 
 function readCloudProvider(name: string) {
-  return deserializeSavedValue<ProviderProfile>(readSyncedStorage().providers[name], "saved_provider");
+  return deserializeSavedValue<ProviderProfile>(getStoredCloudProviderRaw(name), "saved_provider");
 }
 
 function getLocalAccounts(): SavedAccountInfo[] {
@@ -220,11 +503,22 @@ function getLocalAccounts(): SavedAccountInfo[] {
     ...account,
     id: toId("local", account.name),
     source: "local" as const,
+    syncVersion: null,
+    syncUpdatedAt: null,
+    currentDeviceName: null,
+    effectiveAutoRefreshDeviceName: null,
+    autoRefreshAllowed: null,
   }));
 }
 
 function getCloudAccounts(): SavedAccountInfo[] {
-  return getCloudAccountNames().map((name) => {
+  const storage = readSyncedStorage();
+  const currentDeviceName = getCurrentDeviceName();
+  const effectiveAutoRefreshDeviceName = getEffectiveAutoRefreshDeviceName(storage);
+  const autoRefreshAllowed = effectiveAutoRefreshDeviceName === currentDeviceName;
+  return Object.keys(storage.accounts).sort().map((name) => {
+    const raw = storage.accounts[name];
+    const syncMetadata = getSyncMetadata(raw);
     const result = readCloudAccount(name);
     if (result.status === "ok") {
       return {
@@ -236,6 +530,11 @@ function getCloudAccounts(): SavedAccountInfo[] {
         isCurrent: false,
         storageState: "ready" as const,
         encrypted: result.encrypted,
+        syncVersion: syncMetadata.entryVersion,
+        syncUpdatedAt: syncMetadata.updatedAt,
+        currentDeviceName,
+        effectiveAutoRefreshDeviceName,
+        autoRefreshAllowed,
       };
     }
 
@@ -249,6 +548,11 @@ function getCloudAccounts(): SavedAccountInfo[] {
       storageState: result.status === "locked" ? "locked" as const : "invalid" as const,
       storageMessage: "message" in result ? result.message : undefined,
       encrypted: result.encrypted,
+      syncVersion: syncMetadata.entryVersion,
+      syncUpdatedAt: syncMetadata.updatedAt,
+      currentDeviceName,
+      effectiveAutoRefreshDeviceName,
+      autoRefreshAllowed,
     };
   });
 }
@@ -269,12 +573,16 @@ function getLocalProviders(): SavedProviderInfo[] {
       auth: profile?.auth ?? {},
       config: profile ? { ...profile.config } : {},
       profile,
+      syncVersion: null,
+      syncUpdatedAt: null,
     };
   });
 }
 
 function getCloudProviders(): SavedProviderInfo[] {
   return getCloudProviderNames().map((name) => {
+    const raw = getStoredCloudProviderRaw(name);
+    const syncMetadata = getSyncMetadata(raw);
     const result = readCloudProvider(name);
     const profile = result.status === "ok" ? parseProviderProfile(name, result.value) : null;
     return {
@@ -294,6 +602,8 @@ function getCloudProviders(): SavedProviderInfo[] {
       auth: profile?.auth ?? {},
       config: profile ? { ...profile.config } : {},
       profile,
+      syncVersion: syncMetadata.entryVersion,
+      syncUpdatedAt: syncMetadata.updatedAt,
     };
   });
 }
@@ -378,11 +688,12 @@ function shouldAutoPersistCloudTokens(auth: AuthFile): boolean {
     return false;
   }
 
-  if (!auth.last_cloud_token_sync) {
+  const lastCloudTokenSync = auth.last_cloud_token_sync;
+  if (typeof lastCloudTokenSync !== "string" || lastCloudTokenSync.length === 0) {
     return true;
   }
 
-  const lastSyncTime = Date.parse(auth.last_cloud_token_sync);
+  const lastSyncTime = Date.parse(lastCloudTokenSync);
   if (Number.isNaN(lastSyncTime)) {
     return true;
   }
@@ -394,14 +705,21 @@ async function persistCloudAccountAuth(
   name: string,
   auth: AuthFile,
   mode: "manual" | "automatic",
-): Promise<boolean> {
-  if (mode === "automatic" && !shouldAutoPersistCloudTokens(auth)) {
-    return false;
+  expectedEntryVersion?: number | null,
+  expectedUpdatedAt?: string | null,
+): Promise<CloudMutationResult | { success: true; skipped: true }> {
+  if (mode === "automatic") {
+    if (!shouldAutoPersistCloudTokens(auth)) {
+      return { success: true, skipped: true };
+    }
+    const authority = await resolveAutomaticRefreshAuthority();
+    if (!authority.allowed) {
+      return { success: true, skipped: true };
+    }
   }
 
   markCloudTokenSync(auth);
-  await writeCloudAccount(name, auth);
-  return true;
+  return writeCloudAccountWithExpectedVersion(name, auth, expectedEntryVersion, expectedUpdatedAt);
 }
 
 function getReadyAccounts(): SavedAccountInfo[] {
@@ -451,37 +769,197 @@ export function getSavedCurrentSelection(): SavedSelection {
   };
 }
 
-async function writeCloudAccount(name: string, auth: AuthFile): Promise<void> {
+async function writeCloudAccountWithExpectedVersion(
+  name: string,
+  auth: AuthFile,
+  expectedEntryVersion?: number | null,
+  expectedUpdatedAt?: string | null,
+): Promise<CloudMutationResult> {
   requireCloudPassphrase();
+  await ensureCurrentDeviceRegistered();
   const storage = readSyncedStorage();
-  storage.accounts[name] = serializeSavedValue("saved_auth", auth as Record<string, unknown>, {
+  const currentMetadata = getSyncMetadata(storage.accounts[name]);
+  if (hasSyncConflict(expectedEntryVersion, currentMetadata)) {
+    return formatConflictResult(
+      buildConflict(
+        "account",
+        name,
+        {
+          entryVersion: expectedEntryVersion ?? null,
+          updatedAt: expectedUpdatedAt ?? null,
+        },
+        currentMetadata,
+      ),
+    );
+  }
+  const nextMetadata = nextSyncMetadata(currentMetadata);
+  storage.accounts[name] = applySyncMetadata(serializeSavedValue("saved_auth", auth as Record<string, unknown>, {
     requireEncryption: true,
-  });
+  }), nextMetadata);
   await writeSyncedStorage(storage);
+  return {
+    success: true,
+    message: `Account "${name}" was saved to cloud storage`,
+    syncVersion: nextMetadata.entryVersion,
+    syncUpdatedAt: nextMetadata.updatedAt,
+  };
 }
 
-async function writeCloudProvider(profile: ProviderProfile): Promise<void> {
+async function writeCloudProviderWithExpectedVersion(
+  profile: ProviderProfile,
+  expectedEntryVersion?: number | null,
+  expectedUpdatedAt?: string | null,
+): Promise<CloudMutationResult> {
   requireCloudPassphrase();
+  await ensureCurrentDeviceRegistered();
   const storage = readSyncedStorage();
-  storage.providers[profile.name] = serializeSavedValue("saved_provider", profile as unknown as Record<string, unknown>, {
+  const currentMetadata = getSyncMetadata(storage.providers[profile.name]);
+  if (hasSyncConflict(expectedEntryVersion, currentMetadata)) {
+    return formatConflictResult(
+      buildConflict(
+        "provider",
+        profile.name,
+        {
+          entryVersion: expectedEntryVersion ?? null,
+          updatedAt: expectedUpdatedAt ?? null,
+        },
+        currentMetadata,
+      ),
+    );
+  }
+  const nextMetadata = nextSyncMetadata(currentMetadata);
+  storage.providers[profile.name] = applySyncMetadata(serializeSavedValue("saved_provider", profile as unknown as Record<string, unknown>, {
     requireEncryption: true,
-  });
+  }), nextMetadata);
   await writeSyncedStorage(storage);
+  return {
+    success: true,
+    message: `Provider "${profile.name}" was saved to cloud storage`,
+    syncVersion: nextMetadata.entryVersion,
+    syncUpdatedAt: nextMetadata.updatedAt,
+  };
 }
 
-export async function syncCurrentAuthToSavedSelection(): Promise<void> {
+async function renameCloudAccountEntry(
+  account: SavedAccountInfo,
+  newName: string,
+): Promise<CloudMutationResult> {
+  const storage = readSyncedStorage();
+  if (!(account.name in storage.accounts)) {
+    return { success: false, message: `Account "${account.name}" does not exist.` };
+  }
+  if (newName in storage.accounts) {
+    return { success: false, message: `Account "${newName}" already exists.` };
+  }
+
+  const currentMetadata = getSyncMetadata(storage.accounts[account.name]);
+  if (hasSyncConflict(account.syncVersion, currentMetadata)) {
+    return formatConflictResult(
+      buildConflict(
+        "account",
+        account.name,
+        {
+          entryVersion: account.syncVersion,
+          updatedAt: account.syncUpdatedAt,
+        },
+        currentMetadata,
+      ),
+    );
+  }
+
+  const nextMetadata = nextSyncMetadata(currentMetadata);
+  const currentRaw = storage.accounts[account.name];
+  storage.accounts[newName] = isRecord(currentRaw)
+    ? applySyncMetadata(clone(currentRaw), nextMetadata)
+    : applySyncMetadata(
+        serializeSavedValue("saved_auth", (account.auth ?? {}) as Record<string, unknown>, {
+          requireEncryption: true,
+        }),
+        nextMetadata,
+      );
+  delete storage.accounts[account.name];
+  await writeSyncedStorage(storage);
+
+  const marker = getMarker();
+  if (marker?.kind === "account" && marker.source === "cloud" && marker.name === account.name) {
+    await setMarker({
+      ...marker,
+      name: newName,
+      entryVersion: nextMetadata.entryVersion,
+      updatedAt: nextMetadata.updatedAt,
+    });
+  }
+
+  return {
+    success: true,
+    message: `Renamed account "${account.name}" to "${newName}"`,
+    syncVersion: nextMetadata.entryVersion,
+    syncUpdatedAt: nextMetadata.updatedAt,
+  };
+}
+
+async function removeCloudAccountEntry(
+  name: string,
+  expected: SavedStorageSyncMetadata = EMPTY_SYNC_METADATA,
+): Promise<CloudMutationResult> {
+  const storage = readSyncedStorage();
+  if (!(name in storage.accounts)) {
+    return { success: false, message: `Account "${name}" does not exist.` };
+  }
+  const currentMetadata = getSyncMetadata(storage.accounts[name]);
+  if (hasSyncConflict(expected.entryVersion, currentMetadata)) {
+    return formatConflictResult(buildConflict("account", name, expected, currentMetadata));
+  }
+  delete storage.accounts[name];
+  await writeSyncedStorage(storage);
+  return { success: true, message: `Account "${name}" was removed` };
+}
+
+async function removeCloudProviderEntry(
+  name: string,
+  expected: SavedStorageSyncMetadata = EMPTY_SYNC_METADATA,
+): Promise<CloudMutationResult> {
+  const storage = readSyncedStorage();
+  if (!(name in storage.providers)) {
+    return { success: false, message: `Provider "${name}" does not exist.` };
+  }
+  const currentMetadata = getSyncMetadata(storage.providers[name]);
+  if (hasSyncConflict(expected.entryVersion, currentMetadata)) {
+    return formatConflictResult(buildConflict("provider", name, expected, currentMetadata));
+  }
+  delete storage.providers[name];
+  await writeSyncedStorage(storage);
+  return { success: true, message: `Removed provider "${name}"` };
+}
+
+export async function syncCurrentAuthToSavedSelection(): Promise<CloudMutationResult | null> {
   const marker = getMarker();
   if (!marker || marker.source === "local") {
     syncCurrentAuthToSavedAccount();
-    return;
+    return null;
   }
 
   if (marker.kind === "account") {
     const auth = readCurrentAuth();
     if (auth && hasAccountAuthTokens(auth)) {
-      await persistCloudAccountAuth(marker.name, auth, "automatic");
+      const result = await persistCloudAccountAuth(
+        marker.name,
+        auth,
+        "automatic",
+        marker.entryVersion,
+        marker.updatedAt,
+      );
+      if (!result.success) {
+        return result;
+      }
+      if (!("skipped" in result)) {
+        await updateMarkerSyncMetadata("account", marker.name, {
+          entryVersion: result.syncVersion ?? null,
+          updatedAt: result.syncUpdatedAt ?? null,
+        });
+      }
     }
-    return;
+    return null;
   }
 
   const activeProvider = getActiveModelProvider();
@@ -489,12 +967,20 @@ export async function syncCurrentAuthToSavedSelection(): Promise<void> {
     const provider = getSavedProviderEntry(marker.name, "cloud");
     const currentAuth = readCurrentAuth();
     if (provider?.profile && currentAuth) {
-      await writeCloudProvider({
+      const result = await writeCloudProviderWithExpectedVersion({
         ...provider.profile,
         auth: currentAuth,
+      }, marker.entryVersion, marker.updatedAt);
+      if (!result.success) {
+        return result;
+      }
+      await updateMarkerSyncMetadata("provider", marker.name, {
+        entryVersion: result.syncVersion ?? null,
+        updatedAt: result.syncUpdatedAt ?? null,
       });
     }
   }
+  return null;
 }
 
 function getSourceLabel(source: StorageSource): string {
@@ -504,7 +990,8 @@ function getSourceLabel(source: StorageSource): string {
 export async function saveCurrentAuthAsAccount(
   name: string,
   source: StorageSource,
-): Promise<{ success: boolean; message: string; meta?: AccountMeta }> {
+  options?: { expectedEntryVersion?: number | null; expectedUpdatedAt?: string | null },
+): Promise<{ success: boolean; message: string; meta?: AccountMeta; conflict?: CloudSyncConflict }> {
   if (source === "local") {
     return addAccountFromAuth(name);
   }
@@ -553,14 +1040,29 @@ export async function saveCurrentAuthAsAccount(
   }
 
   markCloudTokenSync(auth);
-  await writeCloudAccount(name, auth);
+  const writeResult = await writeCloudAccountWithExpectedVersion(
+    name,
+    auth,
+    options?.expectedEntryVersion,
+    options?.expectedUpdatedAt,
+  );
+  if (!writeResult.success) {
+    return { success: false, message: writeResult.message, meta, conflict: writeResult.conflict };
+  }
+  await updateMarkerSyncMetadata("account", name, {
+    entryVersion: writeResult.syncVersion ?? null,
+    updatedAt: writeResult.syncUpdatedAt ?? null,
+  });
   return { success: true, message: `Account "${name}" was saved to cloud storage`, meta };
 }
 
 export async function useSavedAccountEntry(
   account: SavedAccountInfo,
-): Promise<{ success: boolean; message: string; meta?: AccountMeta }> {
-  await syncCurrentAuthToSavedSelection();
+): Promise<{ success: boolean; message: string; meta?: AccountMeta; conflict?: CloudSyncConflict }> {
+  const syncResult = await syncCurrentAuthToSavedSelection();
+  if (syncResult && !syncResult.success) {
+    return { success: false, message: syncResult.message, conflict: syncResult.conflict };
+  }
 
   if (account.source === "local") {
     const result = useAccount(account.name);
@@ -576,7 +1078,13 @@ export async function useSavedAccountEntry(
 
   writeCurrentAuth(account.auth);
   clearActiveModelProvider();
-  await setMarker({ kind: "account", name: account.name, source: "cloud" });
+  await setMarker({
+    kind: "account",
+    name: account.name,
+    source: "cloud",
+    entryVersion: account.syncVersion,
+    updatedAt: account.syncUpdatedAt,
+  });
   return {
     success: true,
     message: `Switched to account "${account.name}"`,
@@ -605,6 +1113,11 @@ export async function querySavedAccountQuota(account: SavedAccountInfo): Promise
     return core.queryQuota(account.name);
   }
 
+  const existingQuery = inflightCloudQuotaQueries.get(account.id);
+  if (existingQuery) {
+    return existingQuery;
+  }
+
   if (account.storageState !== "ready" || !account.auth) {
     return {
       kind: "not_found",
@@ -612,27 +1125,60 @@ export async function querySavedAccountQuota(account: SavedAccountInfo): Promise
     };
   }
 
-  const auth = clone(account.auth);
-  const persist = async (mode: "manual" | "automatic"): Promise<void> => {
-    await persistCloudAccountAuth(account.name, auth, mode);
-    const current = getSavedCurrentSelection();
-    if (current.kind === "account" && current.source === "cloud" && current.name === account.name) {
-      writeCurrentAuth(auth);
+  const initialAuth = account.auth;
+  const queryPromise = (async (): Promise<QuotaQueryResult> => {
+    const auth = clone(initialAuth);
+    const expectedSyncMetadata: SavedStorageSyncMetadata = {
+      entryVersion: account.syncVersion,
+      updatedAt: account.syncUpdatedAt,
+    };
+    const persist = async (mode: "manual" | "automatic"): Promise<void> => {
+      const result = await persistCloudAccountAuth(
+        account.name,
+        auth,
+        mode,
+        expectedSyncMetadata.entryVersion,
+        expectedSyncMetadata.updatedAt,
+      );
+      if (!result.success) {
+        throw new Error(result.message);
+      }
+      const current = getSavedCurrentSelection();
+      if (current.kind === "account" && current.source === "cloud" && current.name === account.name) {
+        writeCurrentAuth(auth);
+      }
+      if (!("skipped" in result)) {
+        expectedSyncMetadata.entryVersion = result.syncVersion ?? null;
+        expectedSyncMetadata.updatedAt = result.syncUpdatedAt ?? null;
+        await updateMarkerSyncMetadata("account", account.name, {
+          entryVersion: result.syncVersion ?? null,
+          updatedAt: result.syncUpdatedAt ?? null,
+        });
+      }
+    };
+
+    if (shouldRefreshBeforeQuota(auth)) {
+      const refreshed = await refreshAccessToken(auth);
+      applyRefreshResponse(auth, refreshed);
+      await persist("automatic");
     }
-  };
 
-  if (shouldRefreshBeforeQuota(auth)) {
-    const refreshed = await refreshAccessToken(auth);
-    applyRefreshResponse(auth, refreshed);
-    await persist("automatic");
-  }
+    const info = await getQuotaInfo(auth, () => persist("automatic"));
+    return {
+      kind: "ok",
+      displayName: account.name,
+      info,
+    };
+  })();
 
-  const info = await getQuotaInfo(auth, () => persist("automatic"));
-  return {
-    kind: "ok",
-    displayName: account.name,
-    info,
-  };
+  inflightCloudQuotaQueries.set(account.id, queryPromise);
+  queryPromise.finally(() => {
+    if (inflightCloudQuotaQueries.get(account.id) === queryPromise) {
+      inflightCloudQuotaQueries.delete(account.id);
+    }
+  });
+
+  return queryPromise;
 }
 
 export async function refreshSavedAccountEntry(account: SavedAccountInfo): Promise<{
@@ -641,6 +1187,7 @@ export async function refreshSavedAccountEntry(account: SavedAccountInfo): Promi
   meta?: AccountMeta;
   lastRefresh?: string;
   unsupported?: boolean;
+  conflict?: CloudSyncConflict;
 }> {
   if (account.source === "local") {
     return refreshAccount(account.name);
@@ -654,10 +1201,29 @@ export async function refreshSavedAccountEntry(account: SavedAccountInfo): Promi
   try {
     const refreshed = await refreshAccessToken(auth);
     applyRefreshResponse(auth, refreshed);
-    await persistCloudAccountAuth(account.name, auth, "manual");
+    const persistResult = await persistCloudAccountAuth(
+      account.name,
+      auth,
+      "manual",
+      account.syncVersion,
+      account.syncUpdatedAt,
+    );
+    if (!persistResult.success) {
+      return {
+        success: false,
+        message: persistResult.message,
+        conflict: persistResult.conflict,
+      };
+    }
     const current = getSavedCurrentSelection();
     if (current.kind === "account" && current.source === "cloud" && current.name === account.name) {
       writeCurrentAuth(auth);
+      if (!("skipped" in persistResult)) {
+        await updateMarkerSyncMetadata("account", account.name, {
+          entryVersion: persistResult.syncVersion ?? null,
+          updatedAt: persistResult.syncUpdatedAt ?? null,
+        });
+      }
     }
     return {
       success: true,
@@ -676,29 +1242,14 @@ export async function refreshSavedAccountEntry(account: SavedAccountInfo): Promi
 export async function renameSavedAccountEntry(
   account: SavedAccountInfo,
   newName: string,
-): Promise<{ success: boolean; message: string }> {
+): Promise<{ success: boolean; message: string; conflict?: CloudSyncConflict }> {
   if (account.source === "local") {
     return renameAccount(account.name, newName);
   }
-
-  const storage = readSyncedStorage();
-  if (!(account.name in storage.accounts)) {
-    return { success: false, message: `Account "${account.name}" does not exist.` };
-  }
-  if (newName in storage.accounts) {
-    return { success: false, message: `Account "${newName}" already exists.` };
-  }
-
-  storage.accounts[newName] = storage.accounts[account.name];
-  delete storage.accounts[account.name];
-  await writeSyncedStorage(storage);
-
-  const marker = getMarker();
-  if (marker?.kind === "account" && marker.source === "cloud" && marker.name === account.name) {
-    await setMarker({ ...marker, name: newName });
-  }
-
-  return { success: true, message: `Renamed account "${account.name}" to "${newName}"` };
+  const result = await renameCloudAccountEntry(account, newName);
+  return result.success
+    ? { success: true, message: result.message }
+    : { success: false, message: result.message, conflict: result.conflict };
 }
 
 async function removeLocalAccountFile(name: string): Promise<void> {
@@ -708,13 +1259,9 @@ async function removeLocalAccountFile(name: string): Promise<void> {
   }
 }
 
-async function removeCloudAccountEntry(name: string): Promise<void> {
-  const storage = readSyncedStorage();
-  delete storage.accounts[name];
-  await writeSyncedStorage(storage);
-}
-
-export async function removeSavedAccountEntry(account: SavedAccountInfo): Promise<{ success: boolean; message: string }> {
+export async function removeSavedAccountEntry(
+  account: SavedAccountInfo,
+): Promise<{ success: boolean; message: string; conflict?: CloudSyncConflict }> {
   if (account.source === "local") {
     return removeAccount(account.name);
   }
@@ -724,20 +1271,19 @@ export async function removeSavedAccountEntry(account: SavedAccountInfo): Promis
     return { success: false, message: `Account "${account.name}" is currently in use and cannot be removed.` };
   }
 
-  const storage = readSyncedStorage();
-  if (!(account.name in storage.accounts)) {
-    return { success: false, message: `Account "${account.name}" does not exist.` };
-  }
-
-  delete storage.accounts[account.name];
-  await writeSyncedStorage(storage);
-  return { success: true, message: `Account "${account.name}" was removed` };
+  const result = await removeCloudAccountEntry(account.name, {
+    entryVersion: account.syncVersion,
+    updatedAt: account.syncUpdatedAt,
+  });
+  return result.success
+    ? { success: true, message: result.message }
+    : { success: false, message: result.message, conflict: result.conflict };
 }
 
 export async function moveSavedAccountEntry(
   account: SavedAccountInfo,
   target: StorageSource,
-): Promise<{ success: boolean; message: string }> {
+): Promise<{ success: boolean; message: string; conflict?: CloudSyncConflict }> {
   if (account.source === target) {
     return { success: true, message: `Account "${account.name}" is already stored in ${target}.` };
   }
@@ -745,33 +1291,68 @@ export async function moveSavedAccountEntry(
     return { success: false, message: account.storageMessage ?? `Saved account "${account.name}" is unavailable.` };
   }
 
+  let nextCloudMetadata: SavedStorageSyncMetadata = EMPTY_SYNC_METADATA;
+
   if (target === "local") {
-    writeSavedAuthFile(getNamedAuthPath(account.name), account.auth);
-    await removeCloudAccountEntry(account.name);
+    const authPath = getNamedAuthPath(account.name);
+    const localSnapshot = readLocalFileSnapshot(authPath);
+    writeSavedAuthFile(authPath, account.auth);
+    const removeResult = await removeCloudAccountEntry(account.name, {
+      entryVersion: account.syncVersion,
+      updatedAt: account.syncUpdatedAt,
+    });
+    if (!removeResult.success) {
+      restoreLocalFileSnapshot(authPath, localSnapshot);
+      return { success: false, message: removeResult.message, conflict: removeResult.conflict };
+    }
   } else {
     requireCloudPassphrase();
     const auth = clone(account.auth);
     markCloudTokenSync(auth);
-    await writeCloudAccount(account.name, auth);
+    const writeResult = await writeCloudAccountWithExpectedVersion(account.name, auth);
+    if (!writeResult.success) {
+      return { success: false, message: writeResult.message, conflict: writeResult.conflict };
+    }
+    nextCloudMetadata = {
+      entryVersion: writeResult.syncVersion ?? null,
+      updatedAt: writeResult.syncUpdatedAt ?? null,
+    };
     await removeLocalAccountFile(account.name);
   }
 
   const current = getSavedCurrentSelection();
   if (current.kind === "account" && current.name === account.name && current.source === account.source) {
-    await setMarker({ kind: "account", name: account.name, source: target });
+    await setMarker({
+      kind: "account",
+      name: account.name,
+      source: target,
+      entryVersion: target === "cloud" ? nextCloudMetadata.entryVersion : undefined,
+      updatedAt: target === "cloud" ? nextCloudMetadata.updatedAt : undefined,
+    });
   }
 
   return { success: true, message: `Moved account "${account.name}" to ${getSourceLabel(target)} storage.` };
 }
 
-export async function saveProviderProfileToSource(profile: ProviderProfile, source: StorageSource): Promise<void> {
+export async function saveProviderProfileToSource(
+  profile: ProviderProfile,
+  source: StorageSource,
+  options?: { expectedEntryVersion?: number | null; expectedUpdatedAt?: string | null },
+): Promise<CloudMutationResult> {
   if (source === "local") {
     writeProviderProfile(profile);
-    return;
+    return { success: true, message: `Updated provider profile for "${profile.name}" in local storage.` };
   }
 
   requireCloudPassphrase();
-  await writeCloudProvider(profile);
+  const result = await writeCloudProviderWithExpectedVersion(profile, options?.expectedEntryVersion, options?.expectedUpdatedAt);
+  if (result.success) {
+    await updateMarkerSyncMetadata("provider", profile.name, {
+      entryVersion: result.syncVersion ?? null,
+      updatedAt: result.syncUpdatedAt ?? null,
+    });
+  }
+  return result;
 }
 
 export async function buildProviderProfileForSource(
@@ -798,8 +1379,11 @@ export async function buildProviderProfileForSource(
 
 export async function switchToSavedProviderEntry(
   provider: SavedProviderInfo,
-): Promise<{ success: boolean; message: string }> {
-  await syncCurrentAuthToSavedSelection();
+): Promise<{ success: boolean; message: string; conflict?: CloudSyncConflict }> {
+  const syncResult = await syncCurrentAuthToSavedSelection();
+  if (syncResult && !syncResult.success) {
+    return { success: false, message: syncResult.message, conflict: syncResult.conflict };
+  }
 
   if (provider.source === "local") {
     const result = switchMode(provider.name);
@@ -820,7 +1404,13 @@ export async function switchToSavedProviderEntry(
   }
   const core = await import("@codex-account-switch/core");
   core.activateProviderConfig(provider.name, provider.profile.config);
-  await setMarker({ kind: "provider", name: provider.name, source: "cloud" });
+  await setMarker({
+    kind: "provider",
+    name: provider.name,
+    source: "cloud",
+    entryVersion: provider.syncVersion,
+    updatedAt: provider.syncUpdatedAt,
+  });
   return { success: true, message: `Switched to mode "${getModeDisplayName(provider.name)}"` };
 }
 
@@ -833,15 +1423,9 @@ async function removeLocalProviderFile(name: string): Promise<void> {
   core.removeProviderConfig(name);
 }
 
-async function removeCloudProviderEntry(name: string): Promise<void> {
-  const storage = readSyncedStorage();
-  delete storage.providers[name];
-  await writeSyncedStorage(storage);
-}
-
 export async function deleteSavedProviderEntry(
   provider: SavedProviderInfo,
-): Promise<{ success: boolean; message: string; deactivated?: boolean }> {
+): Promise<{ success: boolean; message: string; deactivated?: boolean; conflict?: CloudSyncConflict }> {
   if (provider.source === "local") {
     return deleteProviderProfile(provider.name);
   }
@@ -851,20 +1435,19 @@ export async function deleteSavedProviderEntry(
     return { success: false, message: `Provider "${provider.name}" is currently in use and cannot be removed.` };
   }
 
-  const storage = readSyncedStorage();
-  if (!(provider.name in storage.providers)) {
-    return { success: false, message: `Provider "${provider.name}" does not exist.` };
-  }
-
-  delete storage.providers[provider.name];
-  await writeSyncedStorage(storage);
-  return { success: true, message: `Removed provider "${provider.name}"` };
+  const result = await removeCloudProviderEntry(provider.name, {
+    entryVersion: provider.syncVersion,
+    updatedAt: provider.syncUpdatedAt,
+  });
+  return result.success
+    ? { success: true, message: result.message }
+    : { success: false, message: result.message, conflict: result.conflict };
 }
 
 export async function moveSavedProviderEntry(
   provider: SavedProviderInfo,
   target: StorageSource,
-): Promise<{ success: boolean; message: string }> {
+): Promise<{ success: boolean; message: string; conflict?: CloudSyncConflict }> {
   if (provider.source === target) {
     return { success: true, message: `Provider "${provider.name}" is already stored in ${target}.` };
   }
@@ -872,16 +1455,58 @@ export async function moveSavedProviderEntry(
     return { success: false, message: provider.storageMessage ?? `Provider "${provider.name}" is unavailable.` };
   }
 
-  await saveProviderProfileToSource(provider.profile, target);
-  if (provider.source === "local") {
-    await removeLocalProviderFile(provider.name);
+  let nextCloudMetadata: SavedStorageSyncMetadata = EMPTY_SYNC_METADATA;
+
+  if (target === "cloud") {
+    const writeResult = await writeCloudProviderWithExpectedVersion(provider.profile);
+    if (!writeResult.success) {
+      return { success: false, message: writeResult.message, conflict: writeResult.conflict };
+    }
+    nextCloudMetadata = {
+      entryVersion: writeResult.syncVersion ?? null,
+      updatedAt: writeResult.syncUpdatedAt ?? null,
+    };
   } else {
-    await removeCloudProviderEntry(provider.name);
+    const providerPath = getNamedProviderPath(provider.name);
+    const localSnapshot = readLocalFileSnapshot(providerPath);
+    writeProviderProfile(provider.profile);
+    if (provider.source === "local") {
+      await removeLocalProviderFile(provider.name);
+    } else {
+      const removeResult = await removeCloudProviderEntry(provider.name, {
+        entryVersion: provider.syncVersion,
+        updatedAt: provider.syncUpdatedAt,
+      });
+      if (!removeResult.success) {
+        restoreLocalFileSnapshot(providerPath, localSnapshot);
+        return { success: false, message: removeResult.message, conflict: removeResult.conflict };
+      }
+    }
+  }
+  if (target === "cloud") {
+    if (provider.source === "local") {
+      await removeLocalProviderFile(provider.name);
+    } else {
+      const removeResult = await removeCloudProviderEntry(provider.name, {
+        entryVersion: provider.syncVersion,
+        updatedAt: provider.syncUpdatedAt,
+      });
+      if (!removeResult.success) {
+        await removeLocalProviderFile(provider.name);
+        return { success: false, message: removeResult.message, conflict: removeResult.conflict };
+      }
+    }
   }
 
   const current = getSavedCurrentSelection();
   if (current.kind === "provider" && current.name === provider.name && current.source === provider.source) {
-    await setMarker({ kind: "provider", name: provider.name, source: target });
+    await setMarker({
+      kind: "provider",
+      name: provider.name,
+      source: target,
+      entryVersion: target === "cloud" ? nextCloudMetadata.entryVersion : undefined,
+      updatedAt: target === "cloud" ? nextCloudMetadata.updatedAt : undefined,
+    });
   }
 
   return { success: true, message: `Moved provider "${provider.name}" to ${getSourceLabel(target)} storage.` };

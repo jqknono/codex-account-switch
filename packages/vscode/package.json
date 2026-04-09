@@ -135,6 +135,12 @@
         "icon": "$(refresh)"
       },
       {
+        "command": "codex-account-switch.selectAutoRefreshDevice",
+        "title": "Select Auto-Refresh Device",
+        "category": "Codex Account Switch",
+        "icon": "$(device-desktop)"
+      },
+      {
         "command": "codex-account-switch.reloadWindow",
         "title": "Reload Window",
         "category": "Codex Account Switch",
@@ -173,6 +179,12 @@
       {
         "command": "codex-account-switch.copyProviderField",
         "title": "Copy Provider Value",
+        "category": "Codex Account Switch",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "codex-account-switch.copyAccountField",
+        "title": "Copy Account Value",
         "category": "Codex Account Switch",
         "icon": "$(copy)"
       },
@@ -240,6 +252,11 @@
           "group": "navigation@6"
         },
         {
+          "command": "codex-account-switch.selectAutoRefreshDevice",
+          "when": "view == codexAccountSwitchAccounts",
+          "group": "navigation@7"
+        },
+        {
           "command": "codex-account-switch.switchMode",
           "when": "view == codexAccountSwitchProviders",
           "group": "navigation@1"
@@ -294,6 +311,11 @@
         {
           "command": "codex-account-switch.unlockStorage",
           "when": "view == codexAccountSwitchAccounts && viewItem == accountCloudLocked",
+          "group": "context@1"
+        },
+        {
+          "command": "codex-account-switch.copyAccountField",
+          "when": "view == codexAccountSwitchAccounts && viewItem == accountCopyableField",
           "group": "context@1"
         },
         {
@@ -386,7 +408,9 @@
           "default": {
             "version": 1,
             "accounts": {},
-            "providers": {}
+            "providers": {},
+            "devices": [],
+            "autoRefreshDeviceName": null
           },
           "description": "Encrypted synced storage for cloud accounts and providers. Managed by the extension."
         }

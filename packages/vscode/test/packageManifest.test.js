@@ -92,7 +92,7 @@ test("storage target settings are contributed", () => {
   );
   assert.equal(
     properties["codex-account-switch.cloudTokenAutoUpdate"]?.default,
-    false
+    true
   );
   assert.equal(
     properties["codex-account-switch.cloudTokenAutoUpdateIntervalHours"]?.type,
@@ -127,6 +127,10 @@ test("storage migration commands are contributed", () => {
     byId.get("codex-account-switch.moveProviderToLocal")?.title,
     "Move Provider To Local"
   );
+  assert.equal(
+    byId.get("codex-account-switch.selectAutoRefreshDevice")?.title,
+    "Select Auto-Refresh Device"
+  );
 });
 
 test("account inline actions do not include remove", () => {
@@ -158,4 +162,23 @@ test("locked cloud accounts expose unlock in the context menu", () => {
   );
 
   assert.equal(unlockMenuItem?.group, "context@1");
+});
+
+test("account email copy command is contributed", () => {
+  const byId = new Map(commands.map((command) => [command.command, command]));
+  const contextMenus = manifest.contributes.menus["view/item/context"] ?? [];
+
+  assert.equal(
+    byId.get("codex-account-switch.copyAccountField")?.title,
+    "Copy Account Value"
+  );
+  assert.equal(
+    contextMenus.find(
+      (item) =>
+        item.command === "codex-account-switch.copyAccountField" &&
+        item.when ===
+          "view == codexAccountSwitchAccounts && viewItem == accountCopyableField"
+    )?.group,
+    "context@1"
+  );
 });
