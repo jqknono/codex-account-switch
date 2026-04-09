@@ -135,6 +135,24 @@ test("refresh token status ignores legacy refresh expiry fields", () => {
   assert.equal(core.formatRefreshTokenStatus(auth), "available");
 });
 
+test("deserializeSavedValue accepts encrypted envelopes with visible sync metadata", () => {
+  core.setSavedAuthPassphrase("sync-metadata-passphrase");
+  const envelope = core.serializeSavedValue(
+    "saved_auth",
+    makeAccountAuth("acct-sync", "refresh-sync"),
+    { requireEncryption: true }
+  );
+  envelope.entryVersion = 7;
+  envelope.updatedAt = "2026-04-09T00:00:00.000Z";
+
+  const result = core.deserializeSavedValue(envelope, "saved_auth");
+
+  assert.equal(result.status, "ok");
+  assert.equal(result.encrypted, true);
+  assert.equal(result.value.tokens.account_id, "acct-sync");
+  core.setSavedAuthPassphrase(null);
+});
+
 test("listModes returns only account when no provider files exist", () => {
   const codexHome = createTempCodexHome();
   process.env.CODEX_HOME = codexHome;

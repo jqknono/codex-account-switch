@@ -127,6 +127,10 @@ test("storage migration commands are contributed", () => {
     byId.get("codex-account-switch.moveProviderToLocal")?.title,
     "Move Provider To Local"
   );
+  assert.equal(
+    byId.get("codex-account-switch.selectAutoRefreshDevice")?.title,
+    "Select Auto-Refresh Device"
+  );
 });
 
 test("account inline actions do not include remove", () => {

@@ -35,6 +35,13 @@ interface SavedStorageEnvelope {
   salt: string;
   iv: string;
   ciphertext: string;
+  entryVersion?: number;
+  updatedAt?: string;
+}
+
+export interface SavedStorageSyncMetadata {
+  entryVersion: number | null;
+  updatedAt: string | null;
 }
 
 let savedAuthPassphrase: string | null = null;
@@ -250,6 +257,23 @@ export function deserializeSavedValue<T>(value: unknown, expectedKind: SavedStor
 
 export function isSerializedSavedValueEncrypted(value: unknown): boolean {
   return isEnvelope(value);
+}
+
+export function getSerializedSavedValueSyncMetadata(value: unknown): SavedStorageSyncMetadata {
+  if (!isEnvelope(value)) {
+    return {
+      entryVersion: null,
+      updatedAt: null,
+    };
+  }
+
+  return {
+    entryVersion:
+      Number.isInteger(value.entryVersion) && (value.entryVersion as number) >= 1
+        ? (value.entryVersion as number)
+        : null,
+    updatedAt: typeof value.updatedAt === "string" && value.updatedAt.length > 0 ? value.updatedAt : null,
+  };
 }
 
 export function writeSavedJsonFile(

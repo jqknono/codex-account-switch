@@ -182,6 +182,13 @@ export class AccountTreeItem extends vscode.TreeItem {
       `Email: ${email}`,
       `Plan: ${plan}`,
     ];
+    if (account.source === "cloud" && (account.syncVersion != null || account.syncUpdatedAt)) {
+      tooltipLines.push(`Sync version: ${account.syncVersion ?? "legacy"}`);
+      tooltipLines.push(`Updated: ${account.syncUpdatedAt ?? "unknown"}`);
+      tooltipLines.push(`Current device: ${account.currentDeviceName ?? "unknown"}`);
+      tooltipLines.push(`Auto-refresh device: ${account.effectiveAutoRefreshDeviceName ?? "none"}`);
+      tooltipLines.push(`Auto-refresh here: ${account.autoRefreshAllowed ? "Yes" : "No"}`);
+    }
 
     if (account.storageState !== "ready") {
       tooltipLines.push(account.storageMessage ?? "Saved auth is unavailable");
@@ -416,6 +423,53 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
     const sourceItem = new AccountDetailItem("Source", account.source, account.source, parent);
     sourceItem.iconPath = new vscode.ThemeIcon(account.source === "cloud" ? "cloud" : "device-desktop");
     items.push(sourceItem);
+
+    if (account.source === "cloud" && (account.syncVersion != null || account.syncUpdatedAt)) {
+      const syncVersionItem = new AccountDetailItem(
+        "Sync version",
+        String(account.syncVersion ?? "legacy"),
+        String(account.syncVersion ?? "legacy"),
+        parent,
+      );
+      syncVersionItem.iconPath = new vscode.ThemeIcon("versions");
+      items.push(syncVersionItem);
+
+      const updatedItem = new AccountDetailItem(
+        "Updated",
+        account.syncUpdatedAt ?? "unknown",
+        account.syncUpdatedAt ?? "unknown",
+        parent,
+      );
+      updatedItem.iconPath = new vscode.ThemeIcon("history");
+      items.push(updatedItem);
+
+      const currentDeviceItem = new AccountDetailItem(
+        "Current device",
+        account.currentDeviceName ?? "unknown",
+        account.currentDeviceName ?? "unknown",
+        parent,
+      );
+      currentDeviceItem.iconPath = new vscode.ThemeIcon("device-desktop");
+      items.push(currentDeviceItem);
+
+      const autoRefreshDeviceItem = new AccountDetailItem(
+        "Auto-refresh device",
+        account.effectiveAutoRefreshDeviceName ?? "none",
+        account.effectiveAutoRefreshDeviceName ?? "none",
+        parent,
+      );
+      autoRefreshDeviceItem.iconPath = new vscode.ThemeIcon("sync");
+      items.push(autoRefreshDeviceItem);
+
+      const autoRefreshAllowedItem = new AccountDetailItem(
+        "Auto-refresh here",
+        account.autoRefreshAllowed ? "Yes" : "No",
+        account.autoRefreshAllowed ? "This device can automatically persist refreshed cloud tokens" : "This device cannot automatically persist refreshed cloud tokens",
+        parent,
+      );
+      autoRefreshAllowedItem.iconPath = new vscode.ThemeIcon(account.autoRefreshAllowed ? "check" : "circle-slash");
+      items.push(autoRefreshAllowedItem);
+    }
 
     const planItem = new AccountDetailItem("Plan", plan, plan, parent);
     planItem.iconPath = new vscode.ThemeIcon("tag");

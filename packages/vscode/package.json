@@ -135,6 +135,12 @@
         "icon": "$(refresh)"
       },
       {
+        "command": "codex-account-switch.selectAutoRefreshDevice",
+        "title": "Select Auto-Refresh Device",
+        "category": "Codex Account Switch",
+        "icon": "$(device-desktop)"
+      },
+      {
         "command": "codex-account-switch.reloadWindow",
         "title": "Reload Window",
         "category": "Codex Account Switch",
@@ -238,6 +244,11 @@
           "command": "codex-account-switch.expandAllAccounts",
           "when": "view == codexAccountSwitchAccounts",
           "group": "navigation@6"
+        },
+        {
+          "command": "codex-account-switch.selectAutoRefreshDevice",
+          "when": "view == codexAccountSwitchAccounts",
+          "group": "navigation@7"
         },
         {
           "command": "codex-account-switch.switchMode",
@@ -386,7 +397,9 @@
           "default": {
             "version": 1,
             "accounts": {},
-            "providers": {}
+            "providers": {},
+            "devices": [],
+            "autoRefreshDeviceName": null
           },
           "description": "Encrypted synced storage for cloud accounts and providers. Managed by the extension."
         }

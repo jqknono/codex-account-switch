@@ -81,6 +81,10 @@ export class ProviderTreeItem extends vscode.TreeItem {
     if (provider.storageMessage) {
       tooltipLines.push(provider.storageMessage);
     }
+    if (provider.source === "cloud" && (provider.syncVersion != null || provider.syncUpdatedAt)) {
+      tooltipLines.push(`Sync version: ${provider.syncVersion ?? "legacy"}`);
+      tooltipLines.push(`Updated: ${provider.syncUpdatedAt ?? "unknown"}`);
+    }
 
     const baseUrl =
       typeof provider.config.base_url === "string" && provider.config.base_url.trim()
@@ -170,6 +174,26 @@ export class ProviderTreeProvider implements vscode.TreeDataProvider<ProviderTre
     const sourceItem = new ProviderDetailItem("Source", provider.source, provider.source, parent);
     sourceItem.iconPath = new vscode.ThemeIcon(provider.source === "cloud" ? "cloud" : "device-desktop");
     items.push(sourceItem);
+
+    if (provider.source === "cloud" && (provider.syncVersion != null || provider.syncUpdatedAt)) {
+      const syncVersionItem = new ProviderDetailItem(
+        "Sync version",
+        String(provider.syncVersion ?? "legacy"),
+        String(provider.syncVersion ?? "legacy"),
+        parent,
+      );
+      syncVersionItem.iconPath = new vscode.ThemeIcon("versions");
+      items.push(syncVersionItem);
+
+      const updatedItem = new ProviderDetailItem(
+        "Updated",
+        provider.syncUpdatedAt ?? "unknown",
+        provider.syncUpdatedAt ?? "unknown",
+        parent,
+      );
+      updatedItem.iconPath = new vscode.ThemeIcon("history");
+      items.push(updatedItem);
+    }
 
     if (provider.locked) {
       return items;
