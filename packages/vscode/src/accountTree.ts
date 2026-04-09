@@ -1,8 +1,8 @@
 import * as vscode from "vscode";
 import {
+  AuthFile,
   getTokenExpiry,
   formatTokenExpiry,
-  formatRefreshTokenStatus,
   QuotaInfo,
   WindowInfo,
 } from "@codex-account-switch/core";
@@ -16,7 +16,7 @@ interface QuotaState {
   updatedAt: number | null;
 }
 
-export type AccountTreeNode = AccountTreeItem | AccountDetailItem;
+export type AccountTreeNode = AccountGroupItem | AccountTreeItem | AccountDetailItem;
 const LOG_PREFIX = "[codex-account-switch:vscode:accountTree]";
 
 function windowLabel(w: WindowInfo): string {
@@ -41,6 +41,14 @@ function formatQuotaSummary(info: QuotaInfo | null): string | null {
 
 function getQuotaUnavailableMessage(info: QuotaInfo | null | undefined): string | null {
   return info?.unavailableReason?.message ?? null;
+}
+
+function formatLastRefresh(auth: AuthFile): string {
+  if (typeof auth.last_refresh === "string" && auth.last_refresh.trim()) {
+    return auth.last_refresh.trim();
+  }
+  const refreshToken = auth.tokens?.refresh_token;
+  return typeof refreshToken === "string" && refreshToken.trim() ? "Never" : "Unavailable";
 }
 
 function formatResetTime(resetsAt: Date | null): string | null {
@@ -119,12 +127,13 @@ function appendQuotaTooltip(lines: string[], info: QuotaInfo) {
   }
 }
 
-class AccountDetailItem extends vscode.TreeItem {
+export class AccountDetailItem extends vscode.TreeItem {
   constructor(
     label: string,
     description?: string,
     tooltip?: string,
-    public readonly parent?: AccountTreeItem
+    public readonly parent?: AccountTreeItem,
+    public readonly rawValue?: string,
   ) {
     super(label, vscode.TreeItemCollapsibleState.None);
     this.description = description;
@@ -133,7 +142,25 @@ class AccountDetailItem extends vscode.TreeItem {
   }
 }
 
+export class AccountGroupItem extends vscode.TreeItem {
+  constructor(
+    label: string,
+    public readonly children: AccountTreeItem[],
+    iconId: string,
+  ) {
+    super(label, vscode.TreeItemCollapsibleState.Expanded);
+    this.description = `${children.length}`;
+    this.contextValue = "accountGroup";
+    this.iconPath = new vscode.ThemeIcon(iconId);
+    for (const child of children) {
+      child.groupParent = this;
+    }
+  }
+}
+
 export class AccountTreeItem extends vscode.TreeItem {
+  groupParent?: AccountGroupItem;
+
   constructor(public readonly account: SavedAccountInfo, public readonly quotaState?: QuotaState) {
     super(account.name, vscode.TreeItemCollapsibleState.Expanded);
 
@@ -200,7 +227,7 @@ export class AccountTreeItem extends vscode.TreeItem {
       const expiry = getTokenExpiry(account.auth);
       const tokenStatus = formatTokenExpiry(account.auth);
       tooltipLines.push(`Token: ${tokenStatus}`);
-      tooltipLines.push(`Refresh token: ${formatRefreshTokenStatus(account.auth)}`);
+      tooltipLines.push(`Last refresh: ${formatLastRefresh(account.auth)}`);
 
       if (expiry && expiry.getTime() < Date.now()) {
         this.iconPath = new vscode.ThemeIcon(
@@ -232,7 +259,7 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
   private timer: ReturnType<typeof setInterval> | undefined;
   private configListener: vscode.Disposable | undefined;
   private quotaState = new Map<string, QuotaState>();
-  private rootItems: AccountTreeItem[] = [];
+  private rootItems: AccountGroupItem[] = [];
   private refreshVersion = 0;
 
   refresh(): void {
@@ -351,6 +378,10 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
       return this.getRootItems();
     }
 
+    if (element instanceof AccountGroupItem) {
+      return element.children;
+    }
+
     if (element instanceof AccountDetailItem) {
       return [];
     }
@@ -361,6 +392,9 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
   getParent(element: AccountTreeNode): AccountTreeNode | undefined {
     if (element instanceof AccountDetailItem) {
       return element.parent;
+    }
+    if (element instanceof AccountTreeItem) {
+      return element.groupParent;
     }
     return undefined;
   }
@@ -397,7 +431,7 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
     }
   }
 
-  getRootItems(): AccountTreeItem[] {
+  getRootItems(): AccountGroupItem[] {
     if (this.rootItems.length === 0) {
       this.syncRootItems();
     }
@@ -405,9 +439,32 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
   }
 
   private syncRootItems(accounts = listSavedAccounts()) {
-    this.rootItems = accounts.map(
-      (account) => new AccountTreeItem(account, this.quotaState.get(account.id))
-    );
+    const quotaFailed: AccountTreeItem[] = [];
+    const local: AccountTreeItem[] = [];
+    const cloud: AccountTreeItem[] = [];
+
+    for (const account of accounts) {
+      const item = new AccountTreeItem(account, this.quotaState.get(account.id));
+      if (this.quotaState.get(account.id)?.error) {
+        quotaFailed.push(item);
+      } else if (account.source === "cloud") {
+        cloud.push(item);
+      } else {
+        local.push(item);
+      }
+    }
+
+    const groups: AccountGroupItem[] = [];
+    if (quotaFailed.length > 0) {
+      groups.push(new AccountGroupItem("Quota Failed", quotaFailed, "warning"));
+    }
+    if (local.length > 0) {
+      groups.push(new AccountGroupItem("Local Accounts", local, "device-desktop"));
+    }
+    if (cloud.length > 0) {
+      groups.push(new AccountGroupItem("Cloud Accounts", cloud, "cloud"));
+    }
+    this.rootItems = groups;
   }
 
   private getAccountDetails(parent: AccountTreeItem): AccountDetailItem[] {
@@ -416,7 +473,10 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
     const plan = account.meta?.plan ?? "unknown";
     const items: AccountDetailItem[] = [];
 
-    const emailItem = new AccountDetailItem("Email", email, email, parent);
+    const emailItem = new AccountDetailItem("Email", email, email, parent, email);
+    if (email !== "unknown") {
+      emailItem.contextValue = "accountCopyableField";
+    }
     emailItem.iconPath = new vscode.ThemeIcon("mail");
     items.push(emailItem);
 
@@ -502,19 +562,17 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
       }
       items.push(tokenItem);
 
-      const refreshTokenStatus = formatRefreshTokenStatus(account.auth);
-      const refreshTokenItem = new AccountDetailItem(
-        "Refresh token",
-        refreshTokenStatus,
-        refreshTokenStatus,
+      const lastRefresh = formatLastRefresh(account.auth);
+      const lastRefreshItem = new AccountDetailItem(
+        "Last refresh",
+        lastRefresh,
+        lastRefresh,
         parent
       );
-      if (refreshTokenStatus === "available") {
-        refreshTokenItem.iconPath = new vscode.ThemeIcon("refresh", new vscode.ThemeColor("charts.green"));
-      } else {
-        refreshTokenItem.iconPath = new vscode.ThemeIcon("circle-slash");
-      }
-      items.push(refreshTokenItem);
+      lastRefreshItem.iconPath = lastRefresh === "Unavailable"
+        ? new vscode.ThemeIcon("circle-slash")
+        : new vscode.ThemeIcon("history", new vscode.ThemeColor("charts.green"));
+      items.push(lastRefreshItem);
     }
 
     if (quotaState?.loading) {

@@ -183,6 +183,12 @@
         "icon": "$(copy)"
       },
       {
+        "command": "codex-account-switch.copyAccountField",
+        "title": "Copy Account Value",
+        "category": "Codex Account Switch",
+        "icon": "$(copy)"
+      },
+      {
         "command": "codex-account-switch.moveAccountToCloud",
         "title": "Move Account To Cloud",
         "category": "Codex Account Switch",
@@ -305,6 +311,11 @@
         {
           "command": "codex-account-switch.unlockStorage",
           "when": "view == codexAccountSwitchAccounts && viewItem == accountCloudLocked",
+          "group": "context@1"
+        },
+        {
+          "command": "codex-account-switch.copyAccountField",
+          "when": "view == codexAccountSwitchAccounts && viewItem == accountCopyableField",
           "group": "context@1"
         },
         {

@@ -8,7 +8,7 @@ import {
   getModeDisplayName,
   switchMode,
 } from "@codex-account-switch/core";
-import { AccountTreeProvider, AccountTreeItem, AccountTreeNode } from "./accountTree";
+import { AccountDetailItem, AccountTreeProvider, AccountTreeItem, AccountTreeNode } from "./accountTree";
 import { ProviderDetailItem, ProviderTreeItem, ProviderTreeProvider } from "./providerTree";
 import { StatusBarManager } from "./statusBar";
 import { buildCompletedProviderProfile } from "./providerProfile";
@@ -1268,6 +1268,18 @@ export function registerCommands(
       }
 
       const label = typeof item?.label === "string" ? item.label : "provider value";
+      await vscode.env.clipboard.writeText(value);
+      vscode.window.showInformationMessage(`Copied ${label} to clipboard.`);
+    }),
+
+    vscode.commands.registerCommand("codex-account-switch.copyAccountField", async (item?: AccountDetailItem) => {
+      const value = item?.rawValue;
+      if (!value) {
+        vscode.window.showWarningMessage("No account value available to copy.");
+        return;
+      }
+
+      const label = typeof item?.label === "string" ? item.label : "account value";
       await vscode.env.clipboard.writeText(value);
       vscode.window.showInformationMessage(`Copied ${label} to clipboard.`);
     })
