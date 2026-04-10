@@ -106,6 +106,14 @@ test("storage target settings are contributed", () => {
     properties["codex-account-switch.cloudTokenAutoUpdateIntervalHours"]?.minimum,
     1
   );
+  assert.equal(
+    properties["codex-account-switch.detailedPerformanceLogging"]?.type,
+    "boolean"
+  );
+  assert.equal(
+    properties["codex-account-switch.detailedPerformanceLogging"]?.default,
+    false
+  );
 });
 
 test("storage migration commands are contributed", () => {
@@ -149,6 +157,22 @@ test("account inline actions do not include remove", () => {
       "codex-account-switch.refreshToken",
       "codex-account-switch.useAccount",
     ]
+  );
+});
+
+test("accounts view title menu exposes manual refresh commands", () => {
+  const titleMenus = manifest.contributes.menus["view/title"] ?? [];
+  const accountViewCommands = titleMenus
+    .filter((item) => item.when === "view == codexAccountSwitchAccounts")
+    .map((item) => item.command);
+
+  assert.equal(
+    accountViewCommands.includes("codex-account-switch.refreshToken"),
+    true
+  );
+  assert.equal(
+    accountViewCommands.includes("codex-account-switch.refreshQuota"),
+    true
   );
 });
 

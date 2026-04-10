@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import { AccountTreeProvider } from "./accountTree";
-import { logWarn } from "./log";
+import { logWarn, startPerformanceLog } from "./log";
 import { ProviderTreeProvider } from "./providerTree";
 import { StatusBarManager } from "./statusBar";
 
@@ -25,18 +25,32 @@ export class RefreshCoordinator implements vscode.Disposable {
   ) {}
 
   refreshViews(): void {
+    const perf = startPerformanceLog(LOG_PREFIX, "refreshCoordinator.refreshViews");
     this.accountTree.refresh();
+    perf.mark("account-tree-refresh");
     this.providerTree.refresh();
+    perf.mark("provider-tree-refresh");
     void this.statusBar.refreshNow({ skipQuota: true }).catch((error) => {
       logWarn(LOG_PREFIX, "refresh-views-statusBar-failed", {
         error: error instanceof Error ? error.message : String(error),
       });
+      perf.fail(error);
     });
+    perf.finish();
   }
 
   scheduleQuotaRefresh(targetIds?: Iterable<string>): void {
-    this.enqueueQuotaRefresh(targetIds);
+    const normalizedTargetIds = targetIds ? [...targetIds] : undefined;
+    const perf = startPerformanceLog(LOG_PREFIX, "refreshCoordinator.scheduleQuotaRefresh", {
+      targetCount: normalizedTargetIds?.length ?? null,
+    });
+    this.enqueueQuotaRefresh(normalizedTargetIds);
+    perf.mark("enqueue");
     this.ensureScheduled();
+    perf.finish({
+      pendingFullRefresh: this.pendingFullRefresh,
+      pendingTargetCount: this.pendingTargetIds.size,
+    });
   }
 
   prepareConfigurationRefresh(options?: { skipQuota?: boolean; targetIds?: Iterable<string> }): void {
@@ -96,15 +110,25 @@ export class RefreshCoordinator implements vscode.Disposable {
   }
 
   private async flushQuotaRefresh(): Promise<void> {
+    const perf = startPerformanceLog(LOG_PREFIX, "refreshCoordinator.flushQuotaRefresh");
     if (this.runningRefresh) {
+      perf.finish({
+        result: "already-running",
+      });
       return;
     }
 
     const targetIds = this.pendingFullRefresh ? undefined : [...this.pendingTargetIds];
     this.pendingFullRefresh = false;
     this.pendingTargetIds.clear();
+    perf.mark("drain-pending-queue", {
+      targetCount: targetIds?.length ?? null,
+    });
 
     if (targetIds && targetIds.length === 0) {
+      perf.finish({
+        result: "empty-targets",
+      });
       return;
     }
 
@@ -113,11 +137,17 @@ export class RefreshCoordinator implements vscode.Disposable {
       this.statusBar.refreshNow(),
     ])
       .then(() => {
+        perf.finish({
+          targetCount: targetIds?.length ?? null,
+        });
         return;
       })
       .catch((error) => {
         logWarn(LOG_PREFIX, "quota-refresh-failed", {
           error: error instanceof Error ? error.message : String(error),
+        });
+        perf.fail(error, {
+          targetCount: targetIds?.length ?? null,
         });
       })
       .finally(() => {

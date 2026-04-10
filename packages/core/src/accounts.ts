@@ -22,12 +22,12 @@ import {
   writeCurrentAuth,
   writeSavedAuthFile,
 } from "./auth";
-import { applyRefreshResponse, refreshAccessToken, refreshAndSave } from "./refresh";
+import { refreshAndSave } from "./refresh";
 import { getQuotaInfo } from "./quota";
 import { AuthFile, AccountMeta, QuotaInfo, ExportData, CurrentSelection } from "./types";
 import { clearActiveModelProvider, getActiveModelProvider } from "./config";
 import { getModeDisplayName } from "./providers";
-import { writeDiagnosticLog } from "./log";
+import { createDiagnosticPerformanceTimer, writeDiagnosticLog } from "./log";
 import { SavedStorageReadResult } from "./savedStorage";
 
 export interface AccountInfo {
@@ -56,7 +56,6 @@ export type QuotaQueryResult =
       modeName: string;
     };
 
-const QUOTA_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const ACCOUNT_LOCK_TIMEOUT_MS = 30 * 1000;
 const ACCOUNT_LOCK_RETRY_MS = 100;
 const STALE_ACCOUNT_LOCK_MS = 5 * 60 * 1000;
@@ -458,24 +457,6 @@ function resolveRefreshTarget(
   };
 }
 
-function shouldRefreshBeforeQuota(auth: AuthFile): boolean {
-  const refreshToken = auth.tokens?.refresh_token;
-  if (typeof refreshToken !== "string" || refreshToken.trim().length === 0) {
-    return false;
-  }
-
-  if (!auth.last_refresh) {
-    return true;
-  }
-
-  const lastRefreshTime = Date.parse(auth.last_refresh);
-  if (Number.isNaN(lastRefreshTime)) {
-    return true;
-  }
-
-  return Date.now() - lastRefreshTime >= QUOTA_REFRESH_INTERVAL_MS;
-}
-
 function getSavedAccountsSnapshot(): Array<{ name: string; meta: AccountMeta | null; auth: AuthFile | null }> {
   return listNamedAuthFiles().map((name) => {
     const info = toAccountInfo(name, false);
@@ -690,27 +671,48 @@ export function getCurrentAccount(): { name: string | null; meta: AccountMeta | 
 }
 
 export async function queryQuota(name?: string): Promise<QuotaQueryResult> {
-  const initialTarget = resolveQuotaTarget(name);
-  if (initialTarget.kind !== "ok") {
-    return initialTarget;
-  }
-
-  const lockKey = getAccountLockKey(initialTarget.auth);
-  const existingQuery = inflightQuotaQueries.get(lockKey);
-  if (existingQuery) {
-    logAccountLock("info", "reuse-inflight-quota", {
-      operation: "queryQuota",
-      account: getAccountLockLabel(initialTarget.auth),
-      lockKey,
+  const perf = createDiagnosticPerformanceTimer("[codex-account-switch:core:accounts]", "queryQuota", {
+    requestedName: name ?? null,
+  });
+  try {
+    const initialTarget = resolveQuotaTarget(name);
+    perf.mark("resolve-initial-target", {
+      initialResultKind: initialTarget.kind,
     });
-    return existingQuery;
-  }
-
-  const queryPromise: Promise<QuotaQueryResult> = withAccountLock(initialTarget.auth, "queryQuota", async () => {
-    const target = resolveQuotaTarget(name);
-    if (target.kind !== "ok") {
-      return target;
+    if (initialTarget.kind !== "ok") {
+      perf.finish({
+        resultKind: initialTarget.kind,
+      });
+      return initialTarget;
     }
+
+    const lockKey = getAccountLockKey(initialTarget.auth);
+    const existingQuery = inflightQuotaQueries.get(lockKey);
+    if (existingQuery) {
+      logAccountLock("info", "reuse-inflight-quota", {
+        operation: "queryQuota",
+        account: getAccountLockLabel(initialTarget.auth),
+        lockKey,
+      });
+      perf.finish({
+        resultKind: "inflight",
+        reusedInflight: true,
+        account: getAccountLockLabel(initialTarget.auth),
+      });
+      return existingQuery;
+    }
+
+    const queryPromise: Promise<QuotaQueryResult> = withAccountLock(initialTarget.auth, "queryQuota", async () => {
+      perf.mark("account-lock-acquired", {
+        account: getAccountLockLabel(initialTarget.auth),
+      });
+      const target = resolveQuotaTarget(name);
+      perf.mark("resolve-target-inside-lock", {
+        targetKind: target.kind,
+      });
+      if (target.kind !== "ok") {
+        return target;
+      }
 
       const { auth, authPath, displayName, shouldSyncCurrentAuth } = target;
       const persistUpdatedAuth = async (): Promise<void> => {
@@ -719,31 +721,48 @@ export async function queryQuota(name?: string): Promise<QuotaQueryResult> {
         }
         if (!authPath || shouldSyncCurrentAuth) {
           writeCurrentAuth(auth);
+        }
+        perf.mark("persist-updated-auth", {
+          authPath: authPath ?? null,
+          shouldSyncCurrentAuth,
+        });
+      };
+
+      const authBefore = JSON.stringify(auth);
+      const info = await getQuotaInfo(auth, persistUpdatedAuth);
+      perf.mark("get-quota-info", {
+        unavailableReason: info.unavailableReason?.code ?? null,
+      });
+      if (JSON.stringify(auth) !== authBefore) {
+        await persistUpdatedAuth();
       }
-    };
+      return { kind: "ok" as const, displayName, info };
+    });
 
-    const authBefore = JSON.stringify(auth);
-    if (shouldRefreshBeforeQuota(auth)) {
-      const refreshed = await refreshAccessToken(auth);
-      applyRefreshResponse(auth, refreshed);
-      await persistUpdatedAuth();
-    }
+    inflightQuotaQueries.set(lockKey, queryPromise);
+    queryPromise
+      .then((result) => {
+        perf.finish({
+          resultKind: result.kind,
+          displayName: "displayName" in result ? result.displayName : null,
+        });
+      })
+      .catch((error) => {
+        perf.fail(error, {
+          account: getAccountLockLabel(initialTarget.auth),
+        });
+      })
+      .finally(() => {
+        if (inflightQuotaQueries.get(lockKey) === queryPromise) {
+          inflightQuotaQueries.delete(lockKey);
+        }
+      });
 
-    const info = await getQuotaInfo(auth, persistUpdatedAuth);
-    if (JSON.stringify(auth) !== authBefore) {
-      await persistUpdatedAuth();
-    }
-    return { kind: "ok" as const, displayName, info };
-  });
-
-  inflightQuotaQueries.set(lockKey, queryPromise);
-  queryPromise.finally(() => {
-    if (inflightQuotaQueries.get(lockKey) === queryPromise) {
-      inflightQuotaQueries.delete(lockKey);
-    }
-  });
-
-  return queryPromise;
+    return queryPromise;
+  } catch (error) {
+    perf.fail(error);
+    throw error;
+  }
 }
 
 export async function refreshAccount(name?: string): Promise<{

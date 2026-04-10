@@ -40,9 +40,11 @@ import {
   writeProviderProfile,
   writeSavedAuthFile,
 } from "@codex-account-switch/core";
+import { startPerformanceLog } from "./log";
 
 export type StorageSource = "local" | "cloud";
 export type SaveTarget = StorageSource;
+const LOG_PREFIX = "[codex-account-switch:vscode:savedEntries]";
 
 export interface SavedAccountInfo {
   id: string;
@@ -126,7 +128,6 @@ const CLOUD_TOKEN_AUTO_UPDATE_SETTING = "cloudTokenAutoUpdate";
 const CLOUD_TOKEN_AUTO_UPDATE_INTERVAL_HOURS_SETTING = "cloudTokenAutoUpdateIntervalHours";
 const CURRENT_SELECTION_KEY = "codex-account-switch.currentSavedSelection";
 const DEFAULT_CLOUD_TOKEN_AUTO_UPDATE_INTERVAL_HOURS = 24;
-const QUOTA_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
 const inflightCloudQuotaQueries = new Map<string, Promise<QuotaQueryResult>>();
 let inflightAutoRefreshDevicePrompt: Promise<string | null> | null = null;
@@ -648,7 +649,30 @@ function selectCurrentProvider(providers: SavedProviderInfo[]): SavedProviderInf
 }
 
 export function listSavedAccounts(): SavedAccountInfo[] {
-  return selectCurrentAccount([...getLocalAccounts(), ...getCloudAccounts()]);
+  const perf = startPerformanceLog(LOG_PREFIX, "listSavedAccounts");
+  try {
+    const localAccounts = getLocalAccounts();
+    perf.mark("get-local-accounts", {
+      localCount: localAccounts.length,
+    });
+    const cloudAccounts = getCloudAccounts();
+    perf.mark("get-cloud-accounts", {
+      cloudCount: cloudAccounts.length,
+    });
+    const accounts = selectCurrentAccount([...localAccounts, ...cloudAccounts]);
+    perf.mark("select-current-account", {
+      totalCount: accounts.length,
+    });
+    perf.finish({
+      localCount: localAccounts.length,
+      cloudCount: cloudAccounts.length,
+      totalCount: accounts.length,
+    });
+    return accounts;
+  } catch (error) {
+    perf.fail(error);
+    throw error;
+  }
 }
 
 export function listSavedProviders(): SavedProviderInfo[] {
@@ -731,42 +755,75 @@ function getLocalSelection(): CurrentSelection {
 }
 
 export function getSavedCurrentSelection(): SavedSelection {
-  const activeProvider = getActiveModelProvider();
-  if (activeProvider) {
+  const perf = startPerformanceLog(LOG_PREFIX, "getSavedCurrentSelection");
+  try {
+    const activeProvider = getActiveModelProvider();
+    perf.mark("get-active-provider", {
+      hasActiveProvider: Boolean(activeProvider),
+    });
+    if (activeProvider) {
+      const marker = getMarker();
+      const selection = {
+        kind: "provider" as const,
+        name: activeProvider,
+        source: marker?.kind === "provider" && marker.name === activeProvider ? marker.source : "local",
+      };
+      perf.finish({
+        kind: selection.kind,
+        source: selection.source,
+      });
+      return selection;
+    }
+
+    const currentAuth = readCurrentAuth();
+    perf.mark("read-current-auth", {
+      hasCurrentAuth: Boolean(currentAuth),
+    });
+    if (!currentAuth) {
+      perf.finish({
+        kind: "unknown",
+      });
+      return { kind: "unknown", meta: null };
+    }
+
+    const identity = getAccountIdentity(currentAuth);
     const marker = getMarker();
-    return {
-      kind: "provider",
-      name: activeProvider,
-      source: marker?.kind === "provider" && marker.name === activeProvider ? marker.source : "local",
+    const matches = getReadyAccounts().filter((account) => getAccountIdentity(account.auth) === identity);
+    perf.mark("find-ready-account-matches", {
+      matchCount: matches.length,
+    });
+    if (matches.length === 0) {
+      const selection = getLocalSelection();
+      const result = selection.kind === "unknown"
+        ? selection
+        : { kind: "unknown" as const, meta: extractMeta(currentAuth) };
+      perf.finish({
+        kind: result.kind,
+      });
+      return result;
+    }
+
+    const current =
+      marker?.kind === "account"
+        ? matches.find((account) => account.source === marker.source && account.name === marker.name) ?? matches[0]
+        : matches[0];
+
+    const result = {
+      kind: "account" as const,
+      name: current.name,
+      source: current.source,
+      meta: current.meta,
     };
+    perf.finish({
+      kind: result.kind,
+      name: result.name,
+      source: result.source,
+    });
+    return result;
+  } catch (error) {
+    perf.fail(error);
+    throw error;
   }
-
-  const currentAuth = readCurrentAuth();
-  if (!currentAuth) {
-    return { kind: "unknown", meta: null };
-  }
-
-  const identity = getAccountIdentity(currentAuth);
-  const marker = getMarker();
-  const matches = getReadyAccounts().filter((account) => getAccountIdentity(account.auth) === identity);
-  if (matches.length === 0) {
-    const selection = getLocalSelection();
-    return selection.kind === "unknown"
-      ? selection
-      : { kind: "unknown", meta: extractMeta(currentAuth) };
-  }
-
-  const current =
-    marker?.kind === "account"
-      ? matches.find((account) => account.source === marker.source && account.name === marker.name) ?? matches[0]
-      : matches[0];
-
-  return {
-    kind: "account",
-    name: current.name,
-    source: current.source,
-    meta: current.meta,
-  };
 }
 
 async function writeCloudAccountWithExpectedVersion(
@@ -1092,93 +1149,110 @@ export async function useSavedAccountEntry(
   };
 }
 
-function shouldRefreshBeforeQuota(auth: AuthFile): boolean {
-  const refreshToken = auth.tokens?.refresh_token;
-  if (typeof refreshToken !== "string" || refreshToken.trim().length === 0) {
-    return false;
-  }
-  if (!auth.last_refresh) {
-    return true;
-  }
-  const lastRefreshTime = Date.parse(auth.last_refresh);
-  if (Number.isNaN(lastRefreshTime)) {
-    return true;
-  }
-  return Date.now() - lastRefreshTime >= QUOTA_REFRESH_INTERVAL_MS;
-}
-
 export async function querySavedAccountQuota(account: SavedAccountInfo): Promise<QuotaQueryResult> {
-  if (account.source === "local") {
-    const core = await import("@codex-account-switch/core");
-    return core.queryQuota(account.name);
-  }
-
-  const existingQuery = inflightCloudQuotaQueries.get(account.id);
-  if (existingQuery) {
-    return existingQuery;
-  }
-
-  if (account.storageState !== "ready" || !account.auth) {
-    return {
-      kind: "not_found",
-      message: account.storageMessage ?? `Saved cloud account "${account.name}" is unavailable.`,
-    };
-  }
-
-  const initialAuth = account.auth;
-  const queryPromise = (async (): Promise<QuotaQueryResult> => {
-    const auth = clone(initialAuth);
-    const expectedSyncMetadata: SavedStorageSyncMetadata = {
-      entryVersion: account.syncVersion,
-      updatedAt: account.syncUpdatedAt,
-    };
-    const persist = async (mode: "manual" | "automatic"): Promise<void> => {
-      const result = await persistCloudAccountAuth(
-        account.name,
-        auth,
-        mode,
-        expectedSyncMetadata.entryVersion,
-        expectedSyncMetadata.updatedAt,
-      );
-      if (!result.success) {
-        throw new Error(result.message);
-      }
-      const current = getSavedCurrentSelection();
-      if (current.kind === "account" && current.source === "cloud" && current.name === account.name) {
-        writeCurrentAuth(auth);
-      }
-      if (!("skipped" in result)) {
-        expectedSyncMetadata.entryVersion = result.syncVersion ?? null;
-        expectedSyncMetadata.updatedAt = result.syncUpdatedAt ?? null;
-        await updateMarkerSyncMetadata("account", account.name, {
-          entryVersion: result.syncVersion ?? null,
-          updatedAt: result.syncUpdatedAt ?? null,
-        });
-      }
-    };
-
-    if (shouldRefreshBeforeQuota(auth)) {
-      const refreshed = await refreshAccessToken(auth);
-      applyRefreshResponse(auth, refreshed);
-      await persist("automatic");
-    }
-
-    const info = await getQuotaInfo(auth, () => persist("automatic"));
-    return {
-      kind: "ok",
-      displayName: account.name,
-      info,
-    };
-  })();
-
-  inflightCloudQuotaQueries.set(account.id, queryPromise);
-  queryPromise.finally(() => {
-    if (inflightCloudQuotaQueries.get(account.id) === queryPromise) {
-      inflightCloudQuotaQueries.delete(account.id);
-    }
+  const perf = startPerformanceLog(LOG_PREFIX, "querySavedAccountQuota", {
+    account: account.name,
+    source: account.source,
   });
+  try {
+    if (account.source === "local") {
+      const core = await import("@codex-account-switch/core");
+      perf.mark("delegate-to-core-queryQuota");
+      const result = await core.queryQuota(account.name);
+      perf.finish({
+        resultKind: result.kind,
+      });
+      return result;
+    }
 
-  return queryPromise;
+    const existingQuery = inflightCloudQuotaQueries.get(account.id);
+    if (existingQuery) {
+      perf.finish({
+        resultKind: "inflight",
+        reusedInflight: true,
+      });
+      return existingQuery;
+    }
+
+    if (account.storageState !== "ready" || !account.auth) {
+      const result = {
+        kind: "not_found" as const,
+        message: account.storageMessage ?? `Saved cloud account "${account.name}" is unavailable.`,
+      };
+      perf.finish({
+        resultKind: result.kind,
+      });
+      return result;
+    }
+
+    const initialAuth = account.auth;
+    const queryPromise = (async (): Promise<QuotaQueryResult> => {
+      const auth = clone(initialAuth);
+      const expectedSyncMetadata: SavedStorageSyncMetadata = {
+        entryVersion: account.syncVersion,
+        updatedAt: account.syncUpdatedAt,
+      };
+      const persist = async (mode: "manual" | "automatic"): Promise<void> => {
+        const result = await persistCloudAccountAuth(
+          account.name,
+          auth,
+          mode,
+          expectedSyncMetadata.entryVersion,
+          expectedSyncMetadata.updatedAt,
+        );
+        if (!result.success) {
+          throw new Error(result.message);
+        }
+        perf.mark("persist-cloud-auth", {
+          mode,
+          skipped: "skipped" in result,
+        });
+        const current = getSavedCurrentSelection();
+        if (current.kind === "account" && current.source === "cloud" && current.name === account.name) {
+          writeCurrentAuth(auth);
+        }
+        if (!("skipped" in result)) {
+          expectedSyncMetadata.entryVersion = result.syncVersion ?? null;
+          expectedSyncMetadata.updatedAt = result.syncUpdatedAt ?? null;
+          await updateMarkerSyncMetadata("account", account.name, {
+            entryVersion: result.syncVersion ?? null,
+            updatedAt: result.syncUpdatedAt ?? null,
+          });
+        }
+      };
+
+      const info = await getQuotaInfo(auth, () => persist("automatic"));
+      perf.mark("get-quota-info", {
+        unavailableReason: info.unavailableReason?.code ?? null,
+      });
+      return {
+        kind: "ok",
+        displayName: account.name,
+        info,
+      };
+    })();
+
+    inflightCloudQuotaQueries.set(account.id, queryPromise);
+    queryPromise
+      .then((result) => {
+        perf.finish({
+          resultKind: result.kind,
+        });
+      })
+      .catch((error) => {
+        perf.fail(error);
+      })
+      .finally(() => {
+        if (inflightCloudQuotaQueries.get(account.id) === queryPromise) {
+          inflightCloudQuotaQueries.delete(account.id);
+        }
+      });
+
+    return queryPromise;
+  } catch (error) {
+    perf.fail(error);
+    throw error;
+  }
 }
 
 export async function refreshSavedAccountEntry(account: SavedAccountInfo): Promise<{

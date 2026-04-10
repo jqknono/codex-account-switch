@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import { QuotaInfo, WindowInfo, getModeDisplayName } from "@codex-account-switch/core";
-import { logInfo, logWarn } from "./log";
+import { logInfo, logWarn, startPerformanceLog } from "./log";
 import { getSavedAccountEntry, getSavedCurrentSelection, querySavedAccountQuota } from "./savedEntries";
 const LOG_PREFIX = "[codex-account-switch:vscode:statusBar]";
 
@@ -103,48 +103,83 @@ export class StatusBarManager implements vscode.Disposable {
   }
 
   async refreshNow(options?: { skipQuota?: boolean }) {
-    if (!this.isVisibleEnabled()) {
-      return;
-    }
-
-    const selection = getSavedCurrentSelection();
-    logInfo(LOG_PREFIX, "refresh-start", {
-      selectionKind: selection.kind,
-      name: "name" in selection ? selection.name : null,
+    const perf = startPerformanceLog(LOG_PREFIX, "statusBar.refreshNow", {
+      skipQuota: options?.skipQuota ?? false,
     });
-
-    if (selection.kind === "provider") {
-      const modeLabel = getModeDisplayName(selection.name);
-      const sourceLabel = selection.source === "cloud" ? "cloud" : "local";
-      this.statusBarItem.text = `$(plug) ${modeLabel} [${sourceLabel}]`;
-      this.statusBarItem.tooltip = `Mode: ${modeLabel}\nSource: ${sourceLabel}\nQuota is unavailable in provider mode`;
+    if (!this.isVisibleEnabled()) {
+      perf.finish({
+        result: "hidden",
+      });
       return;
     }
-
-    if (selection.kind !== "account") {
-      this.statusBarItem.text = "$(account) Codex: No account";
-      this.statusBarItem.tooltip = "No active Codex account detected";
-      return;
-    }
-
-    const name = selection.name;
-    if (options?.skipQuota) {
-      this.statusBarItem.text = `$(account) ${name} [${selection.source}]`;
-      this.statusBarItem.tooltip = `Account: ${name}\nSource: ${selection.source}\nQuota refresh pending`;
-      return;
-    }
-
-    const account = getSavedAccountEntry(name, selection.source);
-    if (!account) {
-      this.statusBarItem.text = `$(account) ${name}`;
-      this.statusBarItem.tooltip = `Account: ${name}\nSource: ${selection.source}\nSaved entry is unavailable`;
-      return;
-    }
-
-    this.statusBarItem.text = `$(loading~spin) ${name} [${selection.source}]`;
 
     try {
+      const selection = getSavedCurrentSelection();
+      perf.mark("get-saved-current-selection", {
+        selectionKind: selection.kind,
+        name: "name" in selection ? selection.name : null,
+      });
+      logInfo(LOG_PREFIX, "refresh-start", {
+        selectionKind: selection.kind,
+        name: "name" in selection ? selection.name : null,
+      });
+
+      if (selection.kind === "provider") {
+        const modeLabel = getModeDisplayName(selection.name);
+        const sourceLabel = selection.source === "cloud" ? "cloud" : "local";
+        this.statusBarItem.text = `$(plug) ${modeLabel} [${sourceLabel}]`;
+        this.statusBarItem.tooltip = `Mode: ${modeLabel}\nSource: ${sourceLabel}\nQuota is unavailable in provider mode`;
+        perf.finish({
+          result: "provider",
+          name: selection.name,
+          source: selection.source,
+        });
+        return;
+      }
+
+      if (selection.kind !== "account") {
+        this.statusBarItem.text = "$(account) Codex: No account";
+        this.statusBarItem.tooltip = "No active Codex account detected";
+        perf.finish({
+          result: "no-account",
+        });
+        return;
+      }
+
+      const name = selection.name;
+      if (options?.skipQuota) {
+        this.statusBarItem.text = `$(account) ${name} [${selection.source}]`;
+        this.statusBarItem.tooltip = `Account: ${name}\nSource: ${selection.source}\nQuota refresh pending`;
+        perf.finish({
+          result: "skip-quota",
+          name,
+          source: selection.source,
+        });
+        return;
+      }
+
+      const account = getSavedAccountEntry(name, selection.source);
+      perf.mark("get-saved-account-entry", {
+        foundAccount: Boolean(account),
+        name,
+        source: selection.source,
+      });
+      if (!account) {
+        this.statusBarItem.text = `$(account) ${name}`;
+        this.statusBarItem.tooltip = `Account: ${name}\nSource: ${selection.source}\nSaved entry is unavailable`;
+        perf.finish({
+          result: "missing-account",
+          name,
+          source: selection.source,
+        });
+        return;
+      }
+
+      this.statusBarItem.text = `$(loading~spin) ${name} [${selection.source}]`;
       const result = await querySavedAccountQuota(account);
+      perf.mark("query-saved-account-quota", {
+        resultKind: result.kind,
+      });
       if (result.kind !== "ok") {
         logWarn(LOG_PREFIX, "refresh-result-not-ok", {
           resultKind: result.kind,
@@ -153,6 +188,11 @@ export class StatusBarManager implements vscode.Disposable {
         });
         this.statusBarItem.text = `$(account) ${name} [${selection.source}]`;
         this.statusBarItem.tooltip = result.message;
+        perf.finish({
+          resultKind: result.kind,
+          name,
+          source: selection.source,
+        });
         return;
       }
 
@@ -182,13 +222,20 @@ export class StatusBarManager implements vscode.Disposable {
           : `Account: ${name}\nSource: ${selection.source}\nEmail: ${info.email}\nPlan: ${info.plan}`;
       }
       logInfo(LOG_PREFIX, "refresh-finish", { account: name });
+      perf.finish({
+        resultKind: result.kind,
+        name,
+        source: selection.source,
+        unavailableReason: info.unavailableReason?.code ?? null,
+      });
     } catch (error) {
       logWarn(LOG_PREFIX, "refresh-error", {
-        account: name,
+        account: this.statusBarItem.text,
         error: error instanceof Error ? error.message : String(error),
       });
-      this.statusBarItem.text = `$(account) ${name} [${selection.source}]`;
+      this.statusBarItem.text = this.statusBarItem.text || "$(account) Codex";
       this.statusBarItem.tooltip = "Quota lookup failed";
+      perf.fail(error);
     }
   }
 

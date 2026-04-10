@@ -2,7 +2,7 @@
   "name": "codex-account-switch-vscode",
   "displayName": "Codex Account Switch",
   "description": "Codex Account Switch - VS Code extension",
-    "version": "1.4.2",
+    "version": "1.4.4",
   "publisher": "techfetch-dev",
   "repository": {
     "type": "git",
@@ -247,14 +247,24 @@
           "group": "navigation@5"
         },
         {
-          "command": "codex-account-switch.expandAllAccounts",
+          "command": "codex-account-switch.refreshToken",
           "when": "view == codexAccountSwitchAccounts",
           "group": "navigation@6"
         },
         {
-          "command": "codex-account-switch.selectAutoRefreshDevice",
+          "command": "codex-account-switch.refreshQuota",
           "when": "view == codexAccountSwitchAccounts",
           "group": "navigation@7"
+        },
+        {
+          "command": "codex-account-switch.expandAllAccounts",
+          "when": "view == codexAccountSwitchAccounts",
+          "group": "navigation@8"
+        },
+        {
+          "command": "codex-account-switch.selectAutoRefreshDevice",
+          "when": "view == codexAccountSwitchAccounts",
+          "group": "navigation@9"
         },
         {
           "command": "codex-account-switch.switchMode",
@@ -353,6 +363,11 @@
           "type": "boolean",
           "default": true,
           "description": "Show the current account quota in the status bar"
+        },
+        "codex-account-switch.detailedPerformanceLogging": {
+          "type": "boolean",
+          "default": false,
+          "description": "Emit detailed staged performance logs for account list refresh and quota operations."
         },
         "codex-account-switch.reloadWindowAfterSwitch": {
           "type": "string",

@@ -458,7 +458,7 @@ test("refreshAccount syncs the current auth before refreshing and writes the rot
   assert.equal("refresh_token_expires_at" in currentAuth, false);
 });
 
-test("queryQuota proactively refreshes when last_refresh is missing", async () => {
+test("queryQuota does not proactively refresh when last_refresh is missing", async () => {
   const codexHome = createTempCodexHome();
   process.env.CODEX_HOME = codexHome;
 
@@ -466,18 +466,6 @@ test("queryQuota proactively refreshes when last_refresh is missing", async () =
   writeJson(path.join(codexHome, "auth.json"), makeAccountAuth("acct-work", "rt-current", "access-current"));
 
   const responses = [
-    {
-      statusCode: 200,
-      body: JSON.stringify({
-        access_token: "access-rotated",
-        refresh_token: "rt-rotated",
-        id_token: "id-rotated",
-      }),
-      assertRequest: (options, body) => {
-        assert.equal(options.hostname, "auth.openai.com");
-        assert.match(body, /refresh_token=rt-current/);
-      },
-    },
     {
       statusCode: 200,
       body: JSON.stringify({
@@ -491,11 +479,11 @@ test("queryQuota proactively refreshes when last_refresh is missing", async () =
       }),
       assertRequest: (options) => {
         assert.equal(options.hostname, "chatgpt.com");
-        assert.equal(options.headers.Authorization, "Bearer access-rotated");
+        assert.equal(options.headers.Authorization, "Bearer access-current");
         const savedWork = JSON.parse(fs.readFileSync(path.join(codexHome, "auth_work.json"), "utf-8"));
         const currentAuth = JSON.parse(fs.readFileSync(path.join(codexHome, "auth.json"), "utf-8"));
-        assert.equal(savedWork.tokens.refresh_token, "rt-rotated");
-        assert.equal(currentAuth.tokens.refresh_token, "rt-rotated");
+        assert.equal(savedWork.tokens.refresh_token, "rt-current");
+        assert.equal(currentAuth.tokens.refresh_token, "rt-current");
       },
     },
   ];
@@ -507,20 +495,18 @@ test("queryQuota proactively refreshes when last_refresh is missing", async () =
   });
 
   const savedWork = JSON.parse(fs.readFileSync(path.join(codexHome, "auth_work.json"), "utf-8"));
-  assert.equal(savedWork.tokens.refresh_token, "rt-rotated");
-  assert.equal(savedWork.tokens.access_token, "access-rotated");
-  assert.equal(savedWork.tokens.id_token, "id-rotated");
-  assert.ok(typeof savedWork.last_refresh === "string");
+  assert.equal(savedWork.tokens.refresh_token, "rt-current");
+  assert.equal(savedWork.tokens.access_token, "access-current");
+  assert.equal(savedWork.last_refresh, undefined);
   assert.equal("refresh_token_expires_at" in savedWork, false);
 
   const currentAuth = JSON.parse(fs.readFileSync(path.join(codexHome, "auth.json"), "utf-8"));
-  assert.equal(currentAuth.tokens.refresh_token, "rt-rotated");
-  assert.equal(currentAuth.tokens.access_token, "access-rotated");
-  assert.equal(currentAuth.tokens.id_token, "id-rotated");
+  assert.equal(currentAuth.tokens.refresh_token, "rt-current");
+  assert.equal(currentAuth.tokens.access_token, "access-current");
   assert.equal("refresh_token_expires_at" in currentAuth, false);
 });
 
-test("queryQuota proactively refreshes when last_refresh is older than one day", async () => {
+test("queryQuota does not proactively refresh when last_refresh is older than one day", async () => {
   const codexHome = createTempCodexHome();
   process.env.CODEX_HOME = codexHome;
 
@@ -538,22 +524,11 @@ test("queryQuota proactively refreshes when last_refresh is older than one day",
     {
       statusCode: 200,
       body: JSON.stringify({
-        access_token: "access-rotated",
-        refresh_token: "rt-rotated",
-      }),
-      assertRequest: (options, body) => {
-        assert.equal(options.hostname, "auth.openai.com");
-        assert.match(body, /refresh_token=rt-current/);
-      },
-    },
-    {
-      statusCode: 200,
-      body: JSON.stringify({
         plan_type: "plus",
       }),
       assertRequest: (options) => {
         assert.equal(options.hostname, "chatgpt.com");
-        assert.equal(options.headers.Authorization, "Bearer access-rotated");
+        assert.equal(options.headers.Authorization, "Bearer access-current");
       },
     },
   ];
@@ -674,7 +649,7 @@ test("queryQuota refreshes on 401 and retries once when last_refresh is recent",
   assert.equal("refresh_token_expires_at" in currentAuth, false);
 });
 
-test("queryQuota serializes concurrent refreshes for the same account", async () => {
+test("queryQuota serializes concurrent 401 refresh retries for the same account", async () => {
   const codexHome = createTempCodexHome();
   process.env.CODEX_HOME = codexHome;
 
@@ -682,6 +657,14 @@ test("queryQuota serializes concurrent refreshes for the same account", async ()
   writeJson(path.join(codexHome, "auth.json"), makeAccountAuth("acct-work", "rt-current", "access-current"));
 
   const responses = [
+    {
+      statusCode: 401,
+      body: JSON.stringify({ detail: "expired access token" }),
+      assertRequest: (options) => {
+        assert.equal(options.hostname, "chatgpt.com");
+        assert.equal(options.headers.Authorization, "Bearer access-current");
+      },
+    },
     {
       statusCode: 200,
       body: JSON.stringify({
@@ -692,16 +675,6 @@ test("queryQuota serializes concurrent refreshes for the same account", async ()
       assertRequest: (options, body) => {
         assert.equal(options.hostname, "auth.openai.com");
         assert.match(body, /refresh_token=rt-current/);
-      },
-    },
-    {
-      statusCode: 200,
-      body: JSON.stringify({
-        plan_type: "plus",
-      }),
-      assertRequest: (options) => {
-        assert.equal(options.hostname, "chatgpt.com");
-        assert.equal(options.headers.Authorization, "Bearer access-rotated");
       },
     },
     {

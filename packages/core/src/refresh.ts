@@ -3,9 +3,11 @@ import * as https from "https";
 import * as querystring from "querystring";
 import { AuthFile } from "./types";
 import { readSavedAuthFileResult, writeAuthFile, writeSavedAuthFile } from "./auth";
+import { createDiagnosticPerformanceTimer } from "./log";
 
 const TOKEN_URL = "https://auth.openai.com/oauth/token";
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
+const LOG_PREFIX = "[codex-account-switch:core:refresh]";
 
 interface RefreshResponse {
   id_token?: string;
@@ -29,6 +31,10 @@ export function applyRefreshResponse(auth: AuthFile, result: RefreshResponse, no
 }
 
 function postForm(url: string, data: string): Promise<string> {
+  const perf = createDiagnosticPerformanceTimer(LOG_PREFIX, "postForm", {
+    url,
+    contentLength: Buffer.byteLength(data),
+  });
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
     const options = {
@@ -47,17 +53,31 @@ function postForm(url: string, data: string): Promise<string> {
       res.on("data", (chunk) => (body += chunk));
       res.on("end", () => {
         if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+          perf.finish({
+            statusCode: res.statusCode,
+            responseBytes: body.length,
+          });
           resolve(body);
         } else {
-          reject(new Error(`HTTP ${res.statusCode}: ${body}`));
+          const error = new Error(`HTTP ${res.statusCode}: ${body}`);
+          perf.fail(error, {
+            statusCode: res.statusCode ?? null,
+            responseBytes: body.length,
+          });
+          reject(error);
         }
       });
     });
 
-    req.on("error", reject);
+    req.on("error", (error) => {
+      perf.fail(error);
+      reject(error);
+    });
     req.setTimeout(15000, () => {
       req.destroy();
-      reject(new Error("Request timeout"));
+      const error = new Error("Request timeout");
+      perf.fail(error);
+      reject(error);
     });
     req.write(data);
     req.end();
@@ -65,19 +85,43 @@ function postForm(url: string, data: string): Promise<string> {
 }
 
 export async function refreshAccessToken(auth: AuthFile): Promise<RefreshResponse> {
+  const perf = createDiagnosticPerformanceTimer(LOG_PREFIX, "refreshAccessToken", {
+    hasRefreshToken: Boolean(auth.tokens?.refresh_token),
+  });
   const refreshToken = auth.tokens?.refresh_token;
   if (!refreshToken) {
-    throw new Error("No refresh_token in auth file");
+    const error = new Error("No refresh_token in auth file");
+    perf.fail(error);
+    throw error;
   }
 
-  const body = querystring.stringify({
-    grant_type: "refresh_token",
-    refresh_token: refreshToken,
-    client_id: CLIENT_ID,
-  });
+  try {
+    const body = querystring.stringify({
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+      client_id: CLIENT_ID,
+    });
+    perf.mark("serialize-request");
 
-  const raw = await postForm(TOKEN_URL, body);
-  return JSON.parse(raw) as RefreshResponse;
+    const raw = await postForm(TOKEN_URL, body);
+    perf.mark("post-form");
+
+    const parsed = JSON.parse(raw) as RefreshResponse;
+    perf.mark("parse-response", {
+      hasAccessToken: Boolean(parsed.access_token),
+      hasRefreshToken: Boolean(parsed.refresh_token),
+      hasIdToken: Boolean(parsed.id_token),
+    });
+    perf.finish({
+      hasAccessToken: Boolean(parsed.access_token),
+      hasRefreshToken: Boolean(parsed.refresh_token),
+      hasIdToken: Boolean(parsed.id_token),
+    });
+    return parsed;
+  } catch (error) {
+    perf.fail(error);
+    throw error;
+  }
 }
 
 export async function refreshAndSave(authPath: string, options?: { saved?: boolean }): Promise<AuthFile> {

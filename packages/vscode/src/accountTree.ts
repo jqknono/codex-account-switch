@@ -6,7 +6,7 @@ import {
   QuotaInfo,
   WindowInfo,
 } from "@codex-account-switch/core";
-import { logInfo, logWarn } from "./log";
+import { logInfo, logWarn, startPerformanceLog } from "./log";
 import { listSavedAccounts, querySavedAccountQuota, SavedAccountInfo } from "./savedEntries";
 
 interface QuotaState {
@@ -263,9 +263,18 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
   private refreshVersion = 0;
 
   refresh(): void {
-    this.pruneQuotaState();
-    this.syncRootItems();
-    this._onDidChangeTreeData.fire(undefined);
+    const perf = startPerformanceLog(LOG_PREFIX, "accountTree.refresh");
+    try {
+      this.pruneQuotaState();
+      perf.mark("prune-quota-state");
+      this.syncRootItems();
+      perf.mark("sync-root-items");
+      this._onDidChangeTreeData.fire(undefined);
+      perf.finish();
+    } catch (error) {
+      perf.fail(error);
+      throw error;
+    }
   }
 
   startAutoRefresh(context: vscode.ExtensionContext) {
@@ -290,82 +299,120 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
   }
 
   async refreshQuota(targetIds?: Iterable<string>): Promise<void> {
-    const accounts = listSavedAccounts();
-    const refreshVersion = ++this.refreshVersion;
-    const targetIdSet = targetIds ? new Set(targetIds) : null;
-    const accountsToRefresh = targetIdSet
-      ? accounts.filter((account) => targetIdSet.has(account.id) && account.storageState === "ready")
-      : accounts.filter((account) => account.storageState === "ready");
-
-    logInfo(LOG_PREFIX, "refresh-start", {
-      targetIds: targetIdSet ? [...targetIdSet] : null,
-      refreshVersion,
-      accounts: accountsToRefresh.map((account) => account.name),
+    const normalizedTargetIds = targetIds ? [...targetIds] : undefined;
+    const perf = startPerformanceLog(LOG_PREFIX, "accountTree.refreshQuota", {
+      targetCount: normalizedTargetIds?.length ?? null,
     });
-
-    this.pruneQuotaState(accounts.map((account) => account.id));
-    for (const account of accountsToRefresh) {
-      const previous = this.quotaState.get(account.id);
-      this.quotaState.set(account.id, {
-        info: previous?.info ?? null,
-        error: false,
-        loading: true,
-        updatedAt: previous?.updatedAt ?? null,
+    try {
+      const accounts = listSavedAccounts();
+      perf.mark("list-saved-accounts", {
+        accountCount: accounts.length,
       });
-    }
-    this.syncRootItems(accounts);
-    this._onDidChangeTreeData.fire(undefined);
+      const refreshVersion = ++this.refreshVersion;
+      const targetIdSet = normalizedTargetIds ? new Set(normalizedTargetIds) : null;
+      const accountsToRefresh = targetIdSet
+        ? accounts.filter((account) => targetIdSet.has(account.id) && account.storageState === "ready")
+        : accounts.filter((account) => account.storageState === "ready");
+      perf.mark("filter-target-accounts", {
+        refreshVersion,
+        targetCount: accountsToRefresh.length,
+      });
 
-    await Promise.all(
-      accountsToRefresh.map(async (account) => {
-        try {
-          const result = await querySavedAccountQuota(account);
-          if (refreshVersion !== this.refreshVersion) {
-            return;
-          }
-
-          const previous = this.quotaState.get(account.id);
-          this.quotaState.set(account.id, {
-            info: result.kind === "ok" ? result.info : null,
-            error: result.kind !== "ok",
-            loading: false,
-            updatedAt: result.kind === "ok" ? Date.now() : previous?.updatedAt ?? null,
-          });
-          if (result.kind !== "ok") {
-            logWarn(LOG_PREFIX, "refresh-result-not-ok", {
-              account: account.id,
-              resultKind: result.kind,
-              message: "message" in result ? result.message : null,
-              refreshVersion,
-            });
-          }
-        } catch {
-          if (refreshVersion !== this.refreshVersion) {
-            return;
-          }
-
-          const previous = this.quotaState.get(account.id);
-          this.quotaState.set(account.id, {
-            info: previous?.info ?? null,
-            error: true,
-            loading: false,
-            updatedAt: previous?.updatedAt ?? null,
-          });
-          logWarn(LOG_PREFIX, "refresh-result-error", {
-            account: account.id,
-            refreshVersion,
-          });
-        }
-      })
-    );
-
-    if (refreshVersion === this.refreshVersion) {
-      this.syncRootItems();
-      this._onDidChangeTreeData.fire(undefined);
-      logInfo(LOG_PREFIX, "refresh-finish", {
+      logInfo(LOG_PREFIX, "refresh-start", {
         targetIds: targetIdSet ? [...targetIdSet] : null,
         refreshVersion,
+        accounts: accountsToRefresh.map((account) => account.name),
       });
+
+      this.pruneQuotaState(accounts.map((account) => account.id));
+      perf.mark("prune-quota-state");
+      for (const account of accountsToRefresh) {
+        const previous = this.quotaState.get(account.id);
+        this.quotaState.set(account.id, {
+          info: previous?.info ?? null,
+          error: false,
+          loading: true,
+          updatedAt: previous?.updatedAt ?? null,
+        });
+      }
+      perf.mark("set-loading-state");
+      this.syncRootItems(accounts);
+      perf.mark("sync-root-items-loading");
+      this._onDidChangeTreeData.fire(undefined);
+      perf.mark("fire-tree-loading");
+
+      await Promise.all(
+        accountsToRefresh.map(async (account) => {
+          try {
+            const accountPerf = startPerformanceLog(LOG_PREFIX, "accountTree.refreshQuota.account", {
+              account: account.name,
+              source: account.source,
+              refreshVersion,
+            });
+            const result = await querySavedAccountQuota(account);
+            accountPerf.finish({
+              resultKind: result.kind,
+            });
+            if (refreshVersion !== this.refreshVersion) {
+              return;
+            }
+
+            const previous = this.quotaState.get(account.id);
+            this.quotaState.set(account.id, {
+              info: result.kind === "ok" ? result.info : null,
+              error: result.kind !== "ok",
+              loading: false,
+              updatedAt: result.kind === "ok" ? Date.now() : previous?.updatedAt ?? null,
+            });
+            if (result.kind !== "ok") {
+              logWarn(LOG_PREFIX, "refresh-result-not-ok", {
+                account: account.id,
+                resultKind: result.kind,
+                message: "message" in result ? result.message : null,
+                refreshVersion,
+              });
+            }
+          } catch (error) {
+            if (refreshVersion !== this.refreshVersion) {
+              return;
+            }
+
+            const previous = this.quotaState.get(account.id);
+            this.quotaState.set(account.id, {
+              info: previous?.info ?? null,
+              error: true,
+              loading: false,
+              updatedAt: previous?.updatedAt ?? null,
+            });
+            logWarn(LOG_PREFIX, "refresh-result-error", {
+              account: account.id,
+              refreshVersion,
+            });
+            perf.mark("account-refresh-error", {
+              account: account.name,
+            });
+          }
+        })
+      );
+      perf.mark("await-account-queries");
+
+      if (refreshVersion === this.refreshVersion) {
+        this.syncRootItems();
+        perf.mark("sync-root-items-final");
+        this._onDidChangeTreeData.fire(undefined);
+        perf.mark("fire-tree-final");
+        logInfo(LOG_PREFIX, "refresh-finish", {
+          targetIds: targetIdSet ? [...targetIdSet] : null,
+          refreshVersion,
+        });
+      }
+      perf.finish({
+        refreshVersion,
+        targetCount: accountsToRefresh.length,
+      });
+    } catch (error) {
+      perf.fail(error);
+      throw error;
     }
   }
 
@@ -439,6 +486,9 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
   }
 
   private syncRootItems(accounts = listSavedAccounts()) {
+    const perf = startPerformanceLog(LOG_PREFIX, "accountTree.syncRootItems", {
+      accountCount: accounts.length,
+    });
     const quotaFailed: AccountTreeItem[] = [];
     const local: AccountTreeItem[] = [];
     const cloud: AccountTreeItem[] = [];
@@ -465,6 +515,12 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
       groups.push(new AccountGroupItem("Cloud Accounts", cloud, "cloud"));
     }
     this.rootItems = groups;
+    perf.finish({
+      quotaFailedCount: quotaFailed.length,
+      localCount: local.length,
+      cloudCount: cloud.length,
+      groupCount: groups.length,
+    });
   }
 
   private getAccountDetails(parent: AccountTreeItem): AccountDetailItem[] {
