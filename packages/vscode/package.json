@@ -2,7 +2,7 @@
   "name": "codex-account-switch-vscode",
   "displayName": "Codex Account Switch",
   "description": "Codex Account Switch - VS Code extension",
-    "version": "1.4.4",
+  "version": "1.4.5",
   "publisher": "techfetch-dev",
   "repository": {
     "type": "git",
@@ -135,6 +135,12 @@
         "icon": "$(refresh)"
       },
       {
+        "command": "codex-account-switch.refresh",
+        "title": "Refresh",
+        "category": "Codex Account Switch",
+        "icon": "$(refresh)"
+      },
+      {
         "command": "codex-account-switch.selectAutoRefreshDevice",
         "title": "Select Auto-Refresh Device",
         "category": "Codex Account Switch",
@@ -242,29 +248,19 @@
           "group": "navigation@4"
         },
         {
-          "command": "codex-account-switch.refreshList",
+          "command": "codex-account-switch.refresh",
           "when": "view == codexAccountSwitchAccounts",
           "group": "navigation@5"
         },
         {
-          "command": "codex-account-switch.refreshToken",
+          "command": "codex-account-switch.expandAllAccounts",
           "when": "view == codexAccountSwitchAccounts",
           "group": "navigation@6"
         },
         {
-          "command": "codex-account-switch.refreshQuota",
-          "when": "view == codexAccountSwitchAccounts",
-          "group": "navigation@7"
-        },
-        {
-          "command": "codex-account-switch.expandAllAccounts",
-          "when": "view == codexAccountSwitchAccounts",
-          "group": "navigation@8"
-        },
-        {
           "command": "codex-account-switch.selectAutoRefreshDevice",
           "when": "view == codexAccountSwitchAccounts",
-          "group": "navigation@9"
+          "group": "navigation@7"
         },
         {
           "command": "codex-account-switch.switchMode",
@@ -289,9 +285,19 @@
           "group": "inline@1"
         },
         {
+          "command": "codex-account-switch.refreshList",
+          "when": "view == codexAccountSwitchAccounts && (viewItem == accountLocal || viewItem == accountCloud)",
+          "group": "refresh@1"
+        },
+        {
           "command": "codex-account-switch.refreshToken",
           "when": "view == codexAccountSwitchAccounts && (viewItem == accountLocal || viewItem == accountCloud)",
-          "group": "inline@2"
+          "group": "refresh@2"
+        },
+        {
+          "command": "codex-account-switch.refreshQuota",
+          "when": "view == codexAccountSwitchAccounts && (viewItem == accountLocal || viewItem == accountCloud)",
+          "group": "refresh@3"
         },
         {
           "command": "codex-account-switch.reloginAccount",

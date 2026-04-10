@@ -1298,6 +1298,44 @@ export function registerCommands(
       }
     ),
 
+    vscode.commands.registerCommand("codex-account-switch.refresh", async (item?: AccountTreeItem) => {
+      await runTimedCommand("refresh", async (perf) => {
+        const picked = await vscode.window.showQuickPick(
+          [
+            {
+              label: "Refresh List",
+              description: "Reload saved accounts and refresh quota",
+              command: "codex-account-switch.refreshList",
+            },
+            {
+              label: "Refresh Token and Quota",
+              description: item ? `Refresh "${item.account.name}" token and quota` : "Select an account to refresh",
+              command: "codex-account-switch.refreshToken",
+            },
+            {
+              label: "Refresh Quota",
+              description: item ? `Refresh "${item.account.name}" quota` : "Refresh quota for all accounts",
+              command: "codex-account-switch.refreshQuota",
+            },
+          ],
+          { placeHolder: "Choose what to refresh" },
+        );
+
+        if (!picked) {
+          logCommandInfo("refresh", "cancelled");
+          return;
+        }
+
+        perf.mark("pick-refresh-action", {
+          command: picked.command,
+        });
+        logCommandInfo("refresh", "dispatched", {
+          command: picked.command,
+        });
+        await vscode.commands.executeCommand(picked.command, item);
+      });
+    }),
+
     vscode.commands.registerCommand("codex-account-switch.moveAccountToCloud", async (item?: AccountTreeItem) => {
       await runTimedCommand("moveAccountToCloud", async (perf) => {
         let account = await pickSavedAccount(item, "Select a local account to move to cloud storage");
@@ -1477,11 +1515,12 @@ export function registerCommands(
       refreshViews(refreshCoordinator);
     }),
 
-    vscode.commands.registerCommand("codex-account-switch.refreshQuota", async () => {
+    vscode.commands.registerCommand("codex-account-switch.refreshQuota", async (item?: AccountTreeItem) => {
       await runTimedCommand("refreshQuota", async (perf) => {
+        const targetId = item?.account?.id;
         logCommandInfo("refresh-quota", "started");
         await Promise.all([
-          accountTree.refreshQuota().then(() => {
+          accountTree.refreshQuota(targetId ? [targetId] : undefined).then(() => {
             perf.mark("account-tree-refreshQuota");
           }).catch((error) => {
             logWarn(LOG_PREFIX, "refresh-quota-command-accountTree-failed", {
@@ -1615,10 +1654,10 @@ export function registerCommands(
       });
     }),
 
-    vscode.commands.registerCommand("codex-account-switch.refreshList", async () => {
+    vscode.commands.registerCommand("codex-account-switch.refreshList", async (item?: AccountTreeItem) => {
       await runTimedCommand("refreshList", async () => {
         logCommandInfo("refresh-list", "started");
-        refreshAll(refreshCoordinator);
+        refreshAll(refreshCoordinator, item?.account?.id ? [item.account.id] : undefined);
       });
     }),
 

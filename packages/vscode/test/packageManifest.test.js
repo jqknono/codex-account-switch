@@ -153,27 +153,47 @@ test("account inline actions do not include remove", () => {
 
   assert.deepEqual(
     inlineAccountActions.map((item) => item.command).sort(),
+    ["codex-account-switch.useAccount"]
+  );
+});
+
+test("account item context menu exposes refresh actions", () => {
+  const contextMenus = manifest.contributes.menus["view/item/context"] ?? [];
+  const refreshAccountActions = contextMenus.filter(
+    (item) =>
+      item.when ===
+        "view == codexAccountSwitchAccounts && (viewItem == accountLocal || viewItem == accountCloud)" &&
+      typeof item.group === "string" &&
+      item.group.startsWith("refresh@")
+  );
+
+  assert.deepEqual(
+    refreshAccountActions.map((item) => item.command).sort(),
     [
+      "codex-account-switch.refreshList",
+      "codex-account-switch.refreshQuota",
       "codex-account-switch.refreshToken",
-      "codex-account-switch.useAccount",
     ]
   );
 });
 
-test("accounts view title menu exposes manual refresh commands", () => {
+test("accounts view title menu exposes a single refresh entrypoint", () => {
   const titleMenus = manifest.contributes.menus["view/title"] ?? [];
   const accountViewCommands = titleMenus
     .filter((item) => item.when === "view == codexAccountSwitchAccounts")
     .map((item) => item.command);
 
-  assert.equal(
-    accountViewCommands.includes("codex-account-switch.refreshToken"),
-    true
+  const manualRefreshCommands = [
+    "codex-account-switch.refresh",
+    "codex-account-switch.refreshList",
+    "codex-account-switch.refreshQuota",
+    "codex-account-switch.refreshToken",
+  ];
+  const present = manualRefreshCommands.filter((command) =>
+    accountViewCommands.includes(command)
   );
-  assert.equal(
-    accountViewCommands.includes("codex-account-switch.refreshQuota"),
-    true
-  );
+
+  assert.deepEqual(present, ["codex-account-switch.refresh"]);
 });
 
 test("locked cloud accounts expose unlock in the context menu", () => {
