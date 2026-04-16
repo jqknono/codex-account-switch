@@ -9,6 +9,10 @@ const manifest = JSON.parse(
 
 const commands = manifest.contributes.commands;
 
+test("extension runs in the workspace extension host", () => {
+  assert.deepEqual(manifest.extensionKind, ["workspace"]);
+});
+
 test("extension commands use category for the shared prefix", () => {
   const extensionCommands = commands.filter((command) =>
     command.command.startsWith("codex-account-switch.")
