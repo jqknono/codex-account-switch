@@ -22,6 +22,7 @@ import {
 } from "./storagePassword";
 import {
   buildProviderProfileForSource,
+  createSavedEntriesSnapshot,
   ensureCurrentDeviceRegistered,
   getCurrentDeviceName,
   getSavedAccountEntry,
@@ -72,9 +73,9 @@ function getCodexLoginCommand(useDeviceAuth = getUseDeviceAuthForLogin()): strin
   return useDeviceAuth ? "codex login --device-auth" : "codex login";
 }
 
-function refreshViews(refreshCoordinator: RefreshCoordinator) {
+function refreshViews(refreshCoordinator: RefreshCoordinator, reason: "manual" | "provider-switch" | "account-switch" | "config-change" = "manual") {
   const perf = startPerformanceLog(LOG_PREFIX, "command-support:refreshViews");
-  refreshCoordinator.refreshViews();
+  refreshCoordinator.refreshViews(reason);
   perf.finish();
 }
 
@@ -89,14 +90,23 @@ async function showSyncConflictWarning(message: string) {
   }
 }
 
-function refreshAll(refreshCoordinator: RefreshCoordinator, targetIds?: Iterable<string>) {
+function refreshAll(
+  refreshCoordinator: RefreshCoordinator,
+  targetIds?: Iterable<string>,
+  options: { reason?: "manual" | "provider-switch" | "account-switch"; fullRefresh?: boolean } = {},
+) {
   const normalizedTargetIds = targetIds ? [...targetIds] : undefined;
   const perf = startPerformanceLog(LOG_PREFIX, "command-support:refreshAll", {
     targetCount: normalizedTargetIds?.length ?? null,
+    reason: options.reason ?? "manual",
   });
-  refreshCoordinator.refreshViews();
+  refreshCoordinator.refreshViews(options.reason ?? "manual");
   perf.mark("refresh-views");
-  refreshCoordinator.scheduleQuotaRefresh(normalizedTargetIds);
+  refreshCoordinator.scheduleQuotaRefresh({
+    targetIds: normalizedTargetIds,
+    reason: options.reason ?? "manual",
+    fullRefresh: options.fullRefresh ?? (!normalizedTargetIds || normalizedTargetIds.length === 0),
+  });
   perf.finish();
 }
 
@@ -108,9 +118,27 @@ async function refreshTokenAndQuota(
   const perf = startPerformanceLog(LOG_PREFIX, "command-support:refreshTokenAndQuota", {
     accountId: accountId ?? null,
   });
-  accountTree.refresh();
+  const snapshot = createSavedEntriesSnapshot();
+  accountTree.refresh(snapshot);
   perf.mark("account-tree-refresh");
-  await Promise.all([accountTree.refreshQuota(accountId ? [accountId] : undefined), statusBar.refreshNow()]);
+  const queryContext = {
+    snapshot,
+    sharedQueries: new Map(),
+  };
+  await Promise.all([
+    accountTree.refreshQuota(accountId ? [accountId] : undefined, {
+      snapshot,
+      queryContext,
+      reason: "manual",
+      refreshId: "command-refreshTokenAndQuota",
+    }),
+    statusBar.refreshNow({
+      snapshot,
+      queryContext,
+      reason: "manual",
+      refreshId: "command-refreshTokenAndQuota",
+    }),
+  ]);
   perf.finish();
 }
 
@@ -1028,9 +1056,12 @@ export function registerCommands(
             vscode.window.showInformationMessage(
               `✓ ${result.message} (${result.meta?.email ?? "unknown"})`
             );
-            refreshViews(refreshCoordinator);
+            refreshViews(refreshCoordinator, "account-switch");
             perf.mark("refresh-views");
-            refreshCoordinator.scheduleQuotaRefresh([account.id]);
+            refreshCoordinator.scheduleQuotaRefresh({
+              targetIds: [account.id],
+              reason: "account-switch",
+            });
             perf.mark("schedule-quota-refresh");
             await maybeReloadWindowAfterSwitch(account.name, "account");
           } else {
@@ -1116,7 +1147,10 @@ export function registerCommands(
           source: picked.source,
         });
         vscode.window.showInformationMessage(`✓ ${result.message}`);
-        refreshAll(refreshCoordinator);
+        refreshAll(refreshCoordinator, undefined, {
+          reason: "provider-switch",
+          fullRefresh: false,
+        });
         await maybeReloadWindowAfterSwitch(targetName, "mode");
         return;
       }
@@ -1132,7 +1166,10 @@ export function registerCommands(
         }
         logCommandInfo("switch-mode", "account-mode-switched");
         vscode.window.showInformationMessage(`✓ ${result.message}`);
-        refreshAll(refreshCoordinator);
+        refreshAll(refreshCoordinator, undefined, {
+          reason: "account-switch",
+          fullRefresh: false,
+        });
         await maybeReloadWindowAfterSwitch("account", "mode");
         return;
       }
@@ -1192,7 +1229,10 @@ export function registerCommands(
         source: provider.source,
       });
       vscode.window.showInformationMessage(`✓ ${result.message}`);
-      refreshAll(refreshCoordinator);
+      refreshAll(refreshCoordinator, undefined, {
+        reason: "provider-switch",
+        fullRefresh: false,
+      });
       await maybeReloadWindowAfterSwitch(provider.name, "mode");
     }),
 
@@ -1518,9 +1558,19 @@ export function registerCommands(
     vscode.commands.registerCommand("codex-account-switch.refreshQuota", async (item?: AccountTreeItem) => {
       await runTimedCommand("refreshQuota", async (perf) => {
         const targetId = item?.account?.id;
+        const snapshot = createSavedEntriesSnapshot();
+        const queryContext = {
+          snapshot,
+          sharedQueries: new Map(),
+        };
         logCommandInfo("refresh-quota", "started");
         await Promise.all([
-          accountTree.refreshQuota(targetId ? [targetId] : undefined).then(() => {
+          accountTree.refreshQuota(targetId ? [targetId] : undefined, {
+            snapshot,
+            queryContext,
+            reason: "manual",
+            refreshId: "command-refreshQuota",
+          }).then(() => {
             perf.mark("account-tree-refreshQuota");
           }).catch((error) => {
             logWarn(LOG_PREFIX, "refresh-quota-command-accountTree-failed", {
@@ -1528,7 +1578,12 @@ export function registerCommands(
             });
             throw error;
           }),
-          statusBar.refreshNow().then(() => {
+          statusBar.refreshNow({
+            snapshot,
+            queryContext,
+            reason: "manual",
+            refreshId: "command-refreshQuota",
+          }).then(() => {
             perf.mark("status-bar-refreshNow");
           }).catch((error) => {
             logWarn(LOG_PREFIX, "refresh-quota-command-statusBar-failed", {
@@ -1657,7 +1712,10 @@ export function registerCommands(
     vscode.commands.registerCommand("codex-account-switch.refreshList", async (item?: AccountTreeItem) => {
       await runTimedCommand("refreshList", async () => {
         logCommandInfo("refresh-list", "started");
-        refreshAll(refreshCoordinator, item?.account?.id ? [item.account.id] : undefined);
+        refreshAll(refreshCoordinator, item?.account?.id ? [item.account.id] : undefined, {
+          reason: "manual",
+          fullRefresh: !item?.account?.id,
+        });
       });
     }),
 

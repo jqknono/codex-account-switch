@@ -105,6 +105,10 @@ function getAccountDetailItems(treeDataProvider, accountItem) {
   return treeDataProvider.getChildren(accountItem);
 }
 
+function countOperationLogs(lines, operation) {
+  return lines.filter((line) => line.includes("perf-start") && line.includes(`"operation":"${operation}"`)).length;
+}
+
 function createDisposable(fn = () => {}) {
   return {
     dispose: fn,
@@ -1325,6 +1329,314 @@ test("refresh quota command writes command, account tree, and status bar perform
   });
 });
 
+test("activate in provider mode skips quota refresh and logs zero effective targets", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-activate-provider-mode-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  const authDir = path.join(tempRoot, "saved-auth");
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(authDir, { recursive: true });
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  try {
+    const providerProfile = {
+      kind: "provider",
+      name: "proxy",
+      auth: { OPENAI_API_KEY: "sk-proxy" },
+      config: {
+        name: "proxy",
+        base_url: "https://proxy.example.com/v1",
+        wire_api: "responses",
+      },
+    };
+    core.setNamedAuthDir(authDir);
+    core.writeProviderProfile(providerProfile);
+    const switchResult = core.switchMode("proxy");
+    assert.equal(switchResult.success, true);
+    core.setNamedAuthDir(undefined);
+
+    const mocked = createVscodeMock({
+      authDirectory: authDir,
+      showStatusBar: true,
+      cloudTokenAutoUpdate: false,
+    });
+    const requestLog = [];
+
+    await withDisabledIntervals(() =>
+      withSuccessfulHttps(async () => {
+        const extension = loadExtensionWithMockedVscode(mocked.vscode);
+        const context = createExtensionContext(mocked);
+        await extension.activate(context);
+        await waitForBackgroundWork();
+
+        assert.equal(requestLog.length, 0);
+        const lines = mocked.createdChannels.flatMap((channel) => channel.entries.map((entry) => entry.line));
+        assert.equal(
+          lines.some((line) =>
+            line.includes("\"operation\":\"refreshCoordinator.flushQuotaRefresh\"")
+            && line.includes("\"reason\":\"activate\"")
+            && line.includes("\"effectiveCount\":0")
+          ),
+          true,
+        );
+
+        for (const subscription of context.subscriptions.reverse()) {
+          subscription?.dispose?.();
+        }
+      }, { requestLog })
+    );
+  } finally {
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
+test("activate in account mode refreshes only the current account quota", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-activate-account-mode-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  const authDir = path.join(tempRoot, "saved-auth");
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(authDir, { recursive: true });
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  try {
+    core.setNamedAuthDir(authDir);
+    core.writeSavedAuthFile(path.join(authDir, "auth_alpha.json"), makeAuthFile("acct-alpha"));
+    core.writeSavedAuthFile(path.join(authDir, "auth_beta.json"), makeAuthFile("acct-beta"));
+    core.setNamedAuthDir(undefined);
+    fs.writeFileSync(
+      path.join(codexHome, "auth.json"),
+      JSON.stringify(makeAuthFile("acct-beta"), null, 2),
+      "utf-8",
+    );
+
+    const mocked = createVscodeMock({
+      authDirectory: authDir,
+      showStatusBar: true,
+      cloudTokenAutoUpdate: false,
+    });
+    const requestLog = [];
+
+    await withDisabledIntervals(() =>
+      withSuccessfulHttps(async () => {
+        const extension = loadExtensionWithMockedVscode(mocked.vscode);
+        const context = createExtensionContext(mocked);
+        await extension.activate(context);
+        await waitForBackgroundWork();
+
+        assert.equal(requestLog.length, 1);
+        const lines = mocked.createdChannels.flatMap((channel) => channel.entries.map((entry) => entry.line));
+        assert.equal(
+          lines.some((line) =>
+            line.includes("\"operation\":\"refreshCoordinator.flushQuotaRefresh\"")
+            && line.includes("\"reason\":\"activate\"")
+            && line.includes("\"effectiveCount\":1")
+          ),
+          true,
+        );
+
+        for (const subscription of context.subscriptions.reverse()) {
+          subscription?.dispose?.();
+        }
+      }, { requestLog })
+    );
+  } finally {
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
+test("provider switch refreshes views without triggering quota requests", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-provider-switch-refresh-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  const authDir = path.join(tempRoot, "saved-auth");
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(authDir, { recursive: true });
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  try {
+    core.setNamedAuthDir(authDir);
+    core.writeSavedAuthFile(path.join(authDir, "auth_alpha.json"), makeAuthFile("acct-alpha"));
+    core.writeProviderProfile({
+      kind: "provider",
+      name: "proxy",
+      auth: { OPENAI_API_KEY: "sk-proxy" },
+      config: {
+        name: "proxy",
+        base_url: "https://proxy.example.com/v1",
+        wire_api: "responses",
+      },
+    });
+    core.setNamedAuthDir(undefined);
+    fs.writeFileSync(
+      path.join(codexHome, "auth.json"),
+      JSON.stringify(makeAuthFile("acct-alpha"), null, 2),
+      "utf-8",
+    );
+
+    const mocked = createVscodeMock({
+      authDirectory: authDir,
+      showStatusBar: true,
+      cloudTokenAutoUpdate: false,
+      quickPickResponses: [
+        (items) => items.find((item) => item.provider?.name === "proxy"),
+      ],
+    });
+    const requestLog = [];
+
+    await withDisabledIntervals(() =>
+      withSuccessfulHttps(async () => {
+        const extension = loadExtensionWithMockedVscode(mocked.vscode);
+        const context = createExtensionContext(mocked);
+        await extension.activate(context);
+        await waitForBackgroundWork();
+
+        requestLog.length = 0;
+        await mocked.registeredCommands.get("codex-account-switch.switchMode")();
+        await waitForBackgroundWork();
+
+        assert.equal(requestLog.length, 0);
+        const lines = mocked.createdChannels.flatMap((channel) => channel.entries.map((entry) => entry.line));
+        assert.equal(
+          lines.some((line) =>
+            line.includes("\"operation\":\"refreshCoordinator.flushQuotaRefresh\"")
+            && line.includes("\"reason\":\"provider-switch\"")
+            && line.includes("\"effectiveCount\":0")
+          ),
+          true,
+        );
+
+        for (const subscription of context.subscriptions.reverse()) {
+          subscription?.dispose?.();
+        }
+      }, { requestLog })
+    );
+  } finally {
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
+test("refresh quota command reuses one saved entries snapshot for tree and status bar", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-refresh-quota-snapshot-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  const authDir = path.join(tempRoot, "saved-auth");
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(authDir, { recursive: true });
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  try {
+    core.setNamedAuthDir(authDir);
+    core.writeSavedAuthFile(path.join(authDir, "auth_alpha.json"), makeAuthFile("acct-alpha"));
+    core.writeSavedAuthFile(path.join(authDir, "auth_beta.json"), makeAuthFile("acct-beta"));
+    core.setNamedAuthDir(undefined);
+    fs.writeFileSync(
+      path.join(codexHome, "auth.json"),
+      JSON.stringify(makeAuthFile("acct-alpha"), null, 2),
+      "utf-8",
+    );
+
+    const mocked = createVscodeMock({
+      authDirectory: authDir,
+      showStatusBar: true,
+      cloudTokenAutoUpdate: false,
+    });
+
+    await withDisabledIntervals(() =>
+      withSuccessfulHttps(async () => {
+        const extension = loadExtensionWithMockedVscode(mocked.vscode);
+        const context = createExtensionContext(mocked);
+        await extension.activate(context);
+        await waitForBackgroundWork();
+
+        mocked.createdChannels.forEach((channel) => {
+          channel.entries.length = 0;
+        });
+
+        await mocked.registeredCommands.get("codex-account-switch.refreshQuota")();
+        await waitForBackgroundWork();
+
+        const lines = mocked.createdChannels.flatMap((channel) => channel.entries.map((entry) => entry.line));
+        assert.equal(countOperationLogs(lines, "listSavedAccounts"), 1);
+
+        for (const subscription of context.subscriptions.reverse()) {
+          subscription?.dispose?.();
+        }
+      })
+    );
+  } finally {
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
 test("account tree separates quota failures from local and cloud accounts", async (t) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-account-tree-groups-"));
   const codexHome = path.join(tempRoot, ".codex");
@@ -2359,7 +2671,7 @@ test("hidden status bar does not add extra quota requests on activate or switch"
         await extension.activate(context);
         await waitForBackgroundWork();
 
-        assert.equal(countUsageRequests(requestLog), 1);
+        assert.equal(countUsageRequests(requestLog), 0);
 
         requestLog.length = 0;
         const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");

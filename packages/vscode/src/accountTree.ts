@@ -7,7 +7,15 @@ import {
   WindowInfo,
 } from "@codex-account-switch/core";
 import { logInfo, logWarn, startPerformanceLog } from "./log";
-import { listSavedAccounts, querySavedAccountQuota, SavedAccountInfo } from "./savedEntries";
+import {
+  createSavedEntriesSnapshot,
+  getSavedCurrentSelection,
+  listSavedAccounts,
+  querySavedAccountQuota,
+  SavedAccountInfo,
+  SavedAccountQuotaQueryContext,
+  SavedEntriesSnapshot,
+} from "./savedEntries";
 
 interface QuotaState {
   info: QuotaInfo | null;
@@ -18,6 +26,16 @@ interface QuotaState {
 
 export type AccountTreeNode = AccountGroupItem | AccountTreeItem | AccountDetailItem;
 const LOG_PREFIX = "[codex-account-switch:vscode:accountTree]";
+const ACCOUNT_REFRESH_CONCURRENCY = 4;
+const SLOW_ACCOUNT_THRESHOLD_MS = 3000;
+
+interface AccountTreeRefreshOptions {
+  snapshot?: SavedEntriesSnapshot;
+  queryContext?: SavedAccountQuotaQueryContext;
+  reason?: string;
+  refreshId?: string;
+  concurrency?: number;
+}
 
 function windowLabel(w: WindowInfo): string {
   if (w.windowSeconds == null) return "Quota";
@@ -125,6 +143,31 @@ function appendQuotaTooltip(lines: string[], info: QuotaInfo) {
   if (info.credits?.hasCredits) {
     lines.push("Extra credits: Available");
   }
+}
+
+function percentile(sortedValues: number[], fraction: number): number {
+  if (sortedValues.length === 0) {
+    return 0;
+  }
+  const index = Math.min(sortedValues.length - 1, Math.max(0, Math.ceil(sortedValues.length * fraction) - 1));
+  return sortedValues[index];
+}
+
+async function runWithConcurrency<T>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T) => Promise<void>,
+): Promise<void> {
+  const limit = Math.max(1, concurrency);
+  let nextIndex = 0;
+  const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      await worker(items[currentIndex]);
+    }
+  });
+  await Promise.all(runners);
 }
 
 export class AccountDetailItem extends vscode.TreeItem {
@@ -262,12 +305,13 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
   private rootItems: AccountGroupItem[] = [];
   private refreshVersion = 0;
 
-  refresh(): void {
+  refresh(snapshot?: SavedEntriesSnapshot): void {
     const perf = startPerformanceLog(LOG_PREFIX, "accountTree.refresh");
     try {
-      this.pruneQuotaState();
+      const currentSnapshot = snapshot ?? createSavedEntriesSnapshot();
+      this.pruneQuotaState(currentSnapshot.accounts.map((account) => account.id));
       perf.mark("prune-quota-state");
-      this.syncRootItems();
+      this.syncRootItems(currentSnapshot.accounts);
       perf.mark("sync-root-items");
       this._onDidChangeTreeData.fire(undefined);
       perf.finish();
@@ -278,50 +322,55 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
   }
 
   startAutoRefresh(context: vscode.ExtensionContext) {
-    void this.refreshQuota().catch((error) => {
-      logWarn(LOG_PREFIX, "startup-refresh-failed", {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    });
     this.restartTimer();
 
     this.configListener = vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration("codex-account-switch.quotaRefreshInterval")) {
         this.restartTimer();
-        void this.refreshQuota().catch((error) => {
-          logWarn(LOG_PREFIX, "config-refresh-failed", {
-            error: error instanceof Error ? error.message : String(error),
-          });
-        });
       }
     });
     context.subscriptions.push(this.configListener);
   }
 
-  async refreshQuota(targetIds?: Iterable<string>): Promise<void> {
+  async refreshQuota(targetIds?: Iterable<string>, options: AccountTreeRefreshOptions = {}): Promise<void> {
     const normalizedTargetIds = targetIds ? [...targetIds] : undefined;
     const perf = startPerformanceLog(LOG_PREFIX, "accountTree.refreshQuota", {
       targetCount: normalizedTargetIds?.length ?? null,
+      reason: options.reason ?? null,
+      refreshId: options.refreshId ?? null,
     });
     try {
-      const accounts = listSavedAccounts();
+      const snapshot = options.snapshot ?? createSavedEntriesSnapshot();
+      const accounts = snapshot.accounts;
       perf.mark("list-saved-accounts", {
         accountCount: accounts.length,
+        selectionKind: snapshot.selection.kind,
       });
       const refreshVersion = ++this.refreshVersion;
       const targetIdSet = normalizedTargetIds ? new Set(normalizedTargetIds) : null;
       const accountsToRefresh = targetIdSet
         ? accounts.filter((account) => targetIdSet.has(account.id) && account.storageState === "ready")
         : accounts.filter((account) => account.storageState === "ready");
+      const notReadyCount = targetIdSet
+        ? accounts.filter((account) => targetIdSet.has(account.id) && account.storageState !== "ready").length
+        : 0;
+      const requestedCount = targetIdSet?.size ?? accountsToRefresh.length;
       perf.mark("filter-target-accounts", {
         refreshVersion,
-        targetCount: accountsToRefresh.length,
+        requestedCount,
+        effectiveCount: accountsToRefresh.length,
+        skippedCount: requestedCount - accountsToRefresh.length,
       });
 
       logInfo(LOG_PREFIX, "refresh-start", {
         targetIds: targetIdSet ? [...targetIdSet] : null,
         refreshVersion,
-        accounts: accountsToRefresh.map((account) => account.name),
+        refreshId: options.refreshId ?? null,
+        reason: options.reason ?? null,
+        selectionKind: snapshot.selection.kind,
+        requestedCount,
+        effectiveCount: accountsToRefresh.length,
+        skippedCount: requestedCount - accountsToRefresh.length,
       });
 
       this.pruneQuotaState(accounts.map((account) => account.id));
@@ -341,74 +390,146 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
       this._onDidChangeTreeData.fire(undefined);
       perf.mark("fire-tree-loading");
 
-      await Promise.all(
-        accountsToRefresh.map(async (account) => {
-          try {
-            const accountPerf = startPerformanceLog(LOG_PREFIX, "accountTree.refreshQuota.account", {
+      const accountDurations: number[] = [];
+      const slowestAccounts: Array<{ account: string; source: string; durationMs: number }> = [];
+      let okCount = 0;
+      let errorCount = 0;
+      let inflightReuseCount = 0;
+      const concurrency = options.concurrency ?? ACCOUNT_REFRESH_CONCURRENCY;
+
+      await runWithConcurrency(accountsToRefresh, concurrency, async (account) => {
+        const startedAt = Date.now();
+        try {
+          const accountPerf = startPerformanceLog(
+            LOG_PREFIX,
+            "accountTree.refreshQuota.account",
+            {
               account: account.name,
               source: account.source,
               refreshVersion,
-            });
-            const result = await querySavedAccountQuota(account);
-            accountPerf.finish({
-              resultKind: result.kind,
-            });
-            if (refreshVersion !== this.refreshVersion) {
-              return;
-            }
+              refreshId: options.refreshId ?? null,
+            },
+            {
+              mode: "adaptive",
+              slowThresholdMs: SLOW_ACCOUNT_THRESHOLD_MS,
+            },
+          );
+          const result = await querySavedAccountQuota(account, options.queryContext);
+          const durationMs = Date.now() - startedAt;
+          accountDurations.push(durationMs);
+          slowestAccounts.push({
+            account: account.name,
+            source: account.source,
+            durationMs,
+          });
+          if (slowestAccounts.length > 5) {
+            slowestAccounts.sort((left, right) => right.durationMs - left.durationMs);
+            slowestAccounts.length = 5;
+          }
+          if ((result as { source?: string }).source === "reused" || (result as { reusedInflight?: boolean }).reusedInflight) {
+            inflightReuseCount += 1;
+          }
+          accountPerf.finish({
+            resultKind: result.kind,
+            source: (result as { source?: string }).source ?? "direct",
+          });
+          if (result.kind === "ok") {
+            okCount += 1;
+          } else {
+            errorCount += 1;
+          }
+          if (refreshVersion !== this.refreshVersion) {
+            return;
+          }
 
-            const previous = this.quotaState.get(account.id);
-            this.quotaState.set(account.id, {
-              info: result.kind === "ok" ? result.info : null,
-              error: result.kind !== "ok",
-              loading: false,
-              updatedAt: result.kind === "ok" ? Date.now() : previous?.updatedAt ?? null,
-            });
-            if (result.kind !== "ok") {
-              logWarn(LOG_PREFIX, "refresh-result-not-ok", {
-                account: account.id,
-                resultKind: result.kind,
-                message: "message" in result ? result.message : null,
-                refreshVersion,
-              });
-            }
-          } catch (error) {
-            if (refreshVersion !== this.refreshVersion) {
-              return;
-            }
-
-            const previous = this.quotaState.get(account.id);
-            this.quotaState.set(account.id, {
-              info: previous?.info ?? null,
-              error: true,
-              loading: false,
-              updatedAt: previous?.updatedAt ?? null,
-            });
-            logWarn(LOG_PREFIX, "refresh-result-error", {
+          const previous = this.quotaState.get(account.id);
+          this.quotaState.set(account.id, {
+            info: result.kind === "ok" ? result.info : null,
+            error: result.kind !== "ok",
+            loading: false,
+            updatedAt: result.kind === "ok" ? Date.now() : previous?.updatedAt ?? null,
+          });
+          if (result.kind !== "ok") {
+            logWarn(LOG_PREFIX, "refresh-result-not-ok", {
               account: account.id,
+              resultKind: result.kind,
+              message: "message" in result ? result.message : null,
               refreshVersion,
-            });
-            perf.mark("account-refresh-error", {
-              account: account.name,
+              refreshId: options.refreshId ?? null,
             });
           }
-        })
-      );
+        } catch (error) {
+          const durationMs = Date.now() - startedAt;
+          accountDurations.push(durationMs);
+          slowestAccounts.push({
+            account: account.name,
+            source: account.source,
+            durationMs,
+          });
+          if (slowestAccounts.length > 5) {
+            slowestAccounts.sort((left, right) => right.durationMs - left.durationMs);
+            slowestAccounts.length = 5;
+          }
+          errorCount += 1;
+          if (refreshVersion !== this.refreshVersion) {
+            return;
+          }
+
+          const previous = this.quotaState.get(account.id);
+          this.quotaState.set(account.id, {
+            info: previous?.info ?? null,
+            error: true,
+            loading: false,
+            updatedAt: previous?.updatedAt ?? null,
+          });
+          logWarn(LOG_PREFIX, "refresh-result-error", {
+            account: account.id,
+            refreshVersion,
+            refreshId: options.refreshId ?? null,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          perf.mark("account-refresh-error", {
+            account: account.name,
+          });
+        }
+
+        if (refreshVersion === this.refreshVersion) {
+          this.syncRootItems(accounts, { logPerformance: false });
+          this._onDidChangeTreeData.fire(undefined);
+        }
+      });
       perf.mark("await-account-queries");
 
       if (refreshVersion === this.refreshVersion) {
-        this.syncRootItems();
+        this.syncRootItems(accounts);
         perf.mark("sync-root-items-final");
         this._onDidChangeTreeData.fire(undefined);
         perf.mark("fire-tree-final");
         logInfo(LOG_PREFIX, "refresh-finish", {
           targetIds: targetIdSet ? [...targetIdSet] : null,
           refreshVersion,
+          refreshId: options.refreshId ?? null,
+          reason: options.reason ?? null,
         });
       }
+      const sortedDurations = [...accountDurations].sort((left, right) => left - right);
+      slowestAccounts.sort((left, right) => right.durationMs - left.durationMs);
       perf.finish({
         refreshVersion,
-        targetCount: accountsToRefresh.length,
+        reason: options.reason ?? null,
+        requestedCount,
+        effectiveCount: accountsToRefresh.length,
+        skippedCount: requestedCount - accountsToRefresh.length,
+        concurrency,
+        okCount,
+        errorCount,
+        notReadyCount,
+        inflightReuseCount,
+        cacheReuseCount: 0,
+        p50Ms: percentile(sortedDurations, 0.5),
+        p95Ms: percentile(sortedDurations, 0.95),
+        maxMs: sortedDurations[sortedDurations.length - 1] ?? 0,
+        slowestAccountsTopN: slowestAccounts,
       });
     } catch (error) {
       perf.fail(error);
@@ -461,7 +582,18 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
     const config = vscode.workspace.getConfiguration("codex-account-switch");
     const intervalSec = config.get<number>("quotaRefreshInterval", 300);
     this.timer = setInterval(() => {
-      void this.refreshQuota().catch((error) => {
+      const snapshot = createSavedEntriesSnapshot();
+      const selection = getSavedCurrentSelection(snapshot);
+      const targetIds = selection.kind === "account"
+        ? [snapshot.bySourceAndName.get(`${selection.source}:${selection.name}`)?.id].filter((id): id is string => Boolean(id))
+        : undefined;
+      if (!targetIds || targetIds.length === 0) {
+        return;
+      }
+      void this.refreshQuota(targetIds, {
+        snapshot,
+        reason: "timer",
+      }).catch((error) => {
         logWarn(LOG_PREFIX, "timer-refresh-failed", {
           error: error instanceof Error ? error.message : String(error),
         });
@@ -480,15 +612,17 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
 
   getRootItems(): AccountGroupItem[] {
     if (this.rootItems.length === 0) {
-      this.syncRootItems();
+      this.syncRootItems(createSavedEntriesSnapshot().accounts);
     }
     return this.rootItems;
   }
 
-  private syncRootItems(accounts = listSavedAccounts()) {
-    const perf = startPerformanceLog(LOG_PREFIX, "accountTree.syncRootItems", {
-      accountCount: accounts.length,
-    });
+  private syncRootItems(accounts = listSavedAccounts(), options: { logPerformance?: boolean } = {}) {
+    const perf = options.logPerformance === false
+      ? null
+      : startPerformanceLog(LOG_PREFIX, "accountTree.syncRootItems", {
+        accountCount: accounts.length,
+      });
     const quotaFailed: AccountTreeItem[] = [];
     const local: AccountTreeItem[] = [];
     const cloud: AccountTreeItem[] = [];
@@ -515,7 +649,7 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
       groups.push(new AccountGroupItem("Cloud Accounts", cloud, "cloud"));
     }
     this.rootItems = groups;
-    perf.finish({
+    perf?.finish({
       quotaFailedCount: quotaFailed.length,
       localCount: local.length,
       cloudCount: cloud.length,

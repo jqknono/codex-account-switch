@@ -24,10 +24,11 @@ import {
   getSavedAuthPassphrase,
   hasAccountAuthTokens,
   isSerializedSavedValueEncrypted,
-  listAccounts,
+  listNamedAuthFiles,
   listProviderModes,
   readCurrentAuth,
   readProviderProfileResult,
+  readSavedAuthFileResult,
   refreshAccessToken,
   refreshAccount,
   removeAccount,
@@ -105,6 +106,19 @@ export type SavedSelection =
   | { kind: "account"; name: string; source: StorageSource; meta: AccountMeta | null }
   | { kind: "provider"; name: string; source: StorageSource }
   | { kind: "unknown"; meta: AccountMeta | null };
+
+export interface SavedEntriesSnapshot {
+  accounts: SavedAccountInfo[];
+  selection: SavedSelection;
+  byId: Map<string, SavedAccountInfo>;
+  bySourceAndName: Map<string, SavedAccountInfo>;
+  createdAt: number;
+}
+
+export interface SavedAccountQuotaQueryContext {
+  snapshot?: SavedEntriesSnapshot;
+  sharedQueries?: Map<string, Promise<QuotaQueryResult>>;
+}
 
 interface SyncedStorageData {
   version: 1;
@@ -449,6 +463,10 @@ function toId(source: StorageSource, name: string): string {
   return `${source}:${name}`;
 }
 
+function getAccountLookupKey(source: StorageSource, name: string): string {
+  return `${source}:${name}`;
+}
+
 function parseProviderProfile(name: string, value: unknown): ProviderProfile | null {
   if (!isRecord(value) || value.kind !== "provider" || value.name !== name) {
     return null;
@@ -499,25 +517,64 @@ function readCloudProvider(name: string) {
   return deserializeSavedValue<ProviderProfile>(getStoredCloudProviderRaw(name), "saved_provider");
 }
 
-function getLocalAccounts(): SavedAccountInfo[] {
-  return listAccounts().map((account) => ({
-    ...account,
-    id: toId("local", account.name),
-    source: "local" as const,
-    syncVersion: null,
-    syncUpdatedAt: null,
-    currentDeviceName: null,
-    effectiveAutoRefreshDeviceName: null,
-    autoRefreshAllowed: null,
-  }));
+function getLocalAccounts(perf?: ReturnType<typeof startPerformanceLog>): SavedAccountInfo[] {
+  const names = listNamedAuthFiles();
+  perf?.mark("list-local-auth-files", {
+    localFileCount: names.length,
+  });
+  const accounts = names.map((name) => {
+    const result = readSavedAuthFileResult(getNamedAuthPath(name));
+    if (result.status === "ok") {
+      return {
+        id: toId("local", name),
+        name,
+        source: "local" as const,
+        meta: extractMeta(result.value),
+        auth: result.value,
+        isCurrent: false,
+        storageState: "ready" as const,
+        storageMessage: undefined,
+        encrypted: result.encrypted,
+        syncVersion: null,
+        syncUpdatedAt: null,
+        currentDeviceName: null,
+        effectiveAutoRefreshDeviceName: null,
+        autoRefreshAllowed: null,
+      };
+    }
+
+    return {
+      id: toId("local", name),
+      name,
+      source: "local" as const,
+      meta: null,
+      auth: null,
+      isCurrent: false,
+      storageState: result.status === "locked" ? "locked" as const : "invalid" as const,
+      storageMessage: "message" in result ? result.message : undefined,
+      encrypted: result.encrypted,
+      syncVersion: null,
+      syncUpdatedAt: null,
+      currentDeviceName: null,
+      effectiveAutoRefreshDeviceName: null,
+      autoRefreshAllowed: null,
+    };
+  });
+  perf?.mark("read-local-auth-files", {
+    localCount: accounts.length,
+  });
+  return accounts;
 }
 
-function getCloudAccounts(): SavedAccountInfo[] {
+function getCloudAccounts(perf?: ReturnType<typeof startPerformanceLog>): SavedAccountInfo[] {
   const storage = readSyncedStorage();
+  perf?.mark("read-synced-storage", {
+    cloudAccountCount: Object.keys(storage.accounts).length,
+  });
   const currentDeviceName = getCurrentDeviceName();
   const effectiveAutoRefreshDeviceName = getEffectiveAutoRefreshDeviceName(storage);
   const autoRefreshAllowed = effectiveAutoRefreshDeviceName === currentDeviceName;
-  return Object.keys(storage.accounts).sort().map((name) => {
+  const accounts = Object.keys(storage.accounts).sort().map((name) => {
     const raw = storage.accounts[name];
     const syncMetadata = getSyncMetadata(raw);
     const result = readCloudAccount(name);
@@ -556,6 +613,10 @@ function getCloudAccounts(): SavedAccountInfo[] {
       autoRefreshAllowed,
     };
   });
+  perf?.mark("deserialize-cloud-accounts", {
+    cloudCount: accounts.length,
+  });
+  return accounts;
 }
 
 function getLocalProviders(): SavedProviderInfo[] {
@@ -648,38 +709,115 @@ function selectCurrentProvider(providers: SavedProviderInfo[]): SavedProviderInf
   }));
 }
 
-export function listSavedAccounts(): SavedAccountInfo[] {
+function buildSavedSelection(accounts: SavedAccountInfo[], perf?: ReturnType<typeof startPerformanceLog>): SavedSelection {
+  const activeProvider = getActiveModelProvider();
+  perf?.mark("get-active-provider", {
+    hasActiveProvider: Boolean(activeProvider),
+  });
+  if (activeProvider) {
+    const marker = getMarker();
+    return {
+      kind: "provider",
+      name: activeProvider,
+      source: marker?.kind === "provider" && marker.name === activeProvider ? marker.source : "local",
+    };
+  }
+
+  const currentAuth = readCurrentAuth();
+  perf?.mark("read-current-auth", {
+    hasCurrentAuth: Boolean(currentAuth),
+  });
+  if (!currentAuth) {
+    return { kind: "unknown", meta: null };
+  }
+
+  const identity = getAccountIdentity(currentAuth);
+  const marker = getMarker();
+  const matches = accounts.filter((account) => account.storageState === "ready" && account.auth && getAccountIdentity(account.auth) === identity);
+  perf?.mark("find-ready-account-matches", {
+    matchCount: matches.length,
+  });
+  if (matches.length === 0) {
+    const selection = getLocalSelection();
+    return selection.kind === "unknown"
+      ? selection
+      : { kind: "unknown", meta: extractMeta(currentAuth) };
+  }
+
+  const current =
+    marker?.kind === "account"
+      ? matches.find((account) => account.source === marker.source && account.name === marker.name) ?? matches[0]
+      : matches[0];
+
+  return {
+    kind: "account",
+    name: current.name,
+    source: current.source,
+    meta: current.meta,
+  };
+}
+
+function buildSavedEntriesSnapshot(perf?: ReturnType<typeof startPerformanceLog>): SavedEntriesSnapshot {
+  const localAccounts = getLocalAccounts(perf);
+  const cloudAccounts = getCloudAccounts(perf);
+  const accounts = selectCurrentAccount([...localAccounts, ...cloudAccounts]);
+  perf?.mark("select-current-account", {
+    localCount: localAccounts.length,
+    cloudCount: cloudAccounts.length,
+    totalCount: accounts.length,
+  });
+  const selection = buildSavedSelection(accounts, perf);
+  const byId = new Map<string, SavedAccountInfo>();
+  const bySourceAndName = new Map<string, SavedAccountInfo>();
+  for (const account of accounts) {
+    byId.set(account.id, account);
+    bySourceAndName.set(getAccountLookupKey(account.source, account.name), account);
+  }
+  perf?.mark("build-account-indexes", {
+    totalCount: accounts.length,
+  });
+  return {
+    accounts,
+    selection,
+    byId,
+    bySourceAndName,
+    createdAt: Date.now(),
+  };
+}
+
+export function createSavedEntriesSnapshot(): SavedEntriesSnapshot {
   const perf = startPerformanceLog(LOG_PREFIX, "listSavedAccounts");
   try {
-    const localAccounts = getLocalAccounts();
-    perf.mark("get-local-accounts", {
-      localCount: localAccounts.length,
-    });
-    const cloudAccounts = getCloudAccounts();
-    perf.mark("get-cloud-accounts", {
-      cloudCount: cloudAccounts.length,
-    });
-    const accounts = selectCurrentAccount([...localAccounts, ...cloudAccounts]);
-    perf.mark("select-current-account", {
-      totalCount: accounts.length,
-    });
+    const snapshot = buildSavedEntriesSnapshot(perf);
     perf.finish({
-      localCount: localAccounts.length,
-      cloudCount: cloudAccounts.length,
-      totalCount: accounts.length,
+      localCount: snapshot.accounts.filter((account) => account.source === "local").length,
+      cloudCount: snapshot.accounts.filter((account) => account.source === "cloud").length,
+      totalCount: snapshot.accounts.length,
+      selectionKind: snapshot.selection.kind,
     });
-    return accounts;
+    return snapshot;
   } catch (error) {
     perf.fail(error);
     throw error;
   }
 }
 
+export function listSavedAccounts(): SavedAccountInfo[] {
+  return createSavedEntriesSnapshot().accounts;
+}
+
 export function listSavedProviders(): SavedProviderInfo[] {
   return selectCurrentProvider([...getLocalProviders(), ...getCloudProviders()]);
 }
 
-export function getSavedAccountEntry(name: string, source: StorageSource): SavedAccountInfo | null {
+export function getSavedAccountEntry(
+  name: string,
+  source: StorageSource,
+  snapshot?: SavedEntriesSnapshot,
+): SavedAccountInfo | null {
+  if (snapshot) {
+    return snapshot.bySourceAndName.get(getAccountLookupKey(source, name)) ?? null;
+  }
   return listSavedAccounts().find((account) => account.name === name && account.source === source) ?? null;
 }
 
@@ -746,78 +884,23 @@ async function persistCloudAccountAuth(
   return writeCloudAccountWithExpectedVersion(name, auth, expectedEntryVersion, expectedUpdatedAt);
 }
 
-function getReadyAccounts(): SavedAccountInfo[] {
-  return listSavedAccounts().filter((account) => account.storageState === "ready" && account.auth);
+function getReadyAccounts(snapshot?: SavedEntriesSnapshot): SavedAccountInfo[] {
+  const accounts = snapshot?.accounts ?? listSavedAccounts();
+  return accounts.filter((account) => account.storageState === "ready" && account.auth);
 }
 
 function getLocalSelection(): CurrentSelection {
   return getCurrentSelection();
 }
 
-export function getSavedCurrentSelection(): SavedSelection {
+export function getSavedCurrentSelection(snapshot?: SavedEntriesSnapshot): SavedSelection {
   const perf = startPerformanceLog(LOG_PREFIX, "getSavedCurrentSelection");
   try {
-    const activeProvider = getActiveModelProvider();
-    perf.mark("get-active-provider", {
-      hasActiveProvider: Boolean(activeProvider),
-    });
-    if (activeProvider) {
-      const marker = getMarker();
-      const selection = {
-        kind: "provider" as const,
-        name: activeProvider,
-        source: marker?.kind === "provider" && marker.name === activeProvider ? marker.source : "local",
-      };
-      perf.finish({
-        kind: selection.kind,
-        source: selection.source,
-      });
-      return selection;
-    }
-
-    const currentAuth = readCurrentAuth();
-    perf.mark("read-current-auth", {
-      hasCurrentAuth: Boolean(currentAuth),
-    });
-    if (!currentAuth) {
-      perf.finish({
-        kind: "unknown",
-      });
-      return { kind: "unknown", meta: null };
-    }
-
-    const identity = getAccountIdentity(currentAuth);
-    const marker = getMarker();
-    const matches = getReadyAccounts().filter((account) => getAccountIdentity(account.auth) === identity);
-    perf.mark("find-ready-account-matches", {
-      matchCount: matches.length,
-    });
-    if (matches.length === 0) {
-      const selection = getLocalSelection();
-      const result = selection.kind === "unknown"
-        ? selection
-        : { kind: "unknown" as const, meta: extractMeta(currentAuth) };
-      perf.finish({
-        kind: result.kind,
-      });
-      return result;
-    }
-
-    const current =
-      marker?.kind === "account"
-        ? matches.find((account) => account.source === marker.source && account.name === marker.name) ?? matches[0]
-        : matches[0];
-
-    const result = {
-      kind: "account" as const,
-      name: current.name,
-      source: current.source,
-      meta: current.meta,
-    };
+    const result = snapshot?.selection ?? buildSavedEntriesSnapshot(perf).selection;
     perf.finish({
       kind: result.kind,
-      name: result.name,
-      source: result.source,
+      name: "name" in result ? result.name : null,
+      source: "source" in result ? result.source : null,
     });
     return result;
   } catch (error) {
@@ -1149,29 +1232,70 @@ export async function useSavedAccountEntry(
   };
 }
 
-export async function querySavedAccountQuota(account: SavedAccountInfo): Promise<QuotaQueryResult> {
-  const perf = startPerformanceLog(LOG_PREFIX, "querySavedAccountQuota", {
-    account: account.name,
-    source: account.source,
-  });
+export async function querySavedAccountQuota(
+  account: SavedAccountInfo,
+  context?: SavedAccountQuotaQueryContext,
+): Promise<QuotaQueryResult> {
+  const perf = startPerformanceLog(
+    LOG_PREFIX,
+    "querySavedAccountQuota",
+    {
+      account: account.name,
+      source: account.source,
+    },
+    {
+      mode: "adaptive",
+      slowThresholdMs: 3000,
+    },
+  );
   try {
+    const sharedQuery = context?.sharedQueries?.get(account.id);
+    if (sharedQuery) {
+      try {
+        const result = await sharedQuery;
+        perf.finish({
+          resultKind: result.kind,
+          source: "reused",
+          reusedInflight: true,
+        });
+        return result;
+      } catch (error) {
+        perf.fail(error, {
+          source: "reused",
+          reusedInflight: true,
+        });
+        throw error;
+      }
+    }
+
     if (account.source === "local") {
-      const core = await import("@codex-account-switch/core");
-      perf.mark("delegate-to-core-queryQuota");
-      const result = await core.queryQuota(account.name);
+      const resultPromise = (async () => {
+        const core = await import("@codex-account-switch/core");
+        perf.mark("delegate-to-core-queryQuota");
+        return core.queryQuota(account.name, {
+          performanceMode: "adaptive",
+          slowThresholdMs: 3000,
+        });
+      })();
+      context?.sharedQueries?.set(account.id, resultPromise);
+      const result = await resultPromise;
       perf.finish({
         resultKind: result.kind,
+        source: "direct",
       });
       return result;
     }
 
     const existingQuery = inflightCloudQuotaQueries.get(account.id);
     if (existingQuery) {
+      context?.sharedQueries?.set(account.id, existingQuery);
+      const result = await existingQuery;
       perf.finish({
-        resultKind: "inflight",
+        resultKind: result.kind,
+        source: "reused",
         reusedInflight: true,
       });
-      return existingQuery;
+      return result;
     }
 
     if (account.storageState !== "ready" || !account.auth) {
@@ -1207,7 +1331,7 @@ export async function querySavedAccountQuota(account: SavedAccountInfo): Promise
           mode,
           skipped: "skipped" in result,
         });
-        const current = getSavedCurrentSelection();
+        const current = getSavedCurrentSelection(context?.snapshot);
         if (current.kind === "account" && current.source === "cloud" && current.name === account.name) {
           writeCurrentAuth(auth);
         }
@@ -1233,10 +1357,12 @@ export async function querySavedAccountQuota(account: SavedAccountInfo): Promise
     })();
 
     inflightCloudQuotaQueries.set(account.id, queryPromise);
+    context?.sharedQueries?.set(account.id, queryPromise);
     queryPromise
       .then((result) => {
         perf.finish({
           resultKind: result.kind,
+          source: "direct",
         });
       })
       .catch((error) => {

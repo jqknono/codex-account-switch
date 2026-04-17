@@ -2,20 +2,38 @@ import * as vscode from "vscode";
 import { AccountTreeProvider } from "./accountTree";
 import { logWarn, startPerformanceLog } from "./log";
 import { ProviderTreeProvider } from "./providerTree";
+import { createSavedEntriesSnapshot, SavedAccountQuotaQueryContext } from "./savedEntries";
 import { StatusBarManager } from "./statusBar";
 
 const LOG_PREFIX = "[codex-account-switch:vscode:refreshCoordinator]";
+let refreshSequence = 0;
+
+export type RefreshReason =
+  | "activate"
+  | "manual"
+  | "timer"
+  | "config-change"
+  | "provider-switch"
+  | "account-switch";
 
 interface PreparedConfigurationRefresh {
   skipQuota: boolean;
   targetIds?: string[];
 }
 
+interface ScheduledQuotaRefresh {
+  reason: RefreshReason;
+  fullRefresh: boolean;
+  autoTargetCurrentSelection: boolean;
+}
+
 export class RefreshCoordinator implements vscode.Disposable {
   private scheduledTimer: ReturnType<typeof setTimeout> | undefined;
   private runningRefresh: Promise<void> | null = null;
   private pendingFullRefresh = false;
+  private pendingAutoRefresh = false;
   private pendingTargetIds = new Set<string>();
+  private pendingReason: RefreshReason = "manual";
   private preparedConfigurationRefresh: PreparedConfigurationRefresh | null = null;
 
   constructor(
@@ -24,13 +42,16 @@ export class RefreshCoordinator implements vscode.Disposable {
     private readonly statusBar: StatusBarManager,
   ) {}
 
-  refreshViews(): void {
-    const perf = startPerformanceLog(LOG_PREFIX, "refreshCoordinator.refreshViews");
-    this.accountTree.refresh();
+  refreshViews(reason: RefreshReason = "manual"): void {
+    const perf = startPerformanceLog(LOG_PREFIX, "refreshCoordinator.refreshViews", {
+      reason,
+    });
+    const snapshot = createSavedEntriesSnapshot();
+    this.accountTree.refresh(snapshot);
     perf.mark("account-tree-refresh");
     this.providerTree.refresh();
     perf.mark("provider-tree-refresh");
-    void this.statusBar.refreshNow({ skipQuota: true }).catch((error) => {
+    void this.statusBar.refreshNow({ skipQuota: true, snapshot, reason }).catch((error) => {
       logWarn(LOG_PREFIX, "refresh-views-statusBar-failed", {
         error: error instanceof Error ? error.message : String(error),
       });
@@ -39,17 +60,27 @@ export class RefreshCoordinator implements vscode.Disposable {
     perf.finish();
   }
 
-  scheduleQuotaRefresh(targetIds?: Iterable<string>): void {
-    const normalizedTargetIds = targetIds ? [...targetIds] : undefined;
+  scheduleQuotaRefresh(options?: { targetIds?: Iterable<string>; reason?: RefreshReason; fullRefresh?: boolean }): void {
+    const normalizedTargetIds = options?.targetIds ? [...options.targetIds] : undefined;
+    const reason = options?.reason ?? "manual";
     const perf = startPerformanceLog(LOG_PREFIX, "refreshCoordinator.scheduleQuotaRefresh", {
       targetCount: normalizedTargetIds?.length ?? null,
+      reason,
+      fullRefresh: options?.fullRefresh ?? false,
     });
-    this.enqueueQuotaRefresh(normalizedTargetIds);
+    this.enqueueQuotaRefresh({
+      targetIds: normalizedTargetIds,
+      reason,
+      fullRefresh: options?.fullRefresh ?? false,
+      autoTargetCurrentSelection: !normalizedTargetIds && !(options?.fullRefresh ?? false),
+    });
     perf.mark("enqueue");
     this.ensureScheduled();
     perf.finish({
       pendingFullRefresh: this.pendingFullRefresh,
+      pendingAutoRefresh: this.pendingAutoRefresh,
       pendingTargetCount: this.pendingTargetIds.size,
+      reason: this.pendingReason,
     });
   }
 
@@ -80,10 +111,19 @@ export class RefreshCoordinator implements vscode.Disposable {
     }
   }
 
-  private enqueueQuotaRefresh(targetIds?: Iterable<string>): void {
-    if (!targetIds) {
+  private enqueueQuotaRefresh(request: ScheduledQuotaRefresh & { targetIds?: Iterable<string> }): void {
+    this.pendingReason = request.reason;
+    if (request.fullRefresh) {
       this.pendingFullRefresh = true;
+      this.pendingAutoRefresh = false;
       this.pendingTargetIds.clear();
+      return;
+    }
+
+    if (request.autoTargetCurrentSelection) {
+      if (!this.pendingFullRefresh) {
+        this.pendingAutoRefresh = true;
+      }
       return;
     }
 
@@ -91,7 +131,8 @@ export class RefreshCoordinator implements vscode.Disposable {
       return;
     }
 
-    for (const id of targetIds) {
+    this.pendingAutoRefresh = false;
+    for (const id of request.targetIds ?? []) {
       if (typeof id === "string" && id.length > 0) {
         this.pendingTargetIds.add(id);
       }
@@ -118,27 +159,77 @@ export class RefreshCoordinator implements vscode.Disposable {
       return;
     }
 
-    const targetIds = this.pendingFullRefresh ? undefined : [...this.pendingTargetIds];
+    const pendingReason = this.pendingReason;
+    const pendingFullRefresh = this.pendingFullRefresh;
+    const pendingAutoRefresh = this.pendingAutoRefresh;
+    const explicitTargetIds = this.pendingTargetIds.size > 0 ? [...this.pendingTargetIds] : undefined;
     this.pendingFullRefresh = false;
+    this.pendingAutoRefresh = false;
     this.pendingTargetIds.clear();
     perf.mark("drain-pending-queue", {
-      targetCount: targetIds?.length ?? null,
+      targetCount: explicitTargetIds?.length ?? null,
+      reason: pendingReason,
+      pendingFullRefresh,
+      pendingAutoRefresh,
     });
 
-    if (targetIds && targetIds.length === 0) {
+    const refreshId = `refresh-${++refreshSequence}`;
+    const snapshot = createSavedEntriesSnapshot();
+    const queryContext: SavedAccountQuotaQueryContext = {
+      snapshot,
+      sharedQueries: new Map(),
+    };
+    let targetIds: string[] | undefined;
+    if (pendingFullRefresh) {
+      targetIds = snapshot.accounts
+        .filter((account) => account.storageState === "ready")
+        .map((account) => account.id);
+    } else if (explicitTargetIds && explicitTargetIds.length > 0) {
+      targetIds = explicitTargetIds;
+    } else if (pendingAutoRefresh && snapshot.selection.kind === "account") {
+      const current = snapshot.bySourceAndName.get(`${snapshot.selection.source}:${snapshot.selection.name}`);
+      targetIds = current ? [current.id] : [];
+    } else {
+      targetIds = [];
+    }
+
+    if (targetIds.length === 0) {
+      await this.statusBar.refreshNow({
+        snapshot,
+        skipQuota: snapshot.selection.kind === "provider",
+        queryContext,
+        reason: pendingReason,
+        refreshId,
+      });
       perf.finish({
+        reason: pendingReason,
+        refreshId,
+        effectiveCount: 0,
         result: "empty-targets",
       });
       return;
     }
 
     const refreshPromise = Promise.all([
-      this.accountTree.refreshQuota(targetIds),
-      this.statusBar.refreshNow(),
+      this.accountTree.refreshQuota(targetIds, {
+        snapshot,
+        queryContext,
+        reason: pendingReason,
+        refreshId,
+      }),
+      this.statusBar.refreshNow({
+        snapshot,
+        queryContext,
+        reason: pendingReason,
+        refreshId,
+      }),
     ])
       .then(() => {
         perf.finish({
           targetCount: targetIds?.length ?? null,
+          effectiveCount: targetIds?.length ?? 0,
+          reason: pendingReason,
+          refreshId,
         });
         return;
       })
@@ -148,6 +239,8 @@ export class RefreshCoordinator implements vscode.Disposable {
         });
         perf.fail(error, {
           targetCount: targetIds?.length ?? null,
+          reason: pendingReason,
+          refreshId,
         });
       })
       .finally(() => {

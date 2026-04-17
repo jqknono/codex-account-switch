@@ -43,6 +43,11 @@ interface HttpErrorLike {
 
 type AuthUpdateHook = (auth: AuthFile) => void | Promise<void>;
 
+export interface QuotaPerformanceOptions {
+  performanceMode?: "summary" | "adaptive";
+  slowThresholdMs?: number;
+}
+
 function httpsGet(url: string, headers: Record<string, string>): Promise<string> {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
@@ -75,11 +80,23 @@ function httpsGet(url: string, headers: Record<string, string>): Promise<string>
   });
 }
 
-async function fetchUsageApi(auth: AuthFile, onAuthUpdated?: AuthUpdateHook): Promise<UsageApiResponse> {
-  const perf = createDiagnosticPerformanceTimer(LOG_PREFIX, "fetchUsageApi", {
-    hasAccessToken: Boolean(auth.tokens?.access_token),
-    hasAccountId: Boolean(auth.tokens?.account_id),
-  });
+async function fetchUsageApi(
+  auth: AuthFile,
+  onAuthUpdated?: AuthUpdateHook,
+  options: QuotaPerformanceOptions = {},
+): Promise<UsageApiResponse> {
+  const perf = createDiagnosticPerformanceTimer(
+    LOG_PREFIX,
+    "fetchUsageApi",
+    {
+      hasAccessToken: Boolean(auth.tokens?.access_token),
+      hasAccountId: Boolean(auth.tokens?.account_id),
+    },
+    {
+      mode: options.performanceMode === "adaptive" ? "adaptive" : "normal",
+      slowThresholdMs: options.slowThresholdMs ?? 0,
+    },
+  );
   const accessToken = auth.tokens?.access_token;
   const accountId = auth.tokens?.account_id ?? "";
 
@@ -202,11 +219,23 @@ function parseUnavailableReason(auth: AuthFile, err: unknown): QuotaUnavailableR
   };
 }
 
-export async function getQuotaInfo(auth: AuthFile, onAuthUpdated?: AuthUpdateHook): Promise<QuotaInfo> {
-  const perf = createDiagnosticPerformanceTimer(LOG_PREFIX, "getQuotaInfo", {
-    hasIdToken: Boolean(auth.tokens?.id_token),
-    hasAccessToken: Boolean(auth.tokens?.access_token),
-  });
+export async function getQuotaInfo(
+  auth: AuthFile,
+  onAuthUpdated?: AuthUpdateHook,
+  options: QuotaPerformanceOptions = {},
+): Promise<QuotaInfo> {
+  const perf = createDiagnosticPerformanceTimer(
+    LOG_PREFIX,
+    "getQuotaInfo",
+    {
+      hasIdToken: Boolean(auth.tokens?.id_token),
+      hasAccessToken: Boolean(auth.tokens?.access_token),
+    },
+    {
+      mode: options.performanceMode === "adaptive" ? "adaptive" : "normal",
+      slowThresholdMs: options.slowThresholdMs ?? 0,
+    },
+  );
   let email = "unknown";
   let tokenExpired = false;
 
@@ -236,7 +265,7 @@ export async function getQuotaInfo(auth: AuthFile, onAuthUpdated?: AuthUpdateHoo
 
   let apiData: UsageApiResponse;
   try {
-    apiData = await fetchUsageApi(auth, onAuthUpdated);
+    apiData = await fetchUsageApi(auth, onAuthUpdated, options);
     perf.mark("fetch-usage-api");
   } catch (err: unknown) {
     const unavailable = {

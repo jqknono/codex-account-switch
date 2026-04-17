@@ -77,18 +77,23 @@ export async function activate(context: vscode.ExtensionContext) {
         promptIfMissing: true,
         promptForLockedStorage: hasEncryptedSyncedEntries(),
       });
-      refreshCoordinator.refreshViews();
+      refreshCoordinator.refreshViews("config-change");
 
       if (e.affectsConfiguration("codex-account-switch.syncedStorage")) {
         const prepared = refreshCoordinator.consumePreparedConfigurationRefresh();
         if (prepared?.skipQuota) {
           return;
         }
-        refreshCoordinator.scheduleQuotaRefresh(prepared?.targetIds);
+        refreshCoordinator.scheduleQuotaRefresh({
+          reason: "config-change",
+          targetIds: prepared?.targetIds,
+        });
         return;
       }
 
-      refreshCoordinator.scheduleQuotaRefresh();
+      refreshCoordinator.scheduleQuotaRefresh({
+        reason: "config-change",
+      });
     }
   });
 
@@ -106,6 +111,10 @@ export async function activate(context: vscode.ExtensionContext) {
 
   accountTree.startAutoRefresh(context);
   statusBarManager.startAutoRefresh(context);
+  refreshCoordinator.refreshViews("activate");
+  refreshCoordinator.scheduleQuotaRefresh({
+    reason: "activate",
+  });
   logInfo(LOG_PREFIX, "activate-ready", {});
 }
 

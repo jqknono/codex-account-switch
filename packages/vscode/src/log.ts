@@ -9,6 +9,11 @@ interface PerformanceTimer {
   fail(error: unknown, details?: Record<string, unknown>): void;
 }
 
+interface PerformanceLogOptions {
+  mode?: "normal" | "adaptive";
+  slowThresholdMs?: number;
+}
+
 let outputChannel: vscode.LogOutputChannel | null = null;
 
 function getOutputChannel(): vscode.LogOutputChannel {
@@ -65,15 +70,21 @@ export function startPerformanceLog(
   prefix: string,
   operation: string,
   details: Record<string, unknown> = {},
+  options: PerformanceLogOptions = {},
 ): PerformanceTimer {
   const startedAt = Date.now();
   let lastMarkAt = startedAt;
   let finished = false;
+  const mode = options.mode ?? "normal";
+  const slowThresholdMs = options.slowThresholdMs ?? 0;
+  const immediateLogging = mode === "normal" || isDetailedPerformanceLoggingEnabled();
 
-  logInfo(prefix, "perf-start", {
-    operation,
-    ...details,
-  });
+  if (immediateLogging) {
+    logInfo(prefix, "perf-start", {
+      operation,
+      ...details,
+    });
+  }
 
   return {
     mark(stage: string, stageDetails: Record<string, unknown> = {}) {
@@ -98,9 +109,14 @@ export function startPerformanceLog(
       }
 
       finished = true;
+      const durationMs = Date.now() - startedAt;
+      if (!immediateLogging && durationMs < slowThresholdMs) {
+        return;
+      }
       logInfo(prefix, "perf-finish", {
         operation,
-        durationMs: Date.now() - startedAt,
+        durationMs,
+        ...(mode === "adaptive" ? { slow: durationMs >= slowThresholdMs } : {}),
         ...details,
         ...finishDetails,
       });

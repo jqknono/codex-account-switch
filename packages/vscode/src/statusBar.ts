@@ -1,8 +1,23 @@
 import * as vscode from "vscode";
 import { QuotaInfo, WindowInfo, getModeDisplayName } from "@codex-account-switch/core";
 import { logInfo, logWarn, startPerformanceLog } from "./log";
-import { getSavedAccountEntry, getSavedCurrentSelection, querySavedAccountQuota } from "./savedEntries";
+import {
+  createSavedEntriesSnapshot,
+  getSavedAccountEntry,
+  getSavedCurrentSelection,
+  querySavedAccountQuota,
+  SavedAccountQuotaQueryContext,
+  SavedEntriesSnapshot,
+} from "./savedEntries";
 const LOG_PREFIX = "[codex-account-switch:vscode:statusBar]";
+
+interface StatusBarRefreshOptions {
+  skipQuota?: boolean;
+  snapshot?: SavedEntriesSnapshot;
+  queryContext?: SavedAccountQuotaQueryContext;
+  reason?: string;
+  refreshId?: string;
+}
 
 function windowLabel(window: WindowInfo): string {
   if (window.windowSeconds == null) return "quota";
@@ -55,13 +70,6 @@ export class StatusBarManager implements vscode.Disposable {
   }
 
   startAutoRefresh(context: vscode.ExtensionContext) {
-    if (this.isVisibleEnabled()) {
-      void this.refreshNow().catch((error) => {
-        logWarn(LOG_PREFIX, "startup-refresh-failed", {
-          error: error instanceof Error ? error.message : String(error),
-        });
-      });
-    }
     this.restartTimer();
 
     this.configListener = vscode.workspace.onDidChangeConfiguration((e) => {
@@ -72,7 +80,10 @@ export class StatusBarManager implements vscode.Disposable {
         this.updateVisibility();
         this.restartTimer();
         if (this.isVisibleEnabled()) {
-          void this.refreshNow().catch((error) => {
+          void this.refreshNow({
+            snapshot: createSavedEntriesSnapshot(),
+            reason: "config-change",
+          }).catch((error) => {
             logWarn(LOG_PREFIX, "show-status-bar-refresh-failed", {
               error: error instanceof Error ? error.message : String(error),
             });
@@ -102,9 +113,11 @@ export class StatusBarManager implements vscode.Disposable {
     }, intervalSec * 1000);
   }
 
-  async refreshNow(options?: { skipQuota?: boolean }) {
+  async refreshNow(options: StatusBarRefreshOptions = {}) {
     const perf = startPerformanceLog(LOG_PREFIX, "statusBar.refreshNow", {
       skipQuota: options?.skipQuota ?? false,
+      reason: options.reason ?? null,
+      refreshId: options.refreshId ?? null,
     });
     if (!this.isVisibleEnabled()) {
       perf.finish({
@@ -114,7 +127,8 @@ export class StatusBarManager implements vscode.Disposable {
     }
 
     try {
-      const selection = getSavedCurrentSelection();
+      const snapshot = options.snapshot ?? createSavedEntriesSnapshot();
+      const selection = getSavedCurrentSelection(snapshot);
       perf.mark("get-saved-current-selection", {
         selectionKind: selection.kind,
         name: "name" in selection ? selection.name : null,
@@ -158,7 +172,7 @@ export class StatusBarManager implements vscode.Disposable {
         return;
       }
 
-      const account = getSavedAccountEntry(name, selection.source);
+      const account = getSavedAccountEntry(name, selection.source, snapshot);
       perf.mark("get-saved-account-entry", {
         foundAccount: Boolean(account),
         name,
@@ -176,7 +190,7 @@ export class StatusBarManager implements vscode.Disposable {
       }
 
       this.statusBarItem.text = `$(loading~spin) ${name} [${selection.source}]`;
-      const result = await querySavedAccountQuota(account);
+      const result = await querySavedAccountQuota(account, options.queryContext);
       perf.mark("query-saved-account-quota", {
         resultKind: result.kind,
       });

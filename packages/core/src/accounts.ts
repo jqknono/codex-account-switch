@@ -23,7 +23,7 @@ import {
   writeSavedAuthFile,
 } from "./auth";
 import { refreshAndSave } from "./refresh";
-import { getQuotaInfo } from "./quota";
+import { getQuotaInfo, QuotaPerformanceOptions } from "./quota";
 import { AuthFile, AccountMeta, QuotaInfo, ExportData, CurrentSelection } from "./types";
 import { clearActiveModelProvider, getActiveModelProvider } from "./config";
 import { getModeDisplayName } from "./providers";
@@ -670,10 +670,18 @@ export function getCurrentAccount(): { name: string | null; meta: AccountMeta | 
   return { name: null, meta: null };
 }
 
-export async function queryQuota(name?: string): Promise<QuotaQueryResult> {
-  const perf = createDiagnosticPerformanceTimer("[codex-account-switch:core:accounts]", "queryQuota", {
-    requestedName: name ?? null,
-  });
+export async function queryQuota(name?: string, options: QuotaPerformanceOptions = {}): Promise<QuotaQueryResult> {
+  const perf = createDiagnosticPerformanceTimer(
+    "[codex-account-switch:core:accounts]",
+    "queryQuota",
+    {
+      requestedName: name ?? null,
+    },
+    {
+      mode: options.performanceMode === "adaptive" ? "adaptive" : "normal",
+      slowThresholdMs: options.slowThresholdMs ?? 0,
+    },
+  );
   try {
     const initialTarget = resolveQuotaTarget(name);
     perf.mark("resolve-initial-target", {
@@ -729,7 +737,7 @@ export async function queryQuota(name?: string): Promise<QuotaQueryResult> {
       };
 
       const authBefore = JSON.stringify(auth);
-      const info = await getQuotaInfo(auth, persistUpdatedAuth);
+      const info = await getQuotaInfo(auth, persistUpdatedAuth, options);
       perf.mark("get-quota-info", {
         unavailableReason: info.unavailableReason?.code ?? null,
       });

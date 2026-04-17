@@ -10,6 +10,11 @@ interface PerformanceTimer {
   fail(error: unknown, details?: Record<string, unknown>): void;
 }
 
+interface PerformanceLogOptions {
+  mode?: "normal" | "adaptive";
+  slowThresholdMs?: number;
+}
+
 let diagnosticLogger: DiagnosticLogger | null = null;
 let diagnosticLogOptions: Required<DiagnosticLogOptions> = {
   detailedPerformanceLogging: false,
@@ -54,15 +59,21 @@ export function createDiagnosticPerformanceTimer(
   prefix: string,
   operation: string,
   details: Record<string, unknown> = {},
+  options: PerformanceLogOptions = {},
 ): PerformanceTimer {
   const startedAt = Date.now();
   let lastMarkAt = startedAt;
   let finished = false;
+  const mode = options.mode ?? "normal";
+  const slowThresholdMs = options.slowThresholdMs ?? 0;
+  const immediateLogging = mode === "normal" || isDetailedDiagnosticPerformanceLoggingEnabled();
 
-  writeDiagnosticLog("info", formatDiagnosticLine(prefix, "perf-start", {
-    operation,
-    ...details,
-  }));
+  if (immediateLogging) {
+    writeDiagnosticLog("info", formatDiagnosticLine(prefix, "perf-start", {
+      operation,
+      ...details,
+    }));
+  }
 
   return {
     mark(stage: string, stageDetails: Record<string, unknown> = {}) {
@@ -87,9 +98,14 @@ export function createDiagnosticPerformanceTimer(
       }
 
       finished = true;
+      const durationMs = Date.now() - startedAt;
+      if (!immediateLogging && durationMs < slowThresholdMs) {
+        return;
+      }
       writeDiagnosticLog("info", formatDiagnosticLine(prefix, "perf-finish", {
         operation,
-        durationMs: Date.now() - startedAt,
+        durationMs,
+        ...(mode === "adaptive" ? { slow: durationMs >= slowThresholdMs } : {}),
         ...details,
         ...finishDetails,
       }));
