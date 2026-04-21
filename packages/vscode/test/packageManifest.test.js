@@ -41,6 +41,10 @@ test("account item context actions keep concise titles", () => {
     byId.get("codex-account-switch.removeAccount")?.title,
     "Remove Account"
   );
+  assert.equal(
+    byId.get("codex-account-switch.refreshToken")?.title,
+    "Refresh Token"
+  );
 });
 
 test("device auth login setting is opt-in", () => {

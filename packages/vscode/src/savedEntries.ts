@@ -21,6 +21,7 @@ import {
   getNamedAuthPath,
   getNamedProviderPath,
   getQuotaInfo,
+  isRefreshTokenExpiringWithin,
   getSavedAuthPassphrase,
   hasAccountAuthTokens,
   isSerializedSavedValueEncrypted,
@@ -46,6 +47,7 @@ import { startPerformanceLog } from "./log";
 export type StorageSource = "local" | "cloud";
 export type SaveTarget = StorageSource;
 const LOG_PREFIX = "[codex-account-switch:vscode:savedEntries]";
+const TIMER_REFRESH_TOKEN_THRESHOLD_MS = 5 * 24 * 3600 * 1000;
 
 export interface SavedAccountInfo {
   id: string;
@@ -118,6 +120,10 @@ export interface SavedEntriesSnapshot {
 export interface SavedAccountQuotaQueryContext {
   snapshot?: SavedEntriesSnapshot;
   sharedQueries?: Map<string, Promise<QuotaQueryResult>>;
+}
+
+interface SavedAccountQuotaQueryOptions {
+  reason?: string;
 }
 
 interface SyncedStorageData {
@@ -1235,6 +1241,7 @@ export async function useSavedAccountEntry(
 export async function querySavedAccountQuota(
   account: SavedAccountInfo,
   context?: SavedAccountQuotaQueryContext,
+  options: SavedAccountQuotaQueryOptions = {},
 ): Promise<QuotaQueryResult> {
   const perf = startPerformanceLog(
     LOG_PREFIX,
@@ -1271,6 +1278,25 @@ export async function querySavedAccountQuota(
     if (account.source === "local") {
       const resultPromise = (async () => {
         const core = await import("@codex-account-switch/core");
+        if (options.reason === "timer" && account.auth && isRefreshTokenExpiringWithin(account.auth, TIMER_REFRESH_TOKEN_THRESHOLD_MS)) {
+          perf.mark("timer-refresh-token-check", {
+            shouldRefresh: true,
+            source: account.source,
+          });
+          const refreshResult = await core.refreshAccount(account.name);
+          perf.mark("timer-refresh-token", {
+            success: refreshResult.success,
+            source: account.source,
+          });
+          if (!refreshResult.success) {
+            throw new Error(refreshResult.message);
+          }
+        } else if (options.reason === "timer") {
+          perf.mark("timer-refresh-token-check", {
+            shouldRefresh: false,
+            source: account.source,
+          });
+        }
         perf.mark("delegate-to-core-queryQuota");
         return core.queryQuota(account.name, {
           performanceMode: "adaptive",
@@ -1344,6 +1370,23 @@ export async function querySavedAccountQuota(
           });
         }
       };
+
+      if (options.reason === "timer") {
+        const shouldRefreshToken = isRefreshTokenExpiringWithin(auth, TIMER_REFRESH_TOKEN_THRESHOLD_MS);
+        perf.mark("timer-refresh-token-check", {
+          shouldRefresh: shouldRefreshToken,
+          source: account.source,
+        });
+        if (shouldRefreshToken) {
+          const refreshed = await refreshAccessToken(auth);
+          applyRefreshResponse(auth, refreshed);
+          await persist("automatic");
+          perf.mark("timer-refresh-token", {
+            success: true,
+            source: account.source,
+          });
+        }
+      }
 
       const info = await getQuotaInfo(auth, () => persist("automatic"));
       perf.mark("get-quota-info", {

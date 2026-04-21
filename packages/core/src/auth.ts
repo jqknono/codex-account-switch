@@ -185,10 +185,20 @@ export function getTokenExpiry(auth: AuthFile): Date | null {
   return getJwtExpiry(auth.tokens?.access_token);
 }
 
+export function getRefreshTokenExpiry(auth: AuthFile): Date | null {
+  return getJwtExpiry(auth.tokens?.refresh_token);
+}
+
 export function isTokenExpired(auth: AuthFile): boolean {
   const expiry = getTokenExpiry(auth);
   if (!expiry) return true;
   return expiry.getTime() < Date.now();
+}
+
+export function isRefreshTokenExpiringWithin(auth: AuthFile, thresholdMs: number): boolean {
+  const expiry = getRefreshTokenExpiry(auth);
+  if (!expiry) return false;
+  return expiry.getTime() - Date.now() < thresholdMs;
 }
 
 export function formatTokenExpiry(auth: AuthFile): string {

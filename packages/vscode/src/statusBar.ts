@@ -190,7 +190,9 @@ export class StatusBarManager implements vscode.Disposable {
       }
 
       this.statusBarItem.text = `$(loading~spin) ${name} [${selection.source}]`;
-      const result = await querySavedAccountQuota(account, options.queryContext);
+      const result = await querySavedAccountQuota(account, options.queryContext, {
+        reason: options.reason,
+      });
       perf.mark("query-saved-account-quota", {
         resultKind: result.kind,
       });

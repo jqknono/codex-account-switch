@@ -1348,7 +1348,7 @@ export function registerCommands(
               command: "codex-account-switch.refreshList",
             },
             {
-              label: "Refresh Token and Quota",
+              label: "Refresh Token",
               description: item ? `Refresh "${item.account.name}" token and quota` : "Select an account to refresh",
               command: "codex-account-switch.refreshToken",
             },

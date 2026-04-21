@@ -2,7 +2,7 @@
   "name": "codex-account-switch-vscode",
   "displayName": "Codex Account Switch",
   "description": "Codex Account Switch - VS Code extension",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "publisher": "techfetch-dev",
   "repository": {
     "type": "git",
@@ -115,7 +115,7 @@
       },
       {
         "command": "codex-account-switch.refreshToken",
-        "title": "Refresh Token and Quota",
+        "title": "Refresh Token",
         "category": "Codex Account Switch",
         "icon": "$(refresh)"
       },

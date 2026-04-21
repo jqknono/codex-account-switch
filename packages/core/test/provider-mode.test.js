@@ -135,6 +135,43 @@ test("refresh token status ignores legacy refresh expiry fields", () => {
   assert.equal(core.formatRefreshTokenStatus(auth), "available");
 });
 
+test("refresh token expiry decodes JWT refresh tokens only", () => {
+  const expectedSeconds = Math.floor(Date.now() / 1000) + 4 * 24 * 3600;
+  const auth = {
+    tokens: {
+      refresh_token: jwt({ exp: expectedSeconds }),
+    },
+  };
+
+  const expiry = core.getRefreshTokenExpiry(auth);
+
+  assert.ok(expiry instanceof Date);
+  assert.equal(expiry?.toISOString(), new Date(expectedSeconds * 1000).toISOString());
+  assert.equal(core.getRefreshTokenExpiry({ tokens: { refresh_token: "rt-opaque-token" } }), null);
+});
+
+test("refresh token threshold checks only refresh tokens with known expiry", () => {
+  const withinThreshold = {
+    tokens: {
+      refresh_token: jwt({ exp: Math.floor(Date.now() / 1000) + 4 * 24 * 3600 }),
+    },
+  };
+  const beyondThreshold = {
+    tokens: {
+      refresh_token: jwt({ exp: Math.floor(Date.now() / 1000) + 6 * 24 * 3600 }),
+    },
+  };
+  const unknownExpiry = {
+    tokens: {
+      refresh_token: "rt-opaque-token",
+    },
+  };
+
+  assert.equal(core.isRefreshTokenExpiringWithin(withinThreshold, 5 * 24 * 3600 * 1000), true);
+  assert.equal(core.isRefreshTokenExpiringWithin(beyondThreshold, 5 * 24 * 3600 * 1000), false);
+  assert.equal(core.isRefreshTokenExpiringWithin(unknownExpiry, 5 * 24 * 3600 * 1000), false);
+});
+
 test("deserializeSavedValue accepts encrypted envelopes with visible sync metadata", () => {
   core.setSavedAuthPassphrase("sync-metadata-passphrase");
   const envelope = core.serializeSavedValue(

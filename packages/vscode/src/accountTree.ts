@@ -414,7 +414,9 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
               slowThresholdMs: SLOW_ACCOUNT_THRESHOLD_MS,
             },
           );
-          const result = await querySavedAccountQuota(account, options.queryContext);
+          const result = await querySavedAccountQuota(account, options.queryContext, {
+            reason: options.reason,
+          });
           const durationMs = Date.now() - startedAt;
           accountDurations.push(durationMs);
           slowestAccounts.push({
