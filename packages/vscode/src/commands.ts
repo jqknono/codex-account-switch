@@ -1401,10 +1401,6 @@ export function registerCommands(
           return;
         }
         perf.mark("ensure-saved-auth-passphrase");
-        refreshCoordinator.prepareConfigurationRefresh({
-          targetIds: [`cloud:${account.name}`],
-        });
-        perf.mark("prepare-configuration-refresh");
         const result = await moveSavedAccountEntry(account, "cloud");
         perf.mark("move-saved-account-entry", {
           success: result.success,
@@ -1416,7 +1412,6 @@ export function registerCommands(
             message: result.message,
             conflict: result.conflict ?? false,
           });
-          refreshCoordinator.clearPreparedConfigurationRefresh();
           if (result.conflict) {
             await showSyncConflictWarning(result.message);
           } else {
@@ -1428,7 +1423,7 @@ export function registerCommands(
           account: account.name,
         });
         vscode.window.showInformationMessage(`✓ ${result.message}`);
-        refreshViews(refreshCoordinator);
+        refreshAll(refreshCoordinator, [`cloud:${account.name}`]);
       });
     }),
 
@@ -1449,10 +1444,6 @@ export function registerCommands(
           account: account.name,
           source: account.source,
         });
-        refreshCoordinator.prepareConfigurationRefresh({
-          targetIds: [`local:${account.name}`],
-        });
-        perf.mark("prepare-configuration-refresh");
         const result = await moveSavedAccountEntry(account, "local");
         perf.mark("move-saved-account-entry", {
           success: result.success,
@@ -1464,7 +1455,6 @@ export function registerCommands(
             message: result.message,
             conflict: result.conflict ?? false,
           });
-          refreshCoordinator.clearPreparedConfigurationRefresh();
           if (result.conflict) {
             await showSyncConflictWarning(result.message);
           } else {
@@ -1476,7 +1466,7 @@ export function registerCommands(
           account: account.name,
         });
         vscode.window.showInformationMessage(`✓ ${result.message}`);
-        refreshViews(refreshCoordinator);
+        refreshAll(refreshCoordinator, [`local:${account.name}`]);
       });
     }),
 
@@ -1498,7 +1488,6 @@ export function registerCommands(
         vscode.window.showWarningMessage("Cloud storage requires a local storage password.");
         return;
       }
-      refreshCoordinator.prepareConfigurationRefresh({ skipQuota: true });
       const result = await moveSavedProviderEntry(provider, "cloud");
       if (!result.success) {
         logCommandWarn("move-provider-to-cloud", "failed", {
@@ -1506,7 +1495,6 @@ export function registerCommands(
           message: result.message,
           conflict: result.conflict ?? false,
         });
-        refreshCoordinator.clearPreparedConfigurationRefresh();
         if (result.conflict) {
           await showSyncConflictWarning(result.message);
         } else {
@@ -1532,7 +1520,6 @@ export function registerCommands(
         provider: provider.name,
         source: provider.source,
       });
-      refreshCoordinator.prepareConfigurationRefresh({ skipQuota: true });
       const result = await moveSavedProviderEntry(provider, "local");
       if (!result.success) {
         logCommandWarn("move-provider-to-local", "failed", {
@@ -1540,7 +1527,6 @@ export function registerCommands(
           message: result.message,
           conflict: result.conflict ?? false,
         });
-        refreshCoordinator.clearPreparedConfigurationRefresh();
         if (result.conflict) {
           await showSyncConflictWarning(result.message);
         } else {

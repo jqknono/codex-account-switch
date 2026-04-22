@@ -39,7 +39,7 @@ export async function activate(context: vscode.ExtensionContext) {
   });
   applyNamedAuthDirSetting();
   applyDiagnosticLogSettings();
-  initializeSavedEntries(context);
+  await initializeSavedEntries(context);
   await restoreSavedAuthPassphrase(context, {
     promptIfMissing: true,
     promptForLockedStorage: hasEncryptedSyncedEntries(),
@@ -61,13 +61,11 @@ export async function activate(context: vscode.ExtensionContext) {
   const configListener = vscode.workspace.onDidChangeConfiguration((e) => {
     if (
       e.affectsConfiguration("codex-account-switch.authDirectory")
-      || e.affectsConfiguration("codex-account-switch.syncedStorage")
       || e.affectsConfiguration("codex-account-switch.defaultSaveTarget")
       || e.affectsConfiguration("codex-account-switch.detailedPerformanceLogging")
     ) {
       logInfo(LOG_PREFIX, "configuration-changed", {
         authDirectory: e.affectsConfiguration("codex-account-switch.authDirectory"),
-        syncedStorage: e.affectsConfiguration("codex-account-switch.syncedStorage"),
         defaultSaveTarget: e.affectsConfiguration("codex-account-switch.defaultSaveTarget"),
         detailedPerformanceLogging: e.affectsConfiguration("codex-account-switch.detailedPerformanceLogging"),
       });
@@ -78,18 +76,6 @@ export async function activate(context: vscode.ExtensionContext) {
         promptForLockedStorage: hasEncryptedSyncedEntries(),
       });
       refreshCoordinator.refreshViews("config-change");
-
-      if (e.affectsConfiguration("codex-account-switch.syncedStorage")) {
-        const prepared = refreshCoordinator.consumePreparedConfigurationRefresh();
-        if (prepared?.skipQuota) {
-          return;
-        }
-        refreshCoordinator.scheduleQuotaRefresh({
-          reason: "config-change",
-          targetIds: prepared?.targetIds,
-        });
-        return;
-      }
 
       refreshCoordinator.scheduleQuotaRefresh({
         reason: "config-change",

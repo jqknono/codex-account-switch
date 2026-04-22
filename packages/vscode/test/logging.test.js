@@ -6,6 +6,7 @@ const os = require("node:os");
 const path = require("node:path");
 const Module = require("node:module");
 const core = require("@codex-account-switch/core");
+const SYNCED_CLOUD_STATE_KEY = "codex-account-switch.syncedCloudState.v1";
 
 function createDisposable(fn = () => {}) {
   return {
@@ -17,18 +18,21 @@ function createVscodeMock() {
   const registeredCommands = new Map();
   const configurationListeners = new Set();
   const createdChannels = [];
-  const config = {
-    authDirectory: "",
-    showStatusBar: false,
-    quotaRefreshInterval: 300,
-    detailedPerformanceLogging: false,
-    syncedStorage: {
+  const globalStateValues = new Map([
+    [SYNCED_CLOUD_STATE_KEY, {
       version: 1,
       accounts: {},
       providers: {},
       devices: [],
       autoRefreshDeviceName: null,
-    },
+    }],
+  ]);
+  const config = {
+    authDirectory: "",
+    showStatusBar: false,
+    quotaRefreshInterval: 300,
+    detailedPerformanceLogging: false,
+    syncedStorage: globalStateValues.get(SYNCED_CLOUD_STATE_KEY),
   };
 
   class EventEmitter {
@@ -222,10 +226,19 @@ function createVscodeMock() {
       async delete() {},
     },
     globalState: {
-      get() {
-        return undefined;
+      get(key) {
+        return globalStateValues.get(key);
       },
-      async update() {},
+      setKeysForSync(keys) {
+        this.syncedKeys = [...keys];
+      },
+      async update(key, value) {
+        if (value === undefined) {
+          globalStateValues.delete(key);
+        } else {
+          globalStateValues.set(key, value);
+        }
+      },
     },
   };
 }

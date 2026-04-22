@@ -42,12 +42,14 @@ import {
   writeProviderProfile,
   writeSavedAuthFile,
 } from "@codex-account-switch/core";
-import { startPerformanceLog } from "./log";
+import { logWarn, startPerformanceLog } from "./log";
 
 export type StorageSource = "local" | "cloud";
 export type SaveTarget = StorageSource;
 const LOG_PREFIX = "[codex-account-switch:vscode:savedEntries]";
 const TIMER_REFRESH_TOKEN_THRESHOLD_MS = 5 * 24 * 3600 * 1000;
+const SYNCED_CLOUD_STATE_KEY = "codex-account-switch.syncedCloudState.v1";
+const SYNCED_CLOUD_MIGRATION_KEY = "codex-account-switch.syncedCloudStateMigration.v1";
 
 export interface SavedAccountInfo {
   id: string;
@@ -142,6 +144,12 @@ interface CurrentSelectionMarker {
   updatedAt?: string | null;
 }
 
+interface SyncedCloudMigrationState {
+  completedAt: string;
+  migratedFromLegacy: boolean;
+  legacyCleanupSucceeded: boolean;
+}
+
 const SYNCED_STORAGE_SETTING = "syncedStorage";
 const DEFAULT_TARGET_SETTING = "defaultSaveTarget";
 const CLOUD_TOKEN_AUTO_UPDATE_SETTING = "cloudTokenAutoUpdate";
@@ -168,6 +176,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function normalizeSyncedStorage(raw: unknown): SyncedStorageData {
+  if (!isRecord(raw) || raw.version !== 1) {
+    return getDefaultSyncedStorage();
+  }
+
+  return {
+    version: 1,
+    accounts: isRecord(raw.accounts) ? clone(raw.accounts) : {},
+    providers: isRecord(raw.providers) ? clone(raw.providers) : {},
+    devices: normalizeDeviceNames(raw.devices),
+    autoRefreshDeviceName: getNormalizedAutoRefreshDeviceName(raw.autoRefreshDeviceName),
+  };
 }
 
 function getSyncMetadata(value: unknown): SavedStorageSyncMetadata {
@@ -309,10 +331,6 @@ async function updateMarkerSyncMetadata(
   });
 }
 
-export function initializeSavedEntries(context: vscode.ExtensionContext): void {
-  extensionContext = context;
-}
-
 function getDefaultSyncedStorage(): SyncedStorageData {
   return {
     version: 1,
@@ -323,27 +341,89 @@ function getDefaultSyncedStorage(): SyncedStorageData {
   };
 }
 
-function readSyncedStorage(): SyncedStorageData {
-  const raw = getConfiguration().get<unknown>(SYNCED_STORAGE_SETTING, getDefaultSyncedStorage());
-  if (!isRecord(raw) || raw.version !== 1) {
-    return getDefaultSyncedStorage();
-  }
+function readLegacySyncedStorage(): SyncedStorageData {
+  return normalizeSyncedStorage(getConfiguration().get<unknown>(SYNCED_STORAGE_SETTING, getDefaultSyncedStorage()));
+}
 
-  return {
-    version: 1,
-    accounts: isRecord(raw.accounts) ? clone(raw.accounts) : {},
-    providers: isRecord(raw.providers) ? clone(raw.providers) : {},
-    devices: normalizeDeviceNames(raw.devices),
-    autoRefreshDeviceName: getNormalizedAutoRefreshDeviceName(raw.autoRefreshDeviceName),
-  };
+function getSyncedCloudMigrationState(): SyncedCloudMigrationState | null {
+  return requireContext().globalState.get<SyncedCloudMigrationState>(SYNCED_CLOUD_MIGRATION_KEY) ?? null;
+}
+
+async function setSyncedCloudMigrationState(state: SyncedCloudMigrationState): Promise<void> {
+  await requireContext().globalState.update(SYNCED_CLOUD_MIGRATION_KEY, state);
+}
+
+function readSyncedStorage(): SyncedStorageData {
+  const raw = requireContext().globalState.get<unknown>(SYNCED_CLOUD_STATE_KEY);
+  return normalizeSyncedStorage(raw);
 }
 
 async function writeSyncedStorage(data: SyncedStorageData): Promise<void> {
-  await getConfiguration().update(SYNCED_STORAGE_SETTING, data, vscode.ConfigurationTarget.Global);
+  await requireContext().globalState.update(SYNCED_CLOUD_STATE_KEY, clone(data));
+}
+
+async function clearLegacySyncedStorage(): Promise<void> {
+  await getConfiguration().update(SYNCED_STORAGE_SETTING, undefined, vscode.ConfigurationTarget.Global);
+}
+
+export async function initializeSavedEntries(context: vscode.ExtensionContext): Promise<void> {
+  extensionContext = context;
+  context.globalState.setKeysForSync([SYNCED_CLOUD_STATE_KEY]);
+
+  const existingGlobalState = context.globalState.get<unknown>(SYNCED_CLOUD_STATE_KEY);
+  if (existingGlobalState !== undefined) {
+    if (!getSyncedCloudMigrationState()) {
+      await setSyncedCloudMigrationState({
+        completedAt: new Date().toISOString(),
+        migratedFromLegacy: false,
+        legacyCleanupSucceeded: true,
+      });
+    }
+    return;
+  }
+
+  if (getSyncedCloudMigrationState()) {
+    return;
+  }
+
+  const legacy = readLegacySyncedStorage();
+  if (!hasSyncedDeviceState(legacy)) {
+    await setSyncedCloudMigrationState({
+      completedAt: new Date().toISOString(),
+      migratedFromLegacy: false,
+      legacyCleanupSucceeded: true,
+    });
+    return;
+  }
+
+  await writeSyncedStorage(legacy);
+
+  let legacyCleanupSucceeded = false;
+  try {
+    await clearLegacySyncedStorage();
+    legacyCleanupSucceeded = true;
+  } catch (error) {
+    logWarn(LOG_PREFIX, "legacy-synced-storage-cleanup-failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    void vscode.window.showWarningMessage(
+      "Synced cloud storage was migrated to extension state, but clearing the legacy User Settings entry failed. The new synced storage is active."
+    );
+  }
+
+  await setSyncedCloudMigrationState({
+    completedAt: new Date().toISOString(),
+    migratedFromLegacy: true,
+    legacyCleanupSucceeded,
+  });
 }
 
 export function getSyncedStorageSettingKey(): string {
   return SYNCED_STORAGE_SETTING;
+}
+
+export function getSyncedCloudStateKey(): string {
+  return SYNCED_CLOUD_STATE_KEY;
 }
 
 export function hasEncryptedSyncedEntries(): boolean {
