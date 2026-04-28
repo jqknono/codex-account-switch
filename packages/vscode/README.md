@@ -12,6 +12,7 @@ Codex Account Switch gives you a dedicated Activity Bar view for saved accounts,
 - Switch the active account with one click
 - Refresh expired tokens for saved accounts
 - Inspect current quota usage in the account list and status bar
+- Refresh the current account quota in the background on a configurable interval
 - Unlock locked saved storage after entering the local storage password
 - Import and export account backups as JSON
 - Prompt to reload the window after account changes when the Codex extension needs to re-read auth state
@@ -40,7 +41,7 @@ Available commands:
 
 | Setting | Default | Description |
 | --- | --- | --- |
-| `codex-account-switch.quotaRefreshInterval` | `300` | Automatic quota refresh interval for the account list and status bar, in seconds |
+| `codex-account-switch.quotaRefreshInterval` | `300` | Automatic background quota refresh interval for the current account, in seconds |
 | `codex-account-switch.showStatusBar` | `true` | Show the current account quota in the status bar |
 | `codex-account-switch.reloadWindowAfterSwitch` | `prompt` | How window reload should be handled after switching accounts |
 | `codex-account-switch.authDirectory` | `""` | Directory used to save and load `auth_{name}.json`; empty uses the default Codex config directory |

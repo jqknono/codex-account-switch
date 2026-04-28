@@ -28,6 +28,8 @@ interface ScheduledQuotaRefresh {
 }
 
 export class RefreshCoordinator implements vscode.Disposable {
+  private autoRefreshTimer: ReturnType<typeof setInterval> | undefined;
+  private configListener: vscode.Disposable | undefined;
   private scheduledTimer: ReturnType<typeof setTimeout> | undefined;
   private runningRefresh: Promise<void> | null = null;
   private pendingFullRefresh = false;
@@ -41,6 +43,17 @@ export class RefreshCoordinator implements vscode.Disposable {
     private readonly providerTree: ProviderTreeProvider,
     private readonly statusBar: StatusBarManager,
   ) {}
+
+  startAutoRefresh(context: vscode.ExtensionContext): void {
+    this.restartAutoRefreshTimer();
+    this.configListener?.dispose();
+    this.configListener = vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration("codex-account-switch.quotaRefreshInterval")) {
+        this.restartAutoRefreshTimer();
+      }
+    });
+    context.subscriptions.push(this.configListener);
+  }
 
   refreshViews(reason: RefreshReason = "manual"): void {
     const perf = startPerformanceLog(LOG_PREFIX, "refreshCoordinator.refreshViews", {
@@ -105,10 +118,34 @@ export class RefreshCoordinator implements vscode.Disposable {
   }
 
   dispose(): void {
+    if (this.autoRefreshTimer) {
+      clearInterval(this.autoRefreshTimer);
+      this.autoRefreshTimer = undefined;
+    }
     if (this.scheduledTimer) {
       clearTimeout(this.scheduledTimer);
       this.scheduledTimer = undefined;
     }
+    this.configListener?.dispose();
+    this.configListener = undefined;
+  }
+
+  private restartAutoRefreshTimer(): void {
+    if (this.autoRefreshTimer) {
+      clearInterval(this.autoRefreshTimer);
+      this.autoRefreshTimer = undefined;
+    }
+
+    const intervalSec = vscode.workspace.getConfiguration("codex-account-switch").get<number>("quotaRefreshInterval", 300);
+    if (!Number.isFinite(intervalSec) || intervalSec <= 0) {
+      return;
+    }
+
+    this.autoRefreshTimer = setInterval(() => {
+      this.scheduleQuotaRefresh({
+        reason: "timer",
+      });
+    }, intervalSec * 1000);
   }
 
   private enqueueQuotaRefresh(request: ScheduledQuotaRefresh & { targetIds?: Iterable<string> }): void {
@@ -245,7 +282,7 @@ export class RefreshCoordinator implements vscode.Disposable {
       })
       .finally(() => {
         this.runningRefresh = null;
-        if (this.pendingFullRefresh || this.pendingTargetIds.size > 0) {
+        if (this.pendingFullRefresh || this.pendingAutoRefresh || this.pendingTargetIds.size > 0) {
           this.ensureScheduled();
         }
       });

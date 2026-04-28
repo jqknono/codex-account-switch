@@ -132,6 +132,19 @@ test("storage target settings are contributed", () => {
   );
 });
 
+test("quota refresh setting defaults to 300 seconds for current account background refresh", () => {
+  const setting =
+    manifest.contributes.configuration.properties[
+      "codex-account-switch.quotaRefreshInterval"
+    ];
+
+  assert.equal(setting?.type, "number");
+  assert.equal(setting?.default, 300);
+  assert.equal(setting?.minimum, 60);
+  assert.match(setting?.description ?? "", /current account/i);
+  assert.match(setting?.description ?? "", /background/i);
+});
+
 test("storage migration commands are contributed", () => {
   const byId = new Map(commands.map((command) => [command.command, command]));
 

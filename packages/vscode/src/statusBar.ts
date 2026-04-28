@@ -44,7 +44,6 @@ function getPreferredStatusWindow(info: QuotaInfo): WindowInfo | null {
 
 export class StatusBarManager implements vscode.Disposable {
   private statusBarItem: vscode.StatusBarItem;
-  private timer: ReturnType<typeof setInterval> | undefined;
   private configListener: vscode.Disposable | undefined;
 
   constructor() {
@@ -69,16 +68,10 @@ export class StatusBarManager implements vscode.Disposable {
     }
   }
 
-  startAutoRefresh(context: vscode.ExtensionContext) {
-    this.restartTimer();
-
+  startConfigurationSync(context: vscode.ExtensionContext) {
     this.configListener = vscode.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration("codex-account-switch.quotaRefreshInterval")) {
-        this.restartTimer();
-      }
       if (e.affectsConfiguration("codex-account-switch.showStatusBar")) {
         this.updateVisibility();
-        this.restartTimer();
         if (this.isVisibleEnabled()) {
           void this.refreshNow({
             snapshot: createSavedEntriesSnapshot(),
@@ -92,25 +85,6 @@ export class StatusBarManager implements vscode.Disposable {
       }
     });
     context.subscriptions.push(this.configListener);
-  }
-
-  private restartTimer() {
-    if (this.timer) {
-      clearInterval(this.timer);
-    }
-    if (!this.isVisibleEnabled()) {
-      this.timer = undefined;
-      return;
-    }
-    const config = vscode.workspace.getConfiguration("codex-account-switch");
-    const intervalSec = config.get<number>("quotaRefreshInterval", 300);
-    this.timer = setInterval(() => {
-      void this.refreshNow().catch((error) => {
-        logWarn(LOG_PREFIX, "timer-refresh-failed", {
-          error: error instanceof Error ? error.message : String(error),
-        });
-      });
-    }, intervalSec * 1000);
   }
 
   async refreshNow(options: StatusBarRefreshOptions = {}) {
@@ -256,9 +230,6 @@ export class StatusBarManager implements vscode.Disposable {
   }
 
   dispose() {
-    if (this.timer) {
-      clearInterval(this.timer);
-    }
     this.configListener?.dispose();
     this.statusBarItem.dispose();
   }

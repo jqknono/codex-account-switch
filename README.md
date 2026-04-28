@@ -69,13 +69,14 @@ Activity Bar account view:
 - Add, remove, switch, import, and export accounts
 - Mode-aware status bar display for the current account or provider mode
 - Token refresh actions for saved accounts
+- Background quota refresh for the current account on a configurable interval
 - Optional prompt or automatic window reload after switching accounts so the Codex extension can re-read `~/.codex/auth.json`
 
 ### Settings
 
 | Setting | Default | Description |
 |---|---|---|
-| `codex-account-switch.quotaRefreshInterval` | `300` | Automatic quota refresh interval for the account list and status bar, in seconds |
+| `codex-account-switch.quotaRefreshInterval` | `300` | Automatic background quota refresh interval for the current account, in seconds |
 | `codex-account-switch.showStatusBar` | `true` | Show the current account quota in the status bar |
 | `codex-account-switch.reloadWindowAfterSwitch` | `prompt` | Whether to prompt or automatically reload the window after switching accounts |
 | `codex-account-switch.authDirectory` | `""` | Directory used to save and load `auth_{name}.json`; empty means the default Codex config directory |

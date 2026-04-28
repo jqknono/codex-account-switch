@@ -95,8 +95,8 @@ export async function activate(context: vscode.ExtensionContext) {
 
   registerCommands(context, accountTree, providerTree, statusBarManager, accountTreeView, refreshCoordinator);
 
-  accountTree.startAutoRefresh(context);
-  statusBarManager.startAutoRefresh(context);
+  statusBarManager.startConfigurationSync(context);
+  refreshCoordinator.startAutoRefresh(context);
   refreshCoordinator.refreshViews("activate");
   refreshCoordinator.scheduleQuotaRefresh({
     reason: "activate",

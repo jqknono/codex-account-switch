@@ -366,7 +366,7 @@
           "type": "number",
           "default": 300,
           "minimum": 60,
-          "description": "Automatic quota refresh interval for the account list and status bar, in seconds"
+          "description": "Automatic background quota refresh interval for the current account, in seconds"
         },
         "codex-account-switch.showStatusBar": {
           "type": "boolean",

@@ -9,7 +9,6 @@ import {
 import { logInfo, logWarn, startPerformanceLog } from "./log";
 import {
   createSavedEntriesSnapshot,
-  getSavedCurrentSelection,
   listSavedAccounts,
   querySavedAccountQuota,
   SavedAccountInfo,
@@ -299,8 +298,6 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
   private _onDidChangeTreeData = new vscode.EventEmitter<AccountTreeNode | undefined>();
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
 
-  private timer: ReturnType<typeof setInterval> | undefined;
-  private configListener: vscode.Disposable | undefined;
   private quotaState = new Map<string, QuotaState>();
   private rootItems: AccountGroupItem[] = [];
   private refreshVersion = 0;
@@ -319,17 +316,6 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
       perf.fail(error);
       throw error;
     }
-  }
-
-  startAutoRefresh(context: vscode.ExtensionContext) {
-    this.restartTimer();
-
-    this.configListener = vscode.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration("codex-account-switch.quotaRefreshInterval")) {
-        this.restartTimer();
-      }
-    });
-    context.subscriptions.push(this.configListener);
   }
 
   async refreshQuota(targetIds?: Iterable<string>, options: AccountTreeRefreshOptions = {}): Promise<void> {
@@ -569,39 +555,7 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
     return undefined;
   }
 
-  dispose() {
-    if (this.timer) {
-      clearInterval(this.timer);
-    }
-    this.configListener?.dispose();
-  }
-
-  private restartTimer() {
-    if (this.timer) {
-      clearInterval(this.timer);
-    }
-
-    const config = vscode.workspace.getConfiguration("codex-account-switch");
-    const intervalSec = config.get<number>("quotaRefreshInterval", 300);
-    this.timer = setInterval(() => {
-      const snapshot = createSavedEntriesSnapshot();
-      const selection = getSavedCurrentSelection(snapshot);
-      const targetIds = selection.kind === "account"
-        ? [snapshot.bySourceAndName.get(`${selection.source}:${selection.name}`)?.id].filter((id): id is string => Boolean(id))
-        : undefined;
-      if (!targetIds || targetIds.length === 0) {
-        return;
-      }
-      void this.refreshQuota(targetIds, {
-        snapshot,
-        reason: "timer",
-      }).catch((error) => {
-        logWarn(LOG_PREFIX, "timer-refresh-failed", {
-          error: error instanceof Error ? error.message : String(error),
-        });
-      });
-    }, intervalSec * 1000);
-  }
+  dispose() {}
 
   private pruneQuotaState(validIds = listSavedAccounts().map((account) => account.id)) {
     const validIdSet = new Set(validIds);
