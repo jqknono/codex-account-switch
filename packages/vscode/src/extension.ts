@@ -12,7 +12,11 @@ import { StatusBarManager } from "./statusBar";
 import { registerCommands } from "./commands";
 import { disposeLogging, initializeLogging, logInfo, writeRawLog } from "./log";
 import { restoreSavedAuthPassphrase } from "./storagePassword";
-import { hasEncryptedSyncedEntries, initializeSavedEntries } from "./savedEntries";
+import {
+  ensureCurrentDeviceRegistered,
+  hasEncryptedSyncedEntries,
+  initializeSavedEntries,
+} from "./savedEntries";
 
 const LOG_PREFIX = "[codex-account-switch:vscode:extension]";
 
@@ -40,6 +44,7 @@ export async function activate(context: vscode.ExtensionContext) {
   applyNamedAuthDirSetting();
   applyDiagnosticLogSettings();
   await initializeSavedEntries(context);
+  await ensureCurrentDeviceRegistered({ onActivate: true });
   await restoreSavedAuthPassphrase(context, {
     promptIfMissing: true,
     promptForLockedStorage: hasEncryptedSyncedEntries(),

@@ -22,7 +22,7 @@ import {
   writeCurrentAuth,
   writeSavedAuthFile,
 } from "./auth";
-import { refreshAndSave } from "./refresh";
+import { applyRefreshResponse, refreshAccessToken, refreshAndSave } from "./refresh";
 import { getQuotaInfo, QuotaPerformanceOptions } from "./quota";
 import { AuthFile, AccountMeta, QuotaInfo, ExportData, CurrentSelection } from "./types";
 import { clearActiveModelProvider, getActiveModelProvider } from "./config";
@@ -56,6 +56,20 @@ export type QuotaQueryResult =
       modeName: string;
     };
 
+export interface SavedAccountPersistContext {
+  auth: AuthFile;
+  authPath: string | null;
+  displayName: string;
+  shouldSyncCurrentAuth: boolean;
+}
+
+export interface SavedAccountOperationOptions {
+  syncCurrentAuthBeforeRead?: boolean;
+  persistUpdatedAuth?: (context: SavedAccountPersistContext) => void | Promise<void>;
+}
+
+export interface AccountQuotaQueryOptions extends QuotaPerformanceOptions, SavedAccountOperationOptions {}
+
 const ACCOUNT_LOCK_TIMEOUT_MS = 30 * 1000;
 const ACCOUNT_LOCK_RETRY_MS = 100;
 const STALE_ACCOUNT_LOCK_MS = 5 * 60 * 1000;
@@ -71,6 +85,27 @@ function getSavedAuthReadErrorMessage(result: SavedStorageReadResult<AuthFile>, 
 
 function readNamedAuthResult(name: string): SavedStorageReadResult<AuthFile> {
   return readSavedAuthFileResult(getNamedAuthPath(name));
+}
+
+function resolveSavedAccountAuth(
+  name: string,
+  shouldSyncCurrentAuth: boolean,
+  options: SavedAccountOperationOptions = {},
+): {
+  auth: AuthFile | null;
+  savedResult: SavedStorageReadResult<AuthFile> | null;
+} {
+  const useCurrentAuth = shouldSyncCurrentAuth && options.syncCurrentAuthBeforeRead === false;
+  const currentAuth = useCurrentAuth ? readCurrentAuth() : null;
+  const synced = options.syncCurrentAuthBeforeRead === false ? null : syncCurrentAuthToSavedAccount();
+  const savedResult = currentAuth || synced?.name === name ? null : readNamedAuthResult(name);
+  const auth = currentAuth
+    ?? (synced?.name === name ? synced.auth : savedResult?.status === "ok" ? savedResult.value : null);
+
+  return {
+    auth,
+    savedResult,
+  };
 }
 
 function toAccountInfo(name: string, isCurrent: boolean): AccountInfo {
@@ -291,7 +326,8 @@ async function withAccountLock<T>(auth: AuthFile, operation: string, fn: () => P
 }
 
 function resolveQuotaTarget(
-  name?: string
+  name?: string,
+  options: SavedAccountOperationOptions = {},
 ):
   | {
       kind: "ok";
@@ -314,9 +350,8 @@ function resolveQuotaTarget(
     if (!fs.existsSync(authPath)) {
       return { kind: "not_found", message: `Account "${name}" does not exist.` };
     }
-    const synced = syncCurrentAuthToSavedAccount();
-    const savedResult = synced?.name === name ? null : readNamedAuthResult(name);
-    const auth = synced?.name === name ? synced.auth : savedResult?.status === "ok" ? savedResult.value : null;
+    const shouldSyncCurrentAuth = detectCurrentName() === name;
+    const { auth, savedResult } = resolveSavedAccountAuth(name, shouldSyncCurrentAuth, options);
     if (!auth) {
       return {
         kind: "not_found",
@@ -328,7 +363,7 @@ function resolveQuotaTarget(
       auth,
       authPath,
       displayName: name,
-      shouldSyncCurrentAuth: detectCurrentName() === name,
+      shouldSyncCurrentAuth,
     };
   }
 
@@ -343,9 +378,7 @@ function resolveQuotaTarget(
 
   if (selection.kind === "account") {
     const authPath = getNamedAuthPath(selection.name);
-    const synced = syncCurrentAuthToSavedAccount();
-    const savedResult = synced?.name === selection.name ? null : readNamedAuthResult(selection.name);
-    const auth = synced?.name === selection.name ? synced.auth : savedResult?.status === "ok" ? savedResult.value : null;
+    const { auth, savedResult } = resolveSavedAccountAuth(selection.name, true, options);
     if (!auth) {
       return {
         kind: "not_found",
@@ -376,7 +409,8 @@ function resolveQuotaTarget(
 }
 
 function resolveRefreshTarget(
-  name?: string
+  name?: string,
+  options: SavedAccountOperationOptions = {},
 ):
   | {
       kind: "ok";
@@ -396,17 +430,21 @@ function resolveRefreshTarget(
     if (!fs.existsSync(authPath)) {
       return { kind: "error", success: false, message: `Account "${name}" does not exist.` };
     }
-    syncCurrentAuthToSavedAccount();
-    const savedResult = readNamedAuthResult(name);
-    if (savedResult.status !== "ok") {
-      return { kind: "error", success: false, message: getSavedAuthReadErrorMessage(savedResult, name) };
+    const shouldSyncCurrentAuth = detectCurrentName() === name;
+    const { auth, savedResult } = resolveSavedAccountAuth(name, shouldSyncCurrentAuth, options);
+    if (!auth) {
+      return {
+        kind: "error",
+        success: false,
+        message: savedResult ? getSavedAuthReadErrorMessage(savedResult, name) : "No auth information found.",
+      };
     }
     return {
       kind: "ok",
-      auth: savedResult.value,
+      auth,
       authPath,
       displayName: name,
-      shouldSyncCurrentAuth: detectCurrentName() === name,
+      shouldSyncCurrentAuth,
     };
   }
 
@@ -422,18 +460,17 @@ function resolveRefreshTarget(
 
   if (selection.kind === "account") {
     const authPath = getNamedAuthPath(selection.name);
-    syncCurrentAuthToSavedAccount();
-    const savedResult = readNamedAuthResult(selection.name);
-    if (savedResult.status !== "ok") {
+    const { auth, savedResult } = resolveSavedAccountAuth(selection.name, true, options);
+    if (!auth) {
       return {
         kind: "error",
         success: false,
-        message: getSavedAuthReadErrorMessage(savedResult, selection.name),
+        message: savedResult ? getSavedAuthReadErrorMessage(savedResult, selection.name) : "No auth information found.",
       };
     }
     return {
       kind: "ok",
-      auth: savedResult.value,
+      auth,
       authPath,
       displayName: selection.name,
       shouldSyncCurrentAuth: true,
@@ -670,7 +707,7 @@ export function getCurrentAccount(): { name: string | null; meta: AccountMeta | 
   return { name: null, meta: null };
 }
 
-export async function queryQuota(name?: string, options: QuotaPerformanceOptions = {}): Promise<QuotaQueryResult> {
+export async function queryQuota(name?: string, options: AccountQuotaQueryOptions = {}): Promise<QuotaQueryResult> {
   const perf = createDiagnosticPerformanceTimer(
     "[codex-account-switch:core:accounts]",
     "queryQuota",
@@ -683,7 +720,7 @@ export async function queryQuota(name?: string, options: QuotaPerformanceOptions
     },
   );
   try {
-    const initialTarget = resolveQuotaTarget(name);
+    const initialTarget = resolveQuotaTarget(name, options);
     perf.mark("resolve-initial-target", {
       initialResultKind: initialTarget.kind,
     });
@@ -714,7 +751,7 @@ export async function queryQuota(name?: string, options: QuotaPerformanceOptions
       perf.mark("account-lock-acquired", {
         account: getAccountLockLabel(initialTarget.auth),
       });
-      const target = resolveQuotaTarget(name);
+      const target = resolveQuotaTarget(name, options);
       perf.mark("resolve-target-inside-lock", {
         targetKind: target.kind,
       });
@@ -724,15 +761,25 @@ export async function queryQuota(name?: string, options: QuotaPerformanceOptions
 
       const { auth, authPath, displayName, shouldSyncCurrentAuth } = target;
       const persistUpdatedAuth = async (): Promise<void> => {
-        if (authPath) {
-          writeSavedAuthFile(authPath, auth);
-        }
-        if (!authPath || shouldSyncCurrentAuth) {
-          writeCurrentAuth(auth);
+        if (options.persistUpdatedAuth) {
+          await options.persistUpdatedAuth({
+            auth,
+            authPath,
+            displayName,
+            shouldSyncCurrentAuth,
+          });
+        } else {
+          if (authPath) {
+            writeSavedAuthFile(authPath, auth);
+          }
+          if (!authPath || shouldSyncCurrentAuth) {
+            writeCurrentAuth(auth);
+          }
         }
         perf.mark("persist-updated-auth", {
           authPath: authPath ?? null,
           shouldSyncCurrentAuth,
+          customPersistence: Boolean(options.persistUpdatedAuth),
         });
       };
 
@@ -773,32 +820,51 @@ export async function queryQuota(name?: string, options: QuotaPerformanceOptions
   }
 }
 
-export async function refreshAccount(name?: string): Promise<{
+export async function refreshAccount(name?: string, options: SavedAccountOperationOptions = {}): Promise<{
   success: boolean;
   message: string;
   meta?: AccountMeta;
   lastRefresh?: string;
   unsupported?: boolean;
 }> {
-  const initialTarget = resolveRefreshTarget(name);
+  const initialTarget = resolveRefreshTarget(name, options);
   if (initialTarget.kind !== "ok") {
     return initialTarget;
   }
 
   try {
     return await withAccountLock(initialTarget.auth, "refreshAccount", async () => {
-      const target = resolveRefreshTarget(name);
+      const target = resolveRefreshTarget(name, options);
       if (target.kind !== "ok") {
         return target;
       }
 
-      const { authPath, displayName, shouldSyncCurrentAuth } = target;
+      const { auth, authPath, displayName, shouldSyncCurrentAuth } = target;
 
       try {
-        const updated = await refreshAndSave(authPath, { saved: authPath !== getCodexAuthPath() });
-
-        if (shouldSyncCurrentAuth) {
-          writeCurrentAuth(updated);
+        let updated: AuthFile;
+        if (options.persistUpdatedAuth || options.syncCurrentAuthBeforeRead === false) {
+          updated = auth;
+          const refreshed = await refreshAccessToken(updated);
+          applyRefreshResponse(updated, refreshed);
+          if (options.persistUpdatedAuth) {
+            await options.persistUpdatedAuth({
+              auth: updated,
+              authPath,
+              displayName,
+              shouldSyncCurrentAuth,
+            });
+          } else {
+            writeSavedAuthFile(authPath, updated);
+            if (shouldSyncCurrentAuth) {
+              writeCurrentAuth(updated);
+            }
+          }
+        } else {
+          updated = await refreshAndSave(authPath, { saved: authPath !== getCodexAuthPath() });
+          if (shouldSyncCurrentAuth) {
+            writeCurrentAuth(updated);
+          }
         }
 
         const meta = extractMeta(updated);

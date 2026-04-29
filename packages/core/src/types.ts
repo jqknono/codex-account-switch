@@ -10,7 +10,7 @@ export interface AuthFile {
   OPENAI_API_KEY?: string | null;
   tokens?: AuthTokens;
   last_refresh?: string;
-  last_cloud_token_sync?: string;
+  last_token_auto_update?: string;
   [key: string]: unknown;
 }
 

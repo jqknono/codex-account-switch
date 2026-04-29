@@ -8,7 +8,7 @@ import {
   getModeDisplayName,
   switchMode,
 } from "@codex-account-switch/core";
-import { AccountDetailItem, AccountTreeProvider, AccountTreeItem, AccountTreeNode } from "./accountTree";
+import { AccountDetailItem, AccountGroupItem, AccountTreeProvider, AccountTreeItem, AccountTreeNode } from "./accountTree";
 import { ProviderDetailItem, ProviderTreeItem, ProviderTreeProvider } from "./providerTree";
 import { StatusBarManager } from "./statusBar";
 import { buildCompletedProviderProfile } from "./providerProfile";
@@ -113,10 +113,11 @@ function refreshAll(
 async function refreshTokenAndQuota(
   accountTree: AccountTreeProvider,
   statusBar: StatusBarManager,
-  accountId?: string
+  accountIds?: Iterable<string>,
 ) {
+  const normalizedAccountIds = accountIds ? [...accountIds] : undefined;
   const perf = startPerformanceLog(LOG_PREFIX, "command-support:refreshTokenAndQuota", {
-    accountId: accountId ?? null,
+    accountCount: normalizedAccountIds?.length ?? null,
   });
   const snapshot = createSavedEntriesSnapshot();
   accountTree.refresh(snapshot);
@@ -126,7 +127,7 @@ async function refreshTokenAndQuota(
     sharedQueries: new Map(),
   };
   await Promise.all([
-    accountTree.refreshQuota(accountId ? [accountId] : undefined, {
+    accountTree.refreshQuota(normalizedAccountIds, {
       snapshot,
       queryContext,
       reason: "manual",
@@ -250,6 +251,21 @@ function formatProviderChoice(provider: SavedProviderInfo): string {
   return parts.join(" · ");
 }
 
+interface RefreshTokenSelection {
+  all: boolean;
+  accounts: SavedAccountInfo[];
+}
+
+interface RefreshTokenQuickPickItem extends vscode.QuickPickItem {
+  selection: RefreshTokenSelection;
+}
+
+interface RefreshTokenOperationOutcome {
+  account: SavedAccountInfo;
+  status: "success" | "conflict" | "unsupported" | "reloginRequired" | "failed" | "unavailable";
+  message: string;
+}
+
 function resolveAccountFromItem(item?: AccountTreeItem): SavedAccountInfo | undefined {
   const account = item?.account;
   if (!account) {
@@ -259,6 +275,13 @@ function resolveAccountFromItem(item?: AccountTreeItem): SavedAccountInfo | unde
     return account;
   }
   return getSavedAccountEntry(account.name, "local") ?? getSavedAccountEntry(account.name, "cloud") ?? undefined;
+}
+
+function getRefreshTargetAccountName(item?: unknown): string | undefined {
+  if (item instanceof AccountDetailItem) {
+    return item.parent?.account.name;
+  }
+  return resolveAccountFromItem(item as AccountTreeItem | undefined)?.name;
 }
 
 async function unlockStorageIfNeeded(
@@ -277,6 +300,9 @@ async function ensureAccountAvailable(
   context: vscode.ExtensionContext,
   refreshCoordinator: RefreshCoordinator,
   account: SavedAccountInfo,
+  options: {
+    silentUnavailable?: boolean;
+  } = {},
 ): Promise<SavedAccountInfo | undefined> {
   if (account.storageState === "ready") {
     return account;
@@ -296,7 +322,9 @@ async function ensureAccountAvailable(
     account = refreshed ?? account;
   }
 
-  vscode.window.showErrorMessage(account.storageMessage ?? `Saved account "${account.name}" is unavailable.`);
+  if (!options.silentUnavailable) {
+    vscode.window.showErrorMessage(account.storageMessage ?? `Saved account "${account.name}" is unavailable.`);
+  }
   return undefined;
 }
 
@@ -347,6 +375,47 @@ async function pickSavedAccount(item: AccountTreeItem | undefined, placeHolder: 
   );
 
   return picked?.account;
+}
+
+async function pickSavedAccountsForRefreshToken(
+  item: AccountTreeItem | undefined,
+  placeHolder: string,
+): Promise<RefreshTokenSelection | undefined> {
+  const existing = resolveAccountFromItem(item);
+  if (existing) {
+    return {
+      all: false,
+      accounts: [existing],
+    };
+  }
+
+  const accounts = listSavedAccounts();
+  if (accounts.length === 0) {
+    vscode.window.showWarningMessage("No saved accounts");
+    return undefined;
+  }
+
+  const items: RefreshTokenQuickPickItem[] = [
+    {
+      label: "All",
+      description: "Refresh token and quota for all accounts",
+      selection: {
+        all: true,
+        accounts,
+      },
+    },
+    ...accounts.map((account) => ({
+      label: account.isCurrent ? `$(pass-filled) ${account.name}` : account.name,
+      description: formatAccountChoice(account),
+      selection: {
+        all: false,
+        accounts: [account],
+      },
+    })),
+  ];
+
+  const picked = await vscode.window.showQuickPick(items, { placeHolder });
+  return picked?.selection;
 }
 
 async function pickSavedProvider(item: ProviderTreeItem | undefined, placeHolder: string): Promise<SavedProviderInfo | undefined> {
@@ -927,7 +996,10 @@ export function registerCommands(
                 : `✓ Account "${account.name}" was updated. Active selection stayed on "${restoreResult.restoredLabel}".`;
               vscode.window.showInformationMessage(savedMessage);
             } else {
-              await promptReloadWindowAfterAdd(account.name, result.meta?.email);
+              const savedMessage = result.meta?.email
+                ? `✓ Account "${account.name}" was updated (${result.meta.email}).`
+                : `✓ Account "${account.name}" was updated.`;
+              vscode.window.showInformationMessage(savedMessage);
             }
           } else {
             logCommandWarn("relogin-account", "save-failed", {
@@ -1240,97 +1312,265 @@ export function registerCommands(
       "codex-account-switch.refreshToken",
       async (item?: AccountTreeItem) => {
         await runTimedCommand("refreshToken", async (perf) => {
-          let account = await pickSavedAccount(item, "Select an account to refresh");
-          if (!account) return;
+          const selection = await pickSavedAccountsForRefreshToken(
+            item,
+            item ? "Select an account to refresh" : "Select an account or All to refresh",
+          );
+          if (!selection) return;
           perf.mark("pick-saved-account", {
-            account: account.name,
-            source: account.source,
-          });
-          account = await ensureAccountAvailable(context, refreshCoordinator, account);
-          if (!account) {
-            return;
-          }
-          perf.mark("ensure-account-available", {
-            account: account.name,
-            source: account.source,
+            all: selection.all,
+            accountCount: selection.accounts.length,
+            accounts: selection.accounts.map((account) => `${account.source}:${account.name}`),
           });
           logCommandInfo("refresh-token", "started", {
-            account: account.name,
-            source: account.source,
+            all: selection.all,
+            accountCount: selection.accounts.length,
+            accounts: selection.accounts.map((account) => `${account.source}:${account.name}`),
           });
 
-          await vscode.window.withProgress(
-            { location: vscode.ProgressLocation.Notification, title: "Refreshing token and quota..." },
-            async () => {
-              let result;
-              try {
-                result = await refreshSavedAccountEntry(account);
-                perf.mark("refresh-saved-account-entry", {
-                  success: result.success,
-                  conflict: result.conflict ?? false,
-                });
-              } catch (error) {
-                logWarn(LOG_PREFIX, "refresh-token-command-failed", {
-                  account: account.id,
-                  error: toErrorMessage(error),
-                });
-                vscode.window.showErrorMessage(
-                  `Token refresh failed for "${account.name}": ${toErrorMessage(error)}`,
-                );
-                perf.mark("refresh-saved-account-entry-failed");
-                return;
-              }
+          const refreshAccountToken = async (candidate: SavedAccountInfo): Promise<RefreshTokenOperationOutcome> => {
+            const available = await ensureAccountAvailable(context, refreshCoordinator, candidate, {
+              silentUnavailable: selection.all,
+            });
+            if (!available) {
+              return {
+                account: candidate,
+                status: "unavailable",
+                message: candidate.storageMessage ?? `Saved account "${candidate.name}" is unavailable.`,
+              };
+            }
+
+            try {
+              const result = await refreshSavedAccountEntry(available);
               if (result.success) {
-                try {
-                  await refreshTokenAndQuota(accountTree, statusBar, account.id);
-                  perf.mark("refresh-token-and-quota");
-                } catch (error) {
-                  logWarn(LOG_PREFIX, "refresh-token-quota-followup-failed", {
-                    account: account.id,
-                    error: toErrorMessage(error),
-                  });
-                  vscode.window.showWarningMessage(
-                    `Token refreshed for "${account.name}", but quota refresh failed: ${toErrorMessage(error)}`,
-                  );
-                  perf.mark("refresh-token-and-quota-failed");
+                return {
+                  account: available,
+                  status: "success",
+                  message: result.message,
+                };
+              }
+              if (result.conflict) {
+                return {
+                  account: available,
+                  status: "conflict",
+                  message: result.message,
+                };
+              }
+              if (result.unsupported) {
+                return {
+                  account: available,
+                  status: "unsupported",
+                  message: result.message,
+                };
+              }
+              if (refreshFailureSupportsRelogin(result.message)) {
+                return {
+                  account: available,
+                  status: "reloginRequired",
+                  message: result.message,
+                };
+              }
+              return {
+                account: available,
+                status: "failed",
+                message: result.message,
+              };
+            } catch (error) {
+              logWarn(LOG_PREFIX, "refresh-token-command-failed", {
+                account: candidate.id,
+                error: toErrorMessage(error),
+              });
+              return {
+                account: available,
+                status: "failed",
+                message: `Token refresh failed for "${available.name}": ${toErrorMessage(error)}`,
+              };
+            }
+          };
+
+          await vscode.window.withProgress(
+            {
+              location: vscode.ProgressLocation.Notification,
+              title: selection.all ? "Refreshing all tokens and quotas..." : "Refreshing token and quota...",
+            },
+            async () => {
+              if (!selection.all) {
+                const outcome = await refreshAccountToken(selection.accounts[0]);
+                perf.mark("refresh-saved-account-entry", {
+                  success: outcome.status === "success",
+                  conflict: outcome.status === "conflict",
+                });
+                if (outcome.status === "unavailable") {
                   return;
                 }
-                logCommandInfo("refresh-token", "succeeded", {
-                  account: account.name,
-                  source: account.source,
-                });
-                vscode.window.showInformationMessage(`✓ ${result.message} and quota was refreshed`);
-              } else if (result.conflict) {
-                logCommandWarn("refresh-token", "conflict", {
-                  account: account.name,
-                  source: account.source,
-                  message: result.message,
-                });
-                await showSyncConflictWarning(result.message);
-              } else if (result.unsupported) {
-                logCommandWarn("refresh-token", "unsupported", {
-                  account: account.name,
-                  source: account.source,
-                  message: result.message,
-                });
-                vscode.window.showWarningMessage(result.message);
-              } else if (refreshFailureSupportsRelogin(result.message)) {
-                logCommandWarn("refresh-token", "relogin-required", {
-                  account: account.name,
-                  source: account.source,
-                  message: result.message,
-                });
-                const action = await vscode.window.showErrorMessage(result.message, "Re-login");
-                if (action === "Re-login") {
-                  await vscode.commands.executeCommand("codex-account-switch.reloginAccount", item);
+                if (outcome.status === "success") {
+                  try {
+                    await refreshTokenAndQuota(accountTree, statusBar, [outcome.account.id]);
+                    perf.mark("refresh-token-and-quota");
+                  } catch (error) {
+                    logWarn(LOG_PREFIX, "refresh-token-quota-followup-failed", {
+                      account: outcome.account.id,
+                      error: toErrorMessage(error),
+                    });
+                    vscode.window.showWarningMessage(
+                      `Token refreshed for "${outcome.account.name}", but quota refresh failed: ${toErrorMessage(error)}`,
+                    );
+                    perf.mark("refresh-token-and-quota-failed");
+                    return;
+                  }
+                  logCommandInfo("refresh-token", "succeeded", {
+                    account: outcome.account.name,
+                    source: outcome.account.source,
+                  });
+                  vscode.window.showInformationMessage(`✓ ${outcome.message} and quota was refreshed`);
+                  return;
                 }
-              } else {
+                if (outcome.status === "conflict") {
+                  logCommandWarn("refresh-token", "conflict", {
+                    account: outcome.account.name,
+                    source: outcome.account.source,
+                    message: outcome.message,
+                  });
+                  await showSyncConflictWarning(outcome.message);
+                  return;
+                }
+                if (outcome.status === "unsupported") {
+                  logCommandWarn("refresh-token", "unsupported", {
+                    account: outcome.account.name,
+                    source: outcome.account.source,
+                    message: outcome.message,
+                  });
+                  vscode.window.showWarningMessage(outcome.message);
+                  return;
+                }
+                if (outcome.status === "reloginRequired") {
+                  logCommandWarn("refresh-token", "relogin-required", {
+                    account: outcome.account.name,
+                    source: outcome.account.source,
+                    message: outcome.message,
+                  });
+                  const action = await vscode.window.showErrorMessage(outcome.message, "Re-login");
+                  if (action === "Re-login") {
+                    await vscode.commands.executeCommand("codex-account-switch.reloginAccount", item);
+                  }
+                  return;
+                }
+
                 logCommandWarn("refresh-token", "failed", {
-                  account: account.name,
-                  source: account.source,
-                  message: result.message,
+                  account: outcome.account.name,
+                  source: outcome.account.source,
+                  message: outcome.message,
                 });
-                vscode.window.showErrorMessage(result.message);
+                vscode.window.showErrorMessage(outcome.message);
+                return;
+              }
+
+              const successfulAccountIds: string[] = [];
+              const conflictAccounts: string[] = [];
+              const unsupportedAccounts: string[] = [];
+              const reloginAccounts: string[] = [];
+              const failedAccounts: string[] = [];
+              const unavailableAccounts: string[] = [];
+
+              for (const candidate of selection.accounts) {
+                const outcome = await refreshAccountToken(candidate);
+                switch (outcome.status) {
+                  case "success":
+                    successfulAccountIds.push(outcome.account.id);
+                    break;
+                  case "conflict":
+                    conflictAccounts.push(outcome.account.name);
+                    break;
+                  case "unsupported":
+                    unsupportedAccounts.push(outcome.account.name);
+                    break;
+                  case "reloginRequired":
+                    reloginAccounts.push(outcome.account.name);
+                    break;
+                  case "failed":
+                    failedAccounts.push(outcome.account.name);
+                    break;
+                  case "unavailable":
+                    unavailableAccounts.push(outcome.account.name);
+                    break;
+                  default:
+                    break;
+                }
+              }
+
+              perf.mark("refresh-saved-account-entry", {
+                accountCount: selection.accounts.length,
+                successCount: successfulAccountIds.length,
+                conflictCount: conflictAccounts.length,
+                unsupportedCount: unsupportedAccounts.length,
+                reloginCount: reloginAccounts.length,
+                failedCount: failedAccounts.length,
+                unavailableCount: unavailableAccounts.length,
+              });
+
+              let quotaRefreshError: string | null = null;
+              if (successfulAccountIds.length > 0) {
+                try {
+                  await refreshTokenAndQuota(accountTree, statusBar, successfulAccountIds);
+                  perf.mark("refresh-token-and-quota");
+                } catch (error) {
+                  quotaRefreshError = toErrorMessage(error);
+                  logWarn(LOG_PREFIX, "refresh-token-quota-followup-failed", {
+                    accountCount: successfulAccountIds.length,
+                    error: quotaRefreshError,
+                  });
+                  perf.mark("refresh-token-and-quota-failed");
+                }
+              }
+
+              logCommandInfo("refresh-token", "batch-finished", {
+                accountCount: selection.accounts.length,
+                successCount: successfulAccountIds.length,
+                conflictCount: conflictAccounts.length,
+                unsupportedCount: unsupportedAccounts.length,
+                reloginCount: reloginAccounts.length,
+                failedCount: failedAccounts.length,
+                unavailableCount: unavailableAccounts.length,
+                quotaRefreshError,
+              });
+
+              const summary: string[] = [];
+              if (successfulAccountIds.length > 0) {
+                summary.push(
+                  quotaRefreshError == null
+                    ? `Refreshed token and quota for ${successfulAccountIds.length} account${successfulAccountIds.length === 1 ? "" : "s"}`
+                    : `Refreshed token for ${successfulAccountIds.length} account${successfulAccountIds.length === 1 ? "" : "s"}`
+                );
+              }
+              if (quotaRefreshError) {
+                summary.push(`Quota refresh failed: ${quotaRefreshError}`);
+              }
+              if (reloginAccounts.length > 0) {
+                summary.push(`Re-login required: ${reloginAccounts.join(", ")}`);
+              }
+              if (conflictAccounts.length > 0) {
+                summary.push(`Sync conflict: ${conflictAccounts.join(", ")}`);
+              }
+              if (unsupportedAccounts.length > 0) {
+                summary.push(`Unsupported: ${unsupportedAccounts.join(", ")}`);
+              }
+              if (unavailableAccounts.length > 0) {
+                summary.push(`Unavailable: ${unavailableAccounts.join(", ")}`);
+              }
+              if (failedAccounts.length > 0) {
+                summary.push(`Failed: ${failedAccounts.join(", ")}`);
+              }
+
+              const message = summary.join(". ") || "Token refresh did not run.";
+              if (
+                successfulAccountIds.length === selection.accounts.length
+                && quotaRefreshError == null
+              ) {
+                vscode.window.showInformationMessage(`✓ ${message}`);
+              } else if (successfulAccountIds.length > 0) {
+                vscode.window.showWarningMessage(message);
+              } else {
+                vscode.window.showErrorMessage(message);
               }
             }
           );
@@ -1338,8 +1578,9 @@ export function registerCommands(
       }
     ),
 
-    vscode.commands.registerCommand("codex-account-switch.refresh", async (item?: AccountTreeItem) => {
+    vscode.commands.registerCommand("codex-account-switch.refresh", async (item?: unknown) => {
       await runTimedCommand("refresh", async (perf) => {
+        const refreshTargetAccountName = getRefreshTargetAccountName(item);
         const picked = await vscode.window.showQuickPick(
           [
             {
@@ -1349,12 +1590,16 @@ export function registerCommands(
             },
             {
               label: "Refresh Token",
-              description: item ? `Refresh "${item.account.name}" token and quota` : "Select an account to refresh",
+              description: refreshTargetAccountName
+                ? `Refresh "${refreshTargetAccountName}" token and quota`
+                : "Select an account or All to refresh token and quota",
               command: "codex-account-switch.refreshToken",
             },
             {
               label: "Refresh Quota",
-              description: item ? `Refresh "${item.account.name}" quota` : "Refresh quota for all accounts",
+              description: refreshTargetAccountName
+                ? `Refresh "${refreshTargetAccountName}" quota`
+                : "Refresh quota for all accounts",
               command: "codex-account-switch.refreshQuota",
             },
           ],
@@ -1541,17 +1786,27 @@ export function registerCommands(
       refreshViews(refreshCoordinator);
     }),
 
-    vscode.commands.registerCommand("codex-account-switch.refreshQuota", async (item?: AccountTreeItem) => {
+    vscode.commands.registerCommand("codex-account-switch.refreshQuota", async (item?: AccountTreeItem | AccountGroupItem) => {
       await runTimedCommand("refreshQuota", async (perf) => {
-        const targetId = item?.account?.id;
+        const targetIds = item instanceof AccountGroupItem
+          ? item.children.map((child) => child.account.id)
+          : item?.account?.id
+            ? [item.account.id]
+            : undefined;
         const snapshot = createSavedEntriesSnapshot();
         const queryContext = {
           snapshot,
           sharedQueries: new Map(),
         };
+        const currentSelection = getSavedCurrentSelection(snapshot);
+        const currentSelectionId = currentSelection.kind === "account"
+          ? snapshot.bySourceAndName.get(`${currentSelection.source}:${currentSelection.name}`)?.id ?? null
+          : null;
+        const shouldRefreshStatusBarQuota = !targetIds || targetIds.length === 0
+          || (currentSelectionId != null && targetIds.includes(currentSelectionId));
         logCommandInfo("refresh-quota", "started");
         await Promise.all([
-          accountTree.refreshQuota(targetId ? [targetId] : undefined, {
+          accountTree.refreshQuota(targetIds, {
             snapshot,
             queryContext,
             reason: "manual",
@@ -1567,6 +1822,7 @@ export function registerCommands(
           statusBar.refreshNow({
             snapshot,
             queryContext,
+            skipQuota: !shouldRefreshStatusBarQuota,
             reason: "manual",
             refreshId: "command-refreshQuota",
           }).then(() => {
@@ -1722,7 +1978,7 @@ export function registerCommands(
           deviceName,
         })),
         {
-          placeHolder: "Select the synced device that can automatically refresh cloud tokens",
+          placeHolder: "Select the synced device that can automatically refresh synced account tokens",
         },
       );
       if (!picked) {
@@ -1735,7 +1991,7 @@ export function registerCommands(
         deviceName: picked.deviceName,
       });
       vscode.window.showInformationMessage(
-        `Automatic cloud token refresh is now assigned to "${picked.deviceName}".`
+        `Automatic token refresh is now assigned to "${picked.deviceName}".`
       );
       refreshAll(refreshCoordinator);
     }),

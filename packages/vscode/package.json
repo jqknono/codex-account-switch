@@ -2,7 +2,7 @@
   "name": "codex-account-switch-vscode",
   "displayName": "Codex Account Switch",
   "description": "Codex Account Switch - VS Code extension",
-  "version": "1.6.0",
+  "version": "1.6.6",
   "publisher": "techfetch-dev",
   "repository": {
     "type": "git",
@@ -338,6 +338,16 @@
           "group": "context@1"
         },
         {
+          "command": "codex-account-switch.refreshQuota",
+          "when": "view == codexAccountSwitchAccounts && viewItem == accountGroupLocal",
+          "group": "refresh@1"
+        },
+        {
+          "command": "codex-account-switch.refreshQuota",
+          "when": "view == codexAccountSwitchAccounts && viewItem == accountGroupCloud",
+          "group": "refresh@1"
+        },
+        {
           "command": "codex-account-switch.moveProviderToCloud",
           "when": "view == codexAccountSwitchProviders && viewItem == providerLocal",
           "group": "context@2"
@@ -366,7 +376,7 @@
           "type": "number",
           "default": 300,
           "minimum": 60,
-          "description": "Automatic background quota refresh interval for the current account, in seconds"
+          "description": "Automatic background quota refresh interval, in seconds. Each interval refreshes one saved account quota in rotation."
         },
         "codex-account-switch.showStatusBar": {
           "type": "boolean",
@@ -416,16 +426,16 @@
           ],
           "description": "Default storage target used when saving accounts or provider profiles."
         },
-        "codex-account-switch.cloudTokenAutoUpdate": {
+        "codex-account-switch.tokenAutoUpdate": {
           "type": "boolean",
           "default": true,
-          "description": "Automatically write refreshed access and refresh tokens back to synced cloud accounts stored in extension state."
+          "description": "Automatically write refreshed access and refresh tokens back to saved accounts."
         },
-        "codex-account-switch.cloudTokenAutoUpdateIntervalHours": {
+        "codex-account-switch.tokenAutoUpdateIntervalHours": {
           "type": "number",
           "default": 24,
           "minimum": 1,
-          "description": "Minimum interval between automatic cloud token updates, in hours."
+          "description": "Minimum interval between automatic token updates, in hours."
         },
         "codex-account-switch.syncedStorage": {
           "type": "object",

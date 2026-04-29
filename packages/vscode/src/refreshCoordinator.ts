@@ -32,6 +32,7 @@ export class RefreshCoordinator implements vscode.Disposable {
   private configListener: vscode.Disposable | undefined;
   private scheduledTimer: ReturnType<typeof setTimeout> | undefined;
   private runningRefresh: Promise<void> | null = null;
+  private lastAutoRefreshAccountId: string | null = null;
   private pendingFullRefresh = false;
   private pendingAutoRefresh = false;
   private pendingTargetIds = new Set<string>();
@@ -216,6 +217,7 @@ export class RefreshCoordinator implements vscode.Disposable {
       snapshot,
       sharedQueries: new Map(),
     };
+    const currentSelectionAccountId = this.getCurrentSelectionAccountId(snapshot);
     let targetIds: string[] | undefined;
     if (pendingFullRefresh) {
       targetIds = snapshot.accounts
@@ -223,17 +225,26 @@ export class RefreshCoordinator implements vscode.Disposable {
         .map((account) => account.id);
     } else if (explicitTargetIds && explicitTargetIds.length > 0) {
       targetIds = explicitTargetIds;
+    } else if (pendingAutoRefresh && pendingReason === "timer") {
+      targetIds = this.getNextAutoRefreshTargetIds(snapshot);
     } else if (pendingAutoRefresh && snapshot.selection.kind === "account") {
-      const current = snapshot.bySourceAndName.get(`${snapshot.selection.source}:${snapshot.selection.name}`);
-      targetIds = current ? [current.id] : [];
+      targetIds = currentSelectionAccountId ? [currentSelectionAccountId] : [];
     } else {
       targetIds = [];
+    }
+
+    if (
+      pendingReason !== "timer"
+      && currentSelectionAccountId
+      && targetIds.includes(currentSelectionAccountId)
+    ) {
+      this.lastAutoRefreshAccountId = currentSelectionAccountId;
     }
 
     if (targetIds.length === 0) {
       await this.statusBar.refreshNow({
         snapshot,
-        skipQuota: snapshot.selection.kind === "provider",
+        skipQuota: snapshot.selection.kind === "provider" || pendingReason === "timer",
         queryContext,
         reason: pendingReason,
         refreshId,
@@ -247,6 +258,10 @@ export class RefreshCoordinator implements vscode.Disposable {
       return;
     }
 
+    const shouldRefreshStatusBarQuota =
+      pendingReason !== "timer"
+      || (currentSelectionAccountId != null && targetIds.includes(currentSelectionAccountId));
+
     const refreshPromise = Promise.all([
       this.accountTree.refreshQuota(targetIds, {
         snapshot,
@@ -254,12 +269,14 @@ export class RefreshCoordinator implements vscode.Disposable {
         reason: pendingReason,
         refreshId,
       }),
-      this.statusBar.refreshNow({
-        snapshot,
-        queryContext,
-        reason: pendingReason,
-        refreshId,
-      }),
+      shouldRefreshStatusBarQuota
+        ? this.statusBar.refreshNow({
+          snapshot,
+          queryContext,
+          reason: pendingReason,
+          refreshId,
+        })
+        : Promise.resolve(),
     ])
       .then(() => {
         perf.finish({
@@ -289,5 +306,39 @@ export class RefreshCoordinator implements vscode.Disposable {
 
     this.runningRefresh = refreshPromise;
     await refreshPromise;
+  }
+
+  private getCurrentSelectionAccountId(snapshot: ReturnType<typeof createSavedEntriesSnapshot>): string | null {
+    if (snapshot.selection.kind !== "account") {
+      return null;
+    }
+    const current = snapshot.bySourceAndName.get(`${snapshot.selection.source}:${snapshot.selection.name}`);
+    return current?.id ?? null;
+  }
+
+  private getNextAutoRefreshTargetIds(snapshot: ReturnType<typeof createSavedEntriesSnapshot>): string[] {
+    const readyAccounts = snapshot.accounts
+      .filter((account) => account.storageState === "ready")
+      .sort((left, right) => {
+        const sourceCompare = left.source.localeCompare(right.source);
+        return sourceCompare !== 0 ? sourceCompare : left.name.localeCompare(right.name);
+      });
+
+    if (readyAccounts.length === 0) {
+      return [];
+    }
+
+    const fallbackCursorId = this.lastAutoRefreshAccountId ?? this.getCurrentSelectionAccountId(snapshot);
+    if (fallbackCursorId) {
+      const currentIndex = readyAccounts.findIndex((account) => account.id === fallbackCursorId);
+      if (currentIndex >= 0) {
+        const next = readyAccounts[(currentIndex + 1) % readyAccounts.length];
+        this.lastAutoRefreshAccountId = next.id;
+        return [next.id];
+      }
+    }
+
+    this.lastAutoRefreshAccountId = readyAccounts[0].id;
+    return [readyAccounts[0].id];
   }
 }

@@ -16,9 +16,12 @@
 ```mermaid
 flowchart LR
   A[Legacy syncedStorage setting] -->|first activation migration| B[globalState synced cloud state]
-  B --> C[Settings Sync]
-  D[SecretStorage passphrase] --> E[Decrypt encrypted envelopes locally]
-  B --> E
+  B -->|activation appends current hostname when cloud state exists| C[Device list]
+  B --> D[Settings Sync]
+  E[Selected auto-refresh device] --> F[Only this device may refresh and persist cloud tokens]
+  D --> F
+  G[SecretStorage passphrase] --> H[Decrypt encrypted envelopes locally]
+  B --> H
 ```
 
 ## Migration Rules
@@ -29,6 +32,16 @@ flowchart LR
 | New synced key missing and legacy setting has data | Copy the full legacy object into synced `globalState`. |
 | Legacy cleanup succeeds | Remove the old `codex-account-switch.syncedStorage` setting. |
 | Legacy cleanup fails | Keep the migrated `globalState` data active, log a warning, and show a non-fatal notice. |
+
+## Device Registration
+
+| Rule | Behavior |
+| --- | --- |
+| Activation sees existing synced cloud state | Append the current hostname into `devices` if it is missing. |
+| Activation runs again on the same machine | Keep a single entry for that hostname; do not duplicate it. |
+| Synced cloud state is still empty | Do not create a device record just because the extension activated once. |
+| `autoRefreshDeviceName` is unset | The first synced device remains the effective refresh authority until the user explicitly changes it. |
+| Current machine is not the selected auto-refresh device | This machine can still read synced entries and appear in the device list, but it must not persist refreshed cloud tokens. |
 
 ## Constraints
 

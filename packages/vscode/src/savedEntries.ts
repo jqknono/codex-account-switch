@@ -27,6 +27,7 @@ import {
   isSerializedSavedValueEncrypted,
   listNamedAuthFiles,
   listProviderModes,
+  queryQuota,
   readCurrentAuth,
   readProviderProfileResult,
   readSavedAuthFileResult,
@@ -43,6 +44,7 @@ import {
   writeSavedAuthFile,
 } from "@codex-account-switch/core";
 import { logWarn, startPerformanceLog } from "./log";
+import { queryQuotaWithCache } from "./quotaCache";
 
 export type StorageSource = "local" | "cloud";
 export type SaveTarget = StorageSource;
@@ -152,11 +154,12 @@ interface SyncedCloudMigrationState {
 
 const SYNCED_STORAGE_SETTING = "syncedStorage";
 const DEFAULT_TARGET_SETTING = "defaultSaveTarget";
-const CLOUD_TOKEN_AUTO_UPDATE_SETTING = "cloudTokenAutoUpdate";
-const CLOUD_TOKEN_AUTO_UPDATE_INTERVAL_HOURS_SETTING = "cloudTokenAutoUpdateIntervalHours";
+const TOKEN_AUTO_UPDATE_SETTING = "tokenAutoUpdate";
+const TOKEN_AUTO_UPDATE_INTERVAL_HOURS_SETTING = "tokenAutoUpdateIntervalHours";
 const CURRENT_SELECTION_KEY = "codex-account-switch.currentSavedSelection";
-const DEFAULT_CLOUD_TOKEN_AUTO_UPDATE_INTERVAL_HOURS = 24;
+const DEFAULT_TOKEN_AUTO_UPDATE_INTERVAL_HOURS = 24;
 const HOUR_MS = 60 * 60 * 1000;
+const DEFAULT_QUOTA_CACHE_INTERVAL_MS = 5 * 60 * 1000;
 const inflightCloudQuotaQueries = new Map<string, Promise<QuotaQueryResult>>();
 let inflightAutoRefreshDevicePrompt: Promise<string | null> | null = null;
 const EMPTY_SYNC_METADATA: SavedStorageSyncMetadata = {
@@ -168,6 +171,27 @@ let extensionContext: vscode.ExtensionContext | null = null;
 
 function getConfiguration() {
   return vscode.workspace.getConfiguration("codex-account-switch");
+}
+
+function getQuotaCacheIntervalMs(): number {
+  const intervalSec = getConfiguration().get<number>("quotaRefreshInterval", 300);
+  if (!Number.isFinite(intervalSec) || intervalSec <= 0) {
+    return DEFAULT_QUOTA_CACHE_INTERVAL_MS;
+  }
+  return intervalSec * 1000;
+}
+
+function shouldForceQuotaFetch(reason?: string): boolean {
+  return reason === "manual";
+}
+
+function shouldForceQuotaFetchForAccount(account: SavedAccountInfo, reason?: string): boolean {
+  if (shouldForceQuotaFetch(reason)) {
+    return true;
+  }
+  return reason === "timer"
+    && Boolean(account.auth)
+    && isRefreshTokenExpiringWithin(account.auth!, TIMER_REFRESH_TOKEN_THRESHOLD_MS);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -502,7 +526,7 @@ async function promptForAutoRefreshDevice(devices: string[]): Promise<string | n
         deviceName,
       })),
       {
-        placeHolder: "Select the synced device that is allowed to automatically refresh cloud tokens",
+        placeHolder: "Select the synced device that is allowed to automatically refresh synced account tokens",
       },
     );
     if (!picked) {
@@ -915,38 +939,38 @@ export function getDefaultSaveTarget(): SaveTarget {
   return getConfiguration().get<SaveTarget>(DEFAULT_TARGET_SETTING, "local");
 }
 
-function getCloudTokenAutoUpdate(): boolean {
-  return getConfiguration().get<boolean>(CLOUD_TOKEN_AUTO_UPDATE_SETTING, false);
+function getTokenAutoUpdate(): boolean {
+  return getConfiguration().get<boolean>(TOKEN_AUTO_UPDATE_SETTING, true);
 }
 
-function getCloudTokenAutoUpdateIntervalHours(): number {
+function getTokenAutoUpdateIntervalHours(): number {
   const raw = getConfiguration().get<number>(
-    CLOUD_TOKEN_AUTO_UPDATE_INTERVAL_HOURS_SETTING,
-    DEFAULT_CLOUD_TOKEN_AUTO_UPDATE_INTERVAL_HOURS,
+    TOKEN_AUTO_UPDATE_INTERVAL_HOURS_SETTING,
+    DEFAULT_TOKEN_AUTO_UPDATE_INTERVAL_HOURS,
   );
-  return Number.isFinite(raw) && raw >= 1 ? raw : DEFAULT_CLOUD_TOKEN_AUTO_UPDATE_INTERVAL_HOURS;
+  return Number.isFinite(raw) && raw >= 1 ? raw : DEFAULT_TOKEN_AUTO_UPDATE_INTERVAL_HOURS;
 }
 
-function markCloudTokenSync(auth: AuthFile): void {
-  auth.last_cloud_token_sync = new Date().toISOString();
+function markTokenAutoUpdate(auth: AuthFile): void {
+  auth.last_token_auto_update = new Date().toISOString();
 }
 
-function shouldAutoPersistCloudTokens(auth: AuthFile): boolean {
-  if (!getCloudTokenAutoUpdate()) {
+function shouldAutoPersistTokens(auth: AuthFile): boolean {
+  if (!getTokenAutoUpdate()) {
     return false;
   }
 
-  const lastCloudTokenSync = auth.last_cloud_token_sync;
-  if (typeof lastCloudTokenSync !== "string" || lastCloudTokenSync.length === 0) {
+  const lastTokenAutoUpdate = auth.last_token_auto_update;
+  if (typeof lastTokenAutoUpdate !== "string" || lastTokenAutoUpdate.length === 0) {
     return true;
   }
 
-  const lastSyncTime = Date.parse(lastCloudTokenSync);
+  const lastSyncTime = Date.parse(lastTokenAutoUpdate);
   if (Number.isNaN(lastSyncTime)) {
     return true;
   }
 
-  return Date.now() - lastSyncTime >= getCloudTokenAutoUpdateIntervalHours() * HOUR_MS;
+  return Date.now() - lastSyncTime >= getTokenAutoUpdateIntervalHours() * HOUR_MS;
 }
 
 async function persistCloudAccountAuth(
@@ -957,7 +981,7 @@ async function persistCloudAccountAuth(
   expectedUpdatedAt?: string | null,
 ): Promise<CloudMutationResult | { success: true; skipped: true }> {
   if (mode === "automatic") {
-    if (!shouldAutoPersistCloudTokens(auth)) {
+    if (!shouldAutoPersistTokens(auth)) {
       return { success: true, skipped: true };
     }
     const authority = await resolveAutomaticRefreshAuthority();
@@ -966,8 +990,29 @@ async function persistCloudAccountAuth(
     }
   }
 
-  markCloudTokenSync(auth);
+  markTokenAutoUpdate(auth);
   return writeCloudAccountWithExpectedVersion(name, auth, expectedEntryVersion, expectedUpdatedAt);
+}
+
+function persistLocalAccountAuth(
+  name: string,
+  auth: AuthFile,
+  mode: "manual" | "automatic",
+  options: { shouldSyncCurrentAuth?: boolean } = {},
+): { success: true; skipped?: true } {
+  if (mode === "automatic" && !shouldAutoPersistTokens(auth)) {
+    if (options.shouldSyncCurrentAuth) {
+      writeCurrentAuth(auth);
+    }
+    return { success: true, skipped: true };
+  }
+
+  markTokenAutoUpdate(auth);
+  writeSavedAuthFile(getNamedAuthPath(name), auth);
+  if (options.shouldSyncCurrentAuth) {
+    writeCurrentAuth(auth);
+  }
+  return { success: true };
 }
 
 function getReadyAccounts(snapshot?: SavedEntriesSnapshot): SavedAccountInfo[] {
@@ -1265,7 +1310,7 @@ export async function saveCurrentAuthAsAccount(
     }
   }
 
-  markCloudTokenSync(auth);
+  markTokenAutoUpdate(auth);
   const writeResult = await writeCloudAccountWithExpectedVersion(
     name,
     auth,
@@ -1356,33 +1401,63 @@ export async function querySavedAccountQuota(
     }
 
     if (account.source === "local") {
-      const resultPromise = (async () => {
-        const core = await import("@codex-account-switch/core");
-        if (options.reason === "timer" && account.auth && isRefreshTokenExpiringWithin(account.auth, TIMER_REFRESH_TOKEN_THRESHOLD_MS)) {
-          perf.mark("timer-refresh-token-check", {
-            shouldRefresh: true,
-            source: account.source,
-          });
-          const refreshResult = await core.refreshAccount(account.name);
-          perf.mark("timer-refresh-token", {
-            success: refreshResult.success,
-            source: account.source,
-          });
-          if (!refreshResult.success) {
-            throw new Error(refreshResult.message);
+      const resultPromise = queryQuotaWithCache(account, {
+        minIntervalMs: getQuotaCacheIntervalMs(),
+        forceFetch: shouldForceQuotaFetchForAccount(account, options.reason),
+        fetch: async () => {
+          const persistAutomatically = async ({
+            auth,
+            shouldSyncCurrentAuth,
+          }: {
+            auth: AuthFile;
+            shouldSyncCurrentAuth: boolean;
+          }): Promise<void> => {
+            const result = persistLocalAccountAuth(account.name, auth, "automatic", {
+              shouldSyncCurrentAuth,
+            });
+            perf.mark("persist-local-auth", {
+              mode: "automatic",
+              skipped: Boolean(result.skipped),
+            });
+          };
+
+          if (options.reason === "timer" && account.auth && isRefreshTokenExpiringWithin(account.auth, TIMER_REFRESH_TOKEN_THRESHOLD_MS)) {
+            perf.mark("timer-refresh-token-check", {
+              shouldRefresh: true,
+              source: account.source,
+            });
+            const refreshResult = await refreshAccount(account.name, {
+              syncCurrentAuthBeforeRead: false,
+              persistUpdatedAuth: ({ auth, shouldSyncCurrentAuth }) => persistAutomatically({
+                auth,
+                shouldSyncCurrentAuth,
+              }),
+            });
+            perf.mark("timer-refresh-token", {
+              success: refreshResult.success,
+              source: account.source,
+            });
+            if (!refreshResult.success) {
+              throw new Error(refreshResult.message);
+            }
+          } else if (options.reason === "timer") {
+            perf.mark("timer-refresh-token-check", {
+              shouldRefresh: false,
+              source: account.source,
+            });
           }
-        } else if (options.reason === "timer") {
-          perf.mark("timer-refresh-token-check", {
-            shouldRefresh: false,
-            source: account.source,
+          perf.mark("delegate-to-core-queryQuota");
+          return queryQuota(account.name, {
+            performanceMode: "adaptive",
+            slowThresholdMs: 3000,
+            syncCurrentAuthBeforeRead: false,
+            persistUpdatedAuth: ({ auth, shouldSyncCurrentAuth }) => persistAutomatically({
+              auth,
+              shouldSyncCurrentAuth,
+            }),
           });
-        }
-        perf.mark("delegate-to-core-queryQuota");
-        return core.queryQuota(account.name, {
-          performanceMode: "adaptive",
-          slowThresholdMs: 3000,
-        });
-      })();
+        },
+      });
       context?.sharedQueries?.set(account.id, resultPromise);
       const result = await resultPromise;
       perf.finish({
@@ -1416,7 +1491,10 @@ export async function querySavedAccountQuota(
     }
 
     const initialAuth = account.auth;
-    const queryPromise = (async (): Promise<QuotaQueryResult> => {
+    const queryPromise = queryQuotaWithCache(account, {
+      minIntervalMs: getQuotaCacheIntervalMs(),
+      forceFetch: shouldForceQuotaFetchForAccount(account, options.reason),
+      fetch: async (): Promise<QuotaQueryResult> => {
       const auth = clone(initialAuth);
       const expectedSyncMetadata: SavedStorageSyncMetadata = {
         entryVersion: account.syncVersion,
@@ -1477,7 +1555,8 @@ export async function querySavedAccountQuota(
         displayName: account.name,
         info,
       };
-    })();
+      },
+    });
 
     inflightCloudQuotaQueries.set(account.id, queryPromise);
     context?.sharedQueries?.set(account.id, queryPromise);
@@ -1513,7 +1592,13 @@ export async function refreshSavedAccountEntry(account: SavedAccountInfo): Promi
   conflict?: CloudSyncConflict;
 }> {
   if (account.source === "local") {
-    return refreshAccount(account.name);
+    return refreshAccount(account.name, {
+      persistUpdatedAuth: ({ auth, shouldSyncCurrentAuth }) => {
+        persistLocalAccountAuth(account.name, auth, "manual", {
+          shouldSyncCurrentAuth,
+        });
+      },
+    });
   }
 
   if (account.storageState !== "ready" || !account.auth) {
@@ -1631,7 +1716,7 @@ export async function moveSavedAccountEntry(
   } else {
     requireCloudPassphrase();
     const auth = clone(account.auth);
-    markCloudTokenSync(auth);
+    markTokenAutoUpdate(auth);
     const writeResult = await writeCloudAccountWithExpectedVersion(account.name, auth);
     if (!writeResult.success) {
       return { success: false, message: writeResult.message, conflict: writeResult.conflict };

@@ -53,8 +53,8 @@ function sanitizeAuthFile(auth: AuthFile): AuthFile {
     sanitized.last_refresh = auth.last_refresh;
   }
 
-  if (typeof auth.last_cloud_token_sync === "string" && auth.last_cloud_token_sync) {
-    sanitized.last_cloud_token_sync = auth.last_cloud_token_sync;
+  if (typeof auth.last_token_auto_update === "string" && auth.last_token_auto_update) {
+    sanitized.last_token_auto_update = auth.last_token_auto_update;
   }
 
   return sanitized;

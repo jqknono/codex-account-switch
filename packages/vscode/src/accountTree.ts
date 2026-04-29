@@ -1,6 +1,5 @@
 import * as vscode from "vscode";
 import {
-  AuthFile,
   getTokenExpiry,
   formatTokenExpiry,
   QuotaInfo,
@@ -15,6 +14,7 @@ import {
   SavedAccountQuotaQueryContext,
   SavedEntriesSnapshot,
 } from "./savedEntries";
+import { getCachedQuotaSnapshot } from "./quotaCache";
 
 interface QuotaState {
   info: QuotaInfo | null;
@@ -27,6 +27,7 @@ export type AccountTreeNode = AccountGroupItem | AccountTreeItem | AccountDetail
 const LOG_PREFIX = "[codex-account-switch:vscode:accountTree]";
 const ACCOUNT_REFRESH_CONCURRENCY = 4;
 const SLOW_ACCOUNT_THRESHOLD_MS = 3000;
+export type AccountGroupKind = "quotaFailed" | "local" | "cloud";
 
 interface AccountTreeRefreshOptions {
   snapshot?: SavedEntriesSnapshot;
@@ -58,14 +59,6 @@ function formatQuotaSummary(info: QuotaInfo | null): string | null {
 
 function getQuotaUnavailableMessage(info: QuotaInfo | null | undefined): string | null {
   return info?.unavailableReason?.message ?? null;
-}
-
-function formatLastRefresh(auth: AuthFile): string {
-  if (typeof auth.last_refresh === "string" && auth.last_refresh.trim()) {
-    return auth.last_refresh.trim();
-  }
-  const refreshToken = auth.tokens?.refresh_token;
-  return typeof refreshToken === "string" && refreshToken.trim() ? "Never" : "Unavailable";
 }
 
 function formatResetTime(resetsAt: Date | null): string | null {
@@ -189,10 +182,16 @@ export class AccountGroupItem extends vscode.TreeItem {
     label: string,
     public readonly children: AccountTreeItem[],
     iconId: string,
+    public readonly groupKind: AccountGroupKind,
   ) {
     super(label, vscode.TreeItemCollapsibleState.Expanded);
     this.description = `${children.length}`;
-    this.contextValue = "accountGroup";
+    this.contextValue =
+      groupKind === "local"
+        ? "accountGroupLocal"
+        : groupKind === "cloud"
+          ? "accountGroupCloud"
+          : "accountGroupQuotaFailed";
     this.iconPath = new vscode.ThemeIcon(iconId);
     for (const child of children) {
       child.groupParent = this;
@@ -247,16 +246,13 @@ export class AccountTreeItem extends vscode.TreeItem {
 
     const tooltipLines = [
       `Account: ${account.name}`,
-      `Source: ${account.source}`,
       `Email: ${email}`,
       `Plan: ${plan}`,
     ];
     if (account.source === "cloud" && (account.syncVersion != null || account.syncUpdatedAt)) {
       tooltipLines.push(`Sync version: ${account.syncVersion ?? "legacy"}`);
       tooltipLines.push(`Updated: ${account.syncUpdatedAt ?? "unknown"}`);
-      tooltipLines.push(`Current device: ${account.currentDeviceName ?? "unknown"}`);
       tooltipLines.push(`Auto-refresh device: ${account.effectiveAutoRefreshDeviceName ?? "none"}`);
-      tooltipLines.push(`Auto-refresh here: ${account.autoRefreshAllowed ? "Yes" : "No"}`);
     }
 
     if (account.storageState !== "ready") {
@@ -269,7 +265,6 @@ export class AccountTreeItem extends vscode.TreeItem {
       const expiry = getTokenExpiry(account.auth);
       const tokenStatus = formatTokenExpiry(account.auth);
       tooltipLines.push(`Token: ${tokenStatus}`);
-      tooltipLines.push(`Last refresh: ${formatLastRefresh(account.auth)}`);
 
       if (expiry && expiry.getTime() < Date.now()) {
         this.iconPath = new vscode.ThemeIcon(
@@ -308,6 +303,8 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
       const currentSnapshot = snapshot ?? createSavedEntriesSnapshot();
       this.pruneQuotaState(currentSnapshot.accounts.map((account) => account.id));
       perf.mark("prune-quota-state");
+      this.hydrateQuotaStateFromCache(currentSnapshot.accounts);
+      perf.mark("hydrate-quota-state-from-cache");
       this.syncRootItems(currentSnapshot.accounts);
       perf.mark("sync-root-items");
       this._onDidChangeTreeData.fire(undefined);
@@ -566,6 +563,31 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
     }
   }
 
+  private hydrateQuotaStateFromCache(accounts: SavedAccountInfo[]): void {
+    for (const account of accounts) {
+      if (account.storageState !== "ready") {
+        continue;
+      }
+      const previous = this.quotaState.get(account.id);
+      if (previous?.loading) {
+        continue;
+      }
+      const cached = getCachedQuotaSnapshot(account);
+      if (!cached) {
+        continue;
+      }
+      if (previous?.updatedAt != null && previous.updatedAt >= cached.queriedAtMs && previous.info) {
+        continue;
+      }
+      this.quotaState.set(account.id, {
+        info: cached.info,
+        error: false,
+        loading: false,
+        updatedAt: cached.queriedAtMs,
+      });
+    }
+  }
+
   getRootItems(): AccountGroupItem[] {
     if (this.rootItems.length === 0) {
       this.syncRootItems(createSavedEntriesSnapshot().accounts);
@@ -596,13 +618,13 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
 
     const groups: AccountGroupItem[] = [];
     if (quotaFailed.length > 0) {
-      groups.push(new AccountGroupItem("Quota Failed", quotaFailed, "warning"));
+      groups.push(new AccountGroupItem("Quota Failed", quotaFailed, "warning", "quotaFailed"));
     }
     if (local.length > 0) {
-      groups.push(new AccountGroupItem("Local Accounts", local, "device-desktop"));
+      groups.push(new AccountGroupItem("Local Accounts", local, "device-desktop", "local"));
     }
     if (cloud.length > 0) {
-      groups.push(new AccountGroupItem("Cloud Accounts", cloud, "cloud"));
+      groups.push(new AccountGroupItem("Cloud Accounts", cloud, "cloud", "cloud"));
     }
     this.rootItems = groups;
     perf?.finish({
@@ -626,10 +648,6 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
     emailItem.iconPath = new vscode.ThemeIcon("mail");
     items.push(emailItem);
 
-    const sourceItem = new AccountDetailItem("Source", account.source, account.source, parent);
-    sourceItem.iconPath = new vscode.ThemeIcon(account.source === "cloud" ? "cloud" : "device-desktop");
-    items.push(sourceItem);
-
     if (account.source === "cloud" && (account.syncVersion != null || account.syncUpdatedAt)) {
       const syncVersionItem = new AccountDetailItem(
         "Sync version",
@@ -649,15 +667,6 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
       updatedItem.iconPath = new vscode.ThemeIcon("history");
       items.push(updatedItem);
 
-      const currentDeviceItem = new AccountDetailItem(
-        "Current device",
-        account.currentDeviceName ?? "unknown",
-        account.currentDeviceName ?? "unknown",
-        parent,
-      );
-      currentDeviceItem.iconPath = new vscode.ThemeIcon("device-desktop");
-      items.push(currentDeviceItem);
-
       const autoRefreshDeviceItem = new AccountDetailItem(
         "Auto-refresh device",
         account.effectiveAutoRefreshDeviceName ?? "none",
@@ -666,15 +675,6 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
       );
       autoRefreshDeviceItem.iconPath = new vscode.ThemeIcon("sync");
       items.push(autoRefreshDeviceItem);
-
-      const autoRefreshAllowedItem = new AccountDetailItem(
-        "Auto-refresh here",
-        account.autoRefreshAllowed ? "Yes" : "No",
-        account.autoRefreshAllowed ? "This device can automatically persist refreshed cloud tokens" : "This device cannot automatically persist refreshed cloud tokens",
-        parent,
-      );
-      autoRefreshAllowedItem.iconPath = new vscode.ThemeIcon(account.autoRefreshAllowed ? "check" : "circle-slash");
-      items.push(autoRefreshAllowedItem);
     }
 
     const planItem = new AccountDetailItem("Plan", plan, plan, parent);
@@ -707,18 +707,6 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
         tokenItem.iconPath = new vscode.ThemeIcon("pass", new vscode.ThemeColor("charts.green"));
       }
       items.push(tokenItem);
-
-      const lastRefresh = formatLastRefresh(account.auth);
-      const lastRefreshItem = new AccountDetailItem(
-        "Last refresh",
-        lastRefresh,
-        lastRefresh,
-        parent
-      );
-      lastRefreshItem.iconPath = lastRefresh === "Unavailable"
-        ? new vscode.ThemeIcon("circle-slash")
-        : new vscode.ThemeIcon("history", new vscode.ThemeColor("charts.green"));
-      items.push(lastRefreshItem);
     }
 
     if (quotaState?.loading) {

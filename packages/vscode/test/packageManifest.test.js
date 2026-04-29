@@ -99,23 +99,23 @@ test("storage target settings are contributed", () => {
     /synced extension storage/i
   );
   assert.equal(
-    properties["codex-account-switch.cloudTokenAutoUpdate"]?.type,
+    properties["codex-account-switch.tokenAutoUpdate"]?.type,
     "boolean"
   );
   assert.equal(
-    properties["codex-account-switch.cloudTokenAutoUpdate"]?.default,
+    properties["codex-account-switch.tokenAutoUpdate"]?.default,
     true
   );
   assert.equal(
-    properties["codex-account-switch.cloudTokenAutoUpdateIntervalHours"]?.type,
+    properties["codex-account-switch.tokenAutoUpdateIntervalHours"]?.type,
     "number"
   );
   assert.equal(
-    properties["codex-account-switch.cloudTokenAutoUpdateIntervalHours"]?.default,
+    properties["codex-account-switch.tokenAutoUpdateIntervalHours"]?.default,
     24
   );
   assert.equal(
-    properties["codex-account-switch.cloudTokenAutoUpdateIntervalHours"]?.minimum,
+    properties["codex-account-switch.tokenAutoUpdateIntervalHours"]?.minimum,
     1
   );
   assert.match(
@@ -132,7 +132,7 @@ test("storage target settings are contributed", () => {
   );
 });
 
-test("quota refresh setting defaults to 300 seconds for current account background refresh", () => {
+test("quota refresh setting defaults to 300 seconds for rotating background refresh", () => {
   const setting =
     manifest.contributes.configuration.properties[
       "codex-account-switch.quotaRefreshInterval"
@@ -141,8 +141,9 @@ test("quota refresh setting defaults to 300 seconds for current account backgrou
   assert.equal(setting?.type, "number");
   assert.equal(setting?.default, 300);
   assert.equal(setting?.minimum, 60);
-  assert.match(setting?.description ?? "", /current account/i);
   assert.match(setting?.description ?? "", /background/i);
+  assert.match(setting?.description ?? "", /one saved account/i);
+  assert.match(setting?.description ?? "", /rotation/i);
 });
 
 test("storage migration commands are contributed", () => {
@@ -204,6 +205,25 @@ test("account item context menu exposes refresh actions", () => {
       "codex-account-switch.refreshToken",
     ]
   );
+});
+
+test("account group context menu exposes refresh quota for local and cloud groups", () => {
+  const contextMenus = manifest.contributes.menus["view/item/context"] ?? [];
+  const localGroupRefresh = contextMenus.find(
+    (item) =>
+      item.command === "codex-account-switch.refreshQuota"
+      && item.when ===
+        "view == codexAccountSwitchAccounts && viewItem == accountGroupLocal"
+  );
+  const cloudGroupRefresh = contextMenus.find(
+    (item) =>
+      item.command === "codex-account-switch.refreshQuota"
+      && item.when ===
+        "view == codexAccountSwitchAccounts && viewItem == accountGroupCloud"
+  );
+
+  assert.equal(localGroupRefresh?.group, "refresh@1");
+  assert.equal(cloudGroupRefresh?.group, "refresh@1");
 });
 
 test("accounts view title menu exposes a single refresh entrypoint", () => {
