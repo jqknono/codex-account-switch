@@ -101,23 +101,85 @@ function normalizeIdentityValue(value: string | null | undefined): string {
   return (value ?? "").trim().toLowerCase();
 }
 
+function decodeIdTokenPayload(auth: AuthFile | null | undefined): IdTokenPayload | null {
+  const idToken = auth?.tokens?.id_token;
+  if (typeof idToken !== "string" || !idToken) {
+    return null;
+  }
+
+  try {
+    return jwtDecode<IdTokenPayload>(idToken);
+  } catch {
+    return null;
+  }
+}
+
+function getUserIdentity(auth: AuthFile | null | undefined): string | null {
+  const decoded = decodeIdTokenPayload(auth);
+  const authInfo = decoded?.["https://api.openai.com/auth"];
+
+  const chatgptUserId = normalizeIdentityValue(authInfo?.chatgpt_user_id);
+  if (chatgptUserId) {
+    return `chatgpt_user_id::${chatgptUserId}`;
+  }
+
+  const userId = normalizeIdentityValue(authInfo?.user_id);
+  if (userId) {
+    return `user_id::${userId}`;
+  }
+
+  const subject = normalizeIdentityValue(decoded?.sub);
+  if (subject) {
+    return `sub::${subject}`;
+  }
+
+  return null;
+}
+
+function getWorkspaceIdentity(auth: AuthFile | null | undefined): string | null {
+  const decoded = decodeIdTokenPayload(auth);
+  const authInfo = decoded?.["https://api.openai.com/auth"];
+
+  const organizationId =
+    normalizeIdentityValue(authInfo?.selected_organization_id) ||
+    normalizeIdentityValue(authInfo?.default_organization_id) ||
+    normalizeIdentityValue(authInfo?.chatgpt_account_id);
+  if (organizationId) {
+    return `organization::${organizationId}`;
+  }
+
+  const organizations = Array.isArray(authInfo?.organizations) ? authInfo.organizations : [];
+  const organizationIds = Array.from(
+    new Set(
+      organizations
+        .map((organization) => normalizeIdentityValue(organization?.id))
+        .filter((organizationId) => organizationId)
+    )
+  );
+  if (organizationIds.length === 1) {
+    return `organization::${organizationIds[0]}`;
+  }
+
+  const accountId = normalizeIdentityValue(auth?.tokens?.account_id);
+  if (accountId) {
+    return `account_id::${accountId}`;
+  }
+
+  return null;
+}
+
 export function extractMeta(auth: AuthFile): AccountMeta {
   let email = "unknown";
   let name = "unknown";
   let plan = "unknown";
 
-  const idToken = auth.tokens?.id_token;
-  if (typeof idToken === "string" && idToken) {
-    try {
-      const decoded = jwtDecode<IdTokenPayload>(idToken);
-      email = decoded.email ?? email;
-      name = decoded.name ?? decoded.sub ?? name;
-      const authInfo = decoded["https://api.openai.com/auth"];
-      if (authInfo?.chatgpt_plan_type) {
-        plan = authInfo.chatgpt_plan_type;
-      }
-    } catch {
-      // JWT decode failed
+  const decoded = decodeIdTokenPayload(auth);
+  if (decoded) {
+    email = decoded.email ?? email;
+    name = decoded.name ?? decoded.sub ?? name;
+    const authInfo = decoded["https://api.openai.com/auth"];
+    if (authInfo?.chatgpt_plan_type) {
+      plan = authInfo.chatgpt_plan_type;
     }
   }
 
@@ -128,17 +190,35 @@ export function getAccountIdentityFromMeta(meta: AccountMeta | null | undefined)
   if (!meta) return null;
   const email = normalizeIdentityValue(meta.email);
   const plan = normalizeIdentityValue(meta.plan);
-  if (!email || !plan) return null;
+  if (!email || !plan || email === "unknown" || plan === "unknown") return null;
   return `${email}::${plan}`;
 }
 
 export function getAccountIdentity(auth: AuthFile | null | undefined): string | null {
-  const accountId = normalizeIdentityValue(auth?.tokens?.account_id);
-  if (accountId) {
-    return `account_id::${accountId}`;
+  const userIdentity = getUserIdentity(auth);
+  const workspaceIdentity = getWorkspaceIdentity(auth);
+  if (userIdentity && workspaceIdentity) {
+    return `${userIdentity}::${workspaceIdentity}`;
   }
 
-  return getAccountIdentityFromMeta(auth ? extractMeta(auth) : null);
+  if (userIdentity) {
+    return userIdentity;
+  }
+
+  const metaIdentity = getAccountIdentityFromMeta(auth ? extractMeta(auth) : null);
+  if (metaIdentity && workspaceIdentity) {
+    return `meta::${metaIdentity}::${workspaceIdentity}`;
+  }
+
+  if (workspaceIdentity) {
+    return workspaceIdentity;
+  }
+
+  if (metaIdentity) {
+    return `meta::${metaIdentity}`;
+  }
+
+  return null;
 }
 
 export function hasAccountAuthTokens(auth: AuthFile | null | undefined): boolean {
@@ -219,24 +299,14 @@ export function findMatchingNamedAuthName(auth: AuthFile | null | undefined): st
     return null;
   }
 
-  const accountId = auth?.tokens?.account_id;
-  if (accountId) {
-    for (const name of listNamedAuthFiles()) {
-      const namedResult = readSavedAuthFileResult(getNamedAuthPath(name));
-      if (namedResult.status === "ok" && namedResult.value.tokens?.account_id === accountId) {
-        return name;
-      }
-    }
-  }
-
-  const identity = getAccountIdentityFromMeta(auth ? extractMeta(auth) : null);
+  const identity = getAccountIdentity(auth);
   if (!identity) {
     return null;
   }
 
   for (const name of listNamedAuthFiles()) {
     const namedResult = readSavedAuthFileResult(getNamedAuthPath(name));
-    if (namedResult.status === "ok" && getAccountIdentityFromMeta(extractMeta(namedResult.value)) === identity) {
+    if (namedResult.status === "ok" && getAccountIdentity(namedResult.value) === identity) {
       return name;
     }
   }
