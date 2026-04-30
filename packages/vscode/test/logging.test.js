@@ -30,7 +30,7 @@ function createVscodeMock() {
   const config = {
     authDirectory: "",
     showStatusBar: false,
-    quotaRefreshInterval: 300,
+    quotaRefreshInterval: 30,
     detailedPerformanceLogging: false,
     syncedStorage: globalStateValues.get(SYNCED_CLOUD_STATE_KEY),
   };

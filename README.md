@@ -77,7 +77,7 @@ Activity Bar account view:
 
 | Setting | Default | Description |
 |---|---|---|
-| `codex-account-switch.quotaRefreshInterval` | `300` | Automatic background quota refresh interval, in seconds; each interval refreshes one saved account quota in rotation |
+| `codex-account-switch.quotaRefreshInterval` | `30` | Automatic background quota refresh interval, in seconds; minimum `5`; each interval refreshes one saved account quota in rotation |
 | `codex-account-switch.showStatusBar` | `true` | Show the current account quota in the status bar |
 | `codex-account-switch.reloadWindowAfterSwitch` | `prompt` | Whether to prompt or automatically reload the window after switching accounts |
 | `codex-account-switch.authDirectory` | `""` | Directory used to save and load `auth_{name}.json`; empty means the default Codex config directory |

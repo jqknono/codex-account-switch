@@ -159,7 +159,7 @@ const TOKEN_AUTO_UPDATE_INTERVAL_HOURS_SETTING = "tokenAutoUpdateIntervalHours";
 const CURRENT_SELECTION_KEY = "codex-account-switch.currentSavedSelection";
 const DEFAULT_TOKEN_AUTO_UPDATE_INTERVAL_HOURS = 24;
 const HOUR_MS = 60 * 60 * 1000;
-const DEFAULT_QUOTA_CACHE_INTERVAL_MS = 5 * 60 * 1000;
+const DEFAULT_QUOTA_CACHE_INTERVAL_MS = 30 * 1000;
 const inflightCloudQuotaQueries = new Map<string, Promise<QuotaQueryResult>>();
 let inflightAutoRefreshDevicePrompt: Promise<string | null> | null = null;
 const EMPTY_SYNC_METADATA: SavedStorageSyncMetadata = {
@@ -174,11 +174,11 @@ function getConfiguration() {
 }
 
 function getQuotaCacheIntervalMs(): number {
-  const intervalSec = getConfiguration().get<number>("quotaRefreshInterval", 300);
-  if (!Number.isFinite(intervalSec) || intervalSec <= 0) {
+  const intervalSec = getConfiguration().get<number>("quotaRefreshInterval", 30);
+  if (!Number.isFinite(intervalSec)) {
     return DEFAULT_QUOTA_CACHE_INTERVAL_MS;
   }
-  return intervalSec * 1000;
+  return Math.max(intervalSec, 5) * 1000;
 }
 
 function shouldForceQuotaFetch(reason?: string): boolean {

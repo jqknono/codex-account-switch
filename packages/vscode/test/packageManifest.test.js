@@ -132,15 +132,15 @@ test("storage target settings are contributed", () => {
   );
 });
 
-test("quota refresh setting defaults to 300 seconds for rotating background refresh", () => {
+test("quota refresh setting defaults to 30 seconds for rotating background refresh", () => {
   const setting =
     manifest.contributes.configuration.properties[
       "codex-account-switch.quotaRefreshInterval"
     ];
 
   assert.equal(setting?.type, "number");
-  assert.equal(setting?.default, 300);
-  assert.equal(setting?.minimum, 60);
+  assert.equal(setting?.default, 30);
+  assert.equal(setting?.minimum, 5);
   assert.match(setting?.description ?? "", /background/i);
   assert.match(setting?.description ?? "", /one saved account/i);
   assert.match(setting?.description ?? "", /rotation/i);

@@ -155,7 +155,7 @@ function createVscodeMock(options) {
     authDirectory: options.authDirectory,
     reloadWindowAfterSwitch: "never",
     useDeviceAuthForLogin: options.useDeviceAuthForLogin ?? false,
-    quotaRefreshInterval: 300,
+    quotaRefreshInterval: 30,
     tokenAutoUpdate: options.tokenAutoUpdate ?? options.cloudTokenAutoUpdate ?? false,
     tokenAutoUpdateIntervalHours:
       options.tokenAutoUpdateIntervalHours ?? options.cloudTokenAutoUpdateIntervalHours ?? 24,
@@ -1977,20 +1977,29 @@ test("background quota refresh rotates one saved account per interval without ex
 
       const usageRequests = requestLog.filter((request) => request.hostname === "chatgpt.com");
       assert.equal(intervalHandles.length, 1);
-      assert.equal(intervalHandles[0].ms, 300000);
+      assert.equal(intervalHandles[0].ms, 30000);
       assert.equal(usageRequests.length, 1);
       assert.equal(usageRequests[0].authorization, "Bearer access-beta");
 
       await mocked.vscode.workspace
         .getConfiguration("codex-account-switch")
-        .update("quotaRefreshInterval", 180);
+        .update("quotaRefreshInterval", 5);
 
       assert.equal(clearedIntervals.length >= 1, true);
       assert.equal(clearedIntervals[0], intervalHandles[0]);
       assert.equal(intervalHandles.length, 2);
-      assert.equal(intervalHandles[1].ms, 180000);
+      assert.equal(intervalHandles[1].ms, 5000);
 
-      intervalHandles[1].callback();
+      await mocked.vscode.workspace
+        .getConfiguration("codex-account-switch")
+        .update("quotaRefreshInterval", 1);
+
+      assert.equal(clearedIntervals.length >= 2, true);
+      assert.equal(clearedIntervals[1], intervalHandles[1]);
+      assert.equal(intervalHandles.length, 3);
+      assert.equal(intervalHandles[2].ms, 5000);
+
+      intervalHandles[2].callback();
       await waitForBackgroundWork();
 
       assert.equal(countUsageRequests(requestLog), 2);
@@ -1999,7 +2008,7 @@ test("background quota refresh rotates one saved account per interval without ex
         "Bearer access-gamma"
       );
 
-      intervalHandles[1].callback();
+      intervalHandles[2].callback();
       await waitForBackgroundWork();
 
       assert.equal(countUsageRequests(requestLog), 3);

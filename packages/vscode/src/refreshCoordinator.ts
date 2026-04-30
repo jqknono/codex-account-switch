@@ -137,16 +137,17 @@ export class RefreshCoordinator implements vscode.Disposable {
       this.autoRefreshTimer = undefined;
     }
 
-    const intervalSec = vscode.workspace.getConfiguration("codex-account-switch").get<number>("quotaRefreshInterval", 300);
-    if (!Number.isFinite(intervalSec) || intervalSec <= 0) {
+    const intervalSec = vscode.workspace.getConfiguration("codex-account-switch").get<number>("quotaRefreshInterval", 30);
+    if (!Number.isFinite(intervalSec)) {
       return;
     }
+    const effectiveIntervalSec = Math.max(intervalSec, 5);
 
     this.autoRefreshTimer = setInterval(() => {
       this.scheduleQuotaRefresh({
         reason: "timer",
       });
-    }, intervalSec * 1000);
+    }, effectiveIntervalSec * 1000);
   }
 
   private enqueueQuotaRefresh(request: ScheduledQuotaRefresh & { targetIds?: Iterable<string> }): void {

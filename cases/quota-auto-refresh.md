@@ -2,8 +2,9 @@
 
 | 场景 | 前置条件 / 输入 | 预期结果 |
 | --- | --- | --- |
-| 默认后台刷新 | 有多个 saved account，未修改 `codex-account-switch.quotaRefreshInterval` | 插件每 `300s` 在后台只刷新 1 个 account 的 quota，按轮转方式推进，不阻塞其余账号。 |
-| 修改刷新周期 | 用户把 `codex-account-switch.quotaRefreshInterval` 改为 `180` | 旧 timer 被释放，新 timer 按 `180s` 生效，后续后台刷新采用新周期。 |
+| 默认后台刷新 | 有多个 saved account，未修改 `codex-account-switch.quotaRefreshInterval` | 插件每 `30s` 在后台只刷新 1 个 account 的 quota，按轮转方式推进，不阻塞其余账号。 |
+| 修改刷新周期 | 用户把 `codex-account-switch.quotaRefreshInterval` 改为 `5` | 旧 timer 被释放，新 timer 按 `5s` 生效，后续后台刷新采用新周期。 |
+| 低于下限的刷新周期 | 用户绕过设置 UI 把 `codex-account-switch.quotaRefreshInterval` 写成 `1` | 后台 timer 按 `5s` 下限执行，共享 quota cache 的节流窗口也按 `5s` 计算。 |
 | 分组右键批量刷新 | 用户在 `Local Accounts` 或 `Cloud Accounts` 分组节点点击右键并选择 `Refresh Quota` | 仅刷新该分组内全部 accounts 的 quota，不要求逐个手动点击账号。 |
 | 第二个 VS Code 窗口启动 | 同机已有另一个 VS Code 实例刚查询过同一套 saved accounts 的 quota | 新窗口优先从插件共享 cache 显示最近一次 quota 结果，不重复立刻发起同样的 quota 请求。 |
 | 查询失败但已有旧结果 | quota API 临时失败，但本地 cache 中已有最近一次成功查询结果 | 插件继续显示上次成功查询的 quota 数据，优先避免树节点回退到 `No data`。 |
