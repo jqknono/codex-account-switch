@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { Command } from "commander";
-import { setNamedAuthDir } from "@codex-account-switch/core";
+import { setNamedAuthDir, setSavedAuthPassphrase } from "@codex-account-switch/core";
 import {
   cmdList,
   cmdAdd,
@@ -23,11 +23,16 @@ program
   .version("1.0.1");
 
 program
-  .option("--auth-dir <path>", "Directory for saving and loading auth_{name}.json files; defaults to the Codex config directory");
+  .option("--auth-dir <path>", "Directory for saving and loading auth_{name}.json files; defaults to the Codex config directory")
+  .option("--password <password>", "Password to decrypt encrypted saved accounts; can also be set via CODEX_ACCOUNT_SWITCH_PASSWORD env var");
 
 program.hook("preAction", () => {
-  const opts = program.opts<{ authDir?: string }>();
+  const opts = program.opts<{ authDir?: string; password?: string }>();
   setNamedAuthDir(opts.authDir);
+  const password = opts.password || process.env.CODEX_ACCOUNT_SWITCH_PASSWORD;
+  if (password) {
+    setSavedAuthPassphrase(password);
+  }
 });
 
 program

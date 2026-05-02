@@ -223,6 +223,7 @@ export function cmdList(): void {
   console.log(chalk.bold("\nSaved accounts:\n"));
 
   const maxNameLen = Math.max(...accounts.map((a) => a.name.length), 4);
+  const hasLocked = accounts.some((a) => a.storageState === "locked");
 
   for (const account of accounts) {
     const marker = account.isCurrent ? chalk.green("● ") : "  ";
@@ -243,6 +244,15 @@ export function cmdList(): void {
       `${marker}${chalk.bold(paddedName)}  ${chalk.dim(email)}  ${chalk.cyan(plan)}${tokenStatus}${tag}`
     );
   }
+
+  if (hasLocked) {
+    console.log(
+      chalk.dim(
+        "\n  Some accounts are locked. Use --password <password> or set CODEX_ACCOUNT_SWITCH_PASSWORD to decrypt them."
+      )
+    );
+  }
+
   console.log();
 }
 

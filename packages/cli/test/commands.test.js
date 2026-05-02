@@ -1,6 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { execSync } = require("node:child_process");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -982,4 +983,119 @@ test("mode: dotted provider names write quoted TOML table headers", () => {
   const config = fs.readFileSync(path.join(home, "config.toml"), "utf-8");
   assert.match(config, /\[model_providers\."corp\.proxy"\]/);
   assert.doesNotMatch(config, /\[model_providers\.corp\.proxy\]/);
+});
+
+// ─── encryption helper ───────────────────────────────────────
+
+function encryptAuth(auth, passphrase) {
+  const salt = crypto.randomBytes(16);
+  const iv = crypto.randomBytes(12);
+  const key = crypto.scryptSync(passphrase, salt, 32);
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+  const plaintext = Buffer.from(JSON.stringify(auth, null, 2), "utf-8");
+  const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+
+  return {
+    version: 1,
+    kind: "saved_auth",
+    cipher: "aes-256-gcm",
+    kdf: "scrypt",
+    salt: salt.toString("base64"),
+    iv: iv.toString("base64"),
+    ciphertext: Buffer.concat([ciphertext, authTag]).toString("base64"),
+  };
+}
+
+// ─── --password ──────────────────────────────────────────────
+
+test("password: encrypted account shows locked without password", () => {
+  const home = tmpHome();
+  const auth = makeAuth("bob@example.com", "plus");
+  const encrypted = encryptAuth(auth, "s3cret");
+  writeJson(path.join(home, "auth_bob.json"), encrypted);
+
+  const r = cli("list", home);
+  assert.equal(r.code, 0);
+  assert.ok(r.stdout.includes("locked"));
+  assert.ok(r.stdout.includes("Some accounts are locked"));
+  assert.ok(!r.stdout.includes("bob@example.com"));
+});
+
+test("password: --password decrypts encrypted account", () => {
+  const home = tmpHome();
+  const auth = makeAuth("bob@example.com", "plus");
+  const encrypted = encryptAuth(auth, "s3cret");
+  writeJson(path.join(home, "auth_bob.json"), encrypted);
+
+  const r = cli('--password "s3cret" list', home);
+  assert.equal(r.code, 0);
+  assert.ok(r.stdout.includes("bob@example.com"));
+  assert.ok(r.stdout.includes("plus"));
+  assert.ok(!r.stdout.includes("locked"));
+  assert.ok(!r.stdout.includes("Some accounts are locked"));
+});
+
+test("password: CODEX_ACCOUNT_SWITCH_PASSWORD env var decrypts encrypted account", () => {
+  const home = tmpHome();
+  const auth = makeAuth("alice@example.com", "pro");
+  const encrypted = encryptAuth(auth, "env-pass");
+  writeJson(path.join(home, "auth_alice.json"), encrypted);
+
+  const r = cli("list", home, { env: { CODEX_ACCOUNT_SWITCH_PASSWORD: "env-pass" } });
+  assert.equal(r.code, 0);
+  assert.ok(r.stdout.includes("alice@example.com"));
+  assert.ok(r.stdout.includes("pro"));
+  assert.ok(!r.stdout.includes("locked"));
+});
+
+test("password: --password takes precedence over env var", () => {
+  const home = tmpHome();
+  const auth = makeAuth("carol@example.com", "plus");
+  const encrypted = encryptAuth(auth, "cli-pass");
+  writeJson(path.join(home, "auth_carol.json"), encrypted);
+
+  const r = cli('--password "cli-pass" list', home, {
+    env: { CODEX_ACCOUNT_SWITCH_PASSWORD: "wrong-pass" },
+  });
+  assert.equal(r.code, 0);
+  assert.ok(r.stdout.includes("carol@example.com"));
+  assert.ok(!r.stdout.includes("locked"));
+});
+
+test("password: wrong password shows locked", () => {
+  const home = tmpHome();
+  const auth = makeAuth("bob@example.com", "plus");
+  const encrypted = encryptAuth(auth, "s3cret");
+  writeJson(path.join(home, "auth_bob.json"), encrypted);
+
+  const r = cli('--password "wrong" list', home);
+  assert.equal(r.code, 0);
+  assert.ok(r.stdout.includes("locked"));
+  assert.ok(!r.stdout.includes("bob@example.com"));
+});
+
+test("password: mixed encrypted and plain accounts", () => {
+  const home = tmpHome();
+  const plainAuth = makeAuth("plain@example.com", "plus");
+  const encryptedAuth = makeAuth("secret@example.com", "pro");
+  writeJson(path.join(home, "auth_plain.json"), plainAuth);
+  writeJson(path.join(home, "auth_secret.json"), encryptAuth(encryptedAuth, "pw"));
+
+  const r1 = cli("list", home);
+  assert.ok(r1.stdout.includes("plain@example.com"));
+  assert.ok(r1.stdout.includes("locked"));
+
+  const r2 = cli('--password "pw" list', home);
+  assert.ok(r2.stdout.includes("plain@example.com"));
+  assert.ok(r2.stdout.includes("secret@example.com"));
+  assert.ok(!r2.stdout.includes("locked"));
+});
+
+test("password: --help shows password option", () => {
+  const home = tmpHome();
+  const r = cli("--help", home);
+  assert.equal(r.code, 0);
+  assert.ok(r.stdout.includes("--password"));
+  assert.ok(r.stdout.includes("CODEX_ACCOUNT_SWITCH_PASSWORD"));
 });
