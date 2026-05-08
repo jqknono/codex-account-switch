@@ -14,8 +14,11 @@ import {
   cmdImport,
   cmdMode,
 } from "./commands";
+import { initializeCliDiagnosticLogging } from "./log";
 
 const program = new Command();
+
+initializeCliDiagnosticLogging();
 
 program
   .name("codex-account-switch")
@@ -96,4 +99,3 @@ program.parseAsync().catch((error: unknown) => {
   console.error(error instanceof Error ? error.message : String(error));
   process.exitCode = 1;
 });
-

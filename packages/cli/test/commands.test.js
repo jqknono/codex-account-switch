@@ -105,6 +105,10 @@ function cli(args, home, opts = {}) {
   }
 }
 
+function cliDiagnosticLogPath(home) {
+  return path.join(home, "logs", "codex-account-switch-cli.log");
+}
+
 function writeFakeCodexCommand(binDir, { auth, logPath }) {
   const authJson = JSON.stringify(auth);
   const script = [
@@ -256,7 +260,7 @@ test("list: no accounts shows empty message", () => {
   const home = tmpHome();
   const r = cli("list", home);
   assert.equal(r.code, 0);
-  assert.ok(r.stdout.includes("No saved accounts"));
+  assert.ok(r.stdout.includes("No saved accounts or providers"));
 });
 
 test("list: single account shows name, email, plan", () => {
@@ -324,19 +328,48 @@ test("list: in provider mode no account is marked current", () => {
   const home = tmpHome();
   writeJson(path.join(home, "auth_work.json"), makeAuth("w@e.com", "plus"));
   writeJson(path.join(home, "auth.json"), { OPENAI_API_KEY: "sk-test" });
+  writeJson(path.join(home, "provider_cliproxyapi.json"), makeProviderProfile());
   fs.writeFileSync(path.join(home, "config.toml"), makeProviderConfig(), "utf-8");
 
   const r = cli("list", home);
   assert.equal(r.code, 0);
   assert.ok(r.stdout.includes("work"));
-  assert.ok(!r.stdout.includes("[current]"));
+  assert.ok(!r.stdout.includes("work  w@e.com  plus [current]"));
+  assert.ok(r.stdout.includes("Saved providers"));
+  assert.ok(r.stdout.includes("cliproxyapi"));
+  assert.ok(r.stdout.includes("[current]"));
+});
+
+test("list: providers are shown even when there are no saved accounts", () => {
+  const home = tmpHome();
+  writeJson(path.join(home, "provider_cliproxyapi1.json"), makeProviderProfile("cliproxyapi1"));
+
+  const r = cli("list", home);
+  assert.equal(r.code, 0);
+  assert.ok(r.stdout.includes("Saved providers"));
+  assert.ok(r.stdout.includes("cliproxyapi1"));
+  assert.ok(r.stdout.includes("http://127.0.0.1:34046/v1"));
+  assert.ok(r.stdout.includes("responses"));
+});
+
+test("list: accounts and providers are both shown", () => {
+  const home = tmpHome();
+  writeJson(path.join(home, "auth_work.json"), makeAuth("work@example.com", "plus"));
+  writeJson(path.join(home, "provider_cliproxyapi1.json"), makeProviderProfile("cliproxyapi1"));
+
+  const r = cli("list", home);
+  assert.equal(r.code, 0);
+  assert.ok(r.stdout.includes("Saved accounts"));
+  assert.ok(r.stdout.includes("Saved providers"));
+  assert.ok(r.stdout.includes("work@example.com"));
+  assert.ok(r.stdout.includes("cliproxyapi1"));
 });
 
 test("ls alias works for list", () => {
   const home = tmpHome();
   const r = cli("ls", home);
   assert.equal(r.code, 0);
-  assert.ok(r.stdout.includes("No saved accounts"));
+  assert.ok(r.stdout.includes("No saved accounts or providers"));
 });
 
 // ─── remove ──────────────────────────────────────────────────
@@ -663,6 +696,38 @@ test("quota: prints access and refresh token status lines", () => {
   assert.ok(r.stdout.includes("Refresh token: available"));
 });
 
+test("quota: diagnostic performance logs are written to file instead of stdout", () => {
+  const home = tmpHome();
+  writeJson(path.join(home, "auth_work.json"), {
+    auth_mode: "chatgpt",
+    OPENAI_API_KEY: null,
+    last_refresh: new Date().toISOString(),
+    tokens: {
+      id_token: jwt({
+        email: "work@example.com",
+        name: "work",
+        sub: "sub-work@example.com",
+        exp: Math.floor(Date.now() / 1000) + 3600,
+        "https://api.openai.com/auth": { chatgpt_plan_type: "plus" },
+      }),
+      refresh_token: "rt-work@example.com",
+      account_id: "acct-work",
+    },
+  });
+  writeJson(path.join(home, "auth.json"), readJson(path.join(home, "auth_work.json")));
+
+  const r = cli("quota", home);
+  assert.equal(r.code, 0);
+  assert.doesNotMatch(r.stdout, /perf-(start|stage|finish|fail)/);
+
+  const logPath = cliDiagnosticLogPath(home);
+  assert.ok(fs.existsSync(logPath));
+
+  const logContents = fs.readFileSync(logPath, "utf-8");
+  assert.match(logContents, /\[info\].*"operation":"queryQuota"/);
+  assert.match(logContents, /\[info\].*"operation":"getQuotaInfo"/);
+});
+
 // ─── refresh ─────────────────────────────────────────────────
 
 test("refresh: unsupported in provider mode", () => {
@@ -951,7 +1016,9 @@ test("workflow: mode account after provider restores account listing", () => {
 
   cli("mode cliproxyapi", home);
   const r1 = cli("list", home);
-  assert.ok(!r1.stdout.includes("[current]"));
+  assert.ok(!r1.stdout.includes("work@example.com  plus [current]"));
+  assert.ok(r1.stdout.includes("cliproxyapi"));
+  assert.ok(r1.stdout.includes("[current]"));
 
   cli("mode account", home);
 
@@ -1018,7 +1085,7 @@ test("password: encrypted account shows locked without password", () => {
   const r = cli("list", home);
   assert.equal(r.code, 0);
   assert.ok(r.stdout.includes("locked"));
-  assert.ok(r.stdout.includes("Some accounts are locked"));
+  assert.ok(r.stdout.includes("Some saved entries are locked"));
   assert.ok(!r.stdout.includes("bob@example.com"));
 });
 

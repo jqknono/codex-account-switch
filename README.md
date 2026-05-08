@@ -39,7 +39,7 @@ Animated CLI usage demo showing `ls`, `use`, and `quota`:
 | Command | Description |
 |---|---|
 | `codex-account-switch add <name>` | Run `codex login` and save the result as a named account |
-| `codex-account-switch list` | List all saved accounts |
+| `codex-account-switch list` | List all saved accounts and providers |
 | `codex-account-switch use <name>` | Switch to the specified account and restore account mode |
 | `codex-account-switch mode [name]` | Show the current mode or switch to a provider/account mode |
 | `codex-account-switch remove <name>` | Remove a saved account |
@@ -56,6 +56,8 @@ codex-account-switch --auth-dir /path/to/accounts list
 ```
 
 You can also use the environment variable `CODEX_ACCOUNT_SWITCH_AUTH_DIR`.
+
+CLI diagnostic logs such as performance traces are written to `~/.codex/logs/codex-account-switch-cli.log` by default instead of being printed in command output. If `CODEX_HOME` is set, the log file is written under that directory's `logs/`.
 
 ## VS Code Extension
 

@@ -23,8 +23,8 @@ import {
   readCurrentAuth,
   getCurrentSelection,
   listModes,
+  listProviderModes,
   switchMode,
-  readProviderProfile,
   readProviderProfileResult,
   writeProviderProfile,
   getDefaultProviderProfile,
@@ -214,41 +214,75 @@ async function ensureProviderProfile(name: string): Promise<ProviderProfile | nu
 
 export function cmdList(): void {
   const accounts = listAccounts();
+  const providerNames = listProviderModes();
+  const selection = getCurrentSelection();
 
-  if (accounts.length === 0) {
-    console.log(chalk.yellow("No saved accounts. Use the add command to create one."));
+  if (accounts.length === 0 && providerNames.length === 0) {
+    console.log(chalk.yellow("No saved accounts or providers. Use the add or mode command to create one."));
     return;
   }
 
-  console.log(chalk.bold("\nSaved accounts:\n"));
-
-  const maxNameLen = Math.max(...accounts.map((a) => a.name.length), 4);
   const hasLocked = accounts.some((a) => a.storageState === "locked");
+  const hasLockedProviders = providerNames.some((name) => readProviderProfileResult(name).status === "locked");
 
-  for (const account of accounts) {
-    const marker = account.isCurrent ? chalk.green("● ") : "  ";
-    const tag = account.isCurrent ? chalk.green(" [current]") : "";
-    const paddedName = account.name.padEnd(maxNameLen);
-    const email = account.meta?.email ?? "unknown";
-    const plan = account.meta?.plan ?? "unknown";
-    const tokenStatus =
-      account.storageState === "ready" && account.auth
-        ? `${formatTokenStatusTag("access", account.auth)}${formatTokenStatusTag("refresh", account.auth)}`
-        : account.storageState === "locked"
-          ? ` [storage: ${chalk.yellow("locked")}]`
-          : account.storageState === "invalid"
-            ? ` [storage: ${chalk.red("invalid")}]`
-            : "";
+  if (accounts.length > 0) {
+    console.log(chalk.bold("\nSaved accounts:\n"));
 
-    console.log(
-      `${marker}${chalk.bold(paddedName)}  ${chalk.dim(email)}  ${chalk.cyan(plan)}${tokenStatus}${tag}`
-    );
+    const maxNameLen = Math.max(...accounts.map((a) => a.name.length), 4);
+
+    for (const account of accounts) {
+      const marker = account.isCurrent ? chalk.green("● ") : "  ";
+      const tag = account.isCurrent ? chalk.green(" [current]") : "";
+      const paddedName = account.name.padEnd(maxNameLen);
+      const email = account.meta?.email ?? "unknown";
+      const plan = account.meta?.plan ?? "unknown";
+      const tokenStatus =
+        account.storageState === "ready" && account.auth
+          ? `${formatTokenStatusTag("access", account.auth)}${formatTokenStatusTag("refresh", account.auth)}`
+          : account.storageState === "locked"
+            ? ` [storage: ${chalk.yellow("locked")}]`
+            : account.storageState === "invalid"
+              ? ` [storage: ${chalk.red("invalid")}]`
+              : "";
+
+      console.log(
+        `${marker}${chalk.bold(paddedName)}  ${chalk.dim(email)}  ${chalk.cyan(plan)}${tokenStatus}${tag}`
+      );
+    }
   }
 
-  if (hasLocked) {
+  if (providerNames.length > 0) {
+    console.log(chalk.bold("\nSaved providers:\n"));
+
+    const maxNameLen = Math.max(...providerNames.map((name) => name.length), 8);
+
+    for (const name of providerNames) {
+      const result = readProviderProfileResult(name);
+      const isCurrentProvider = selection.kind === "provider" && selection.name === name;
+      const marker = isCurrentProvider ? chalk.green("● ") : "  ";
+      const tag = isCurrentProvider ? chalk.green(" [current]") : "";
+      const paddedName = name.padEnd(maxNameLen);
+
+      if (result.status === "ok") {
+        const profile = result.value;
+        console.log(
+          `${marker}${chalk.bold(paddedName)}  ${chalk.dim(profile.config.base_url)}  ${chalk.cyan(profile.config.wire_api)}${tag}`
+        );
+        continue;
+      }
+
+      const storageStatus =
+        result.status === "locked"
+          ? `[storage: ${chalk.yellow("locked")}]`
+          : `[storage: ${chalk.red("invalid")}]`;
+      console.log(`${marker}${chalk.bold(paddedName)}  ${storageStatus}${tag}`);
+    }
+  }
+
+  if (hasLocked || hasLockedProviders) {
     console.log(
-      chalk.dim(
-        "\n  Some accounts are locked. Use --password <password> or set CODEX_ACCOUNT_SWITCH_PASSWORD to decrypt them."
+      chalk.redBright.bold(
+        "\n  Some saved entries are locked. Use --password <password> or set CODEX_ACCOUNT_SWITCH_PASSWORD to decrypt them."
       )
     );
   }
