@@ -15,7 +15,6 @@ import {
   extractMeta,
   getAccountIdentity,
   hasAccountAuthTokens,
-  getAccountIdentityFromMeta,
   findMatchingNamedAuthName,
   syncCurrentAuthToSavedAccount,
   writeAuthFile,
@@ -144,9 +143,9 @@ function logAccountLock(level: "info" | "warn" | "error", event: string, details
 
 function getAccountLockKey(auth: AuthFile): string {
   const basis =
-    auth.tokens?.account_id?.trim() ||
-    auth.tokens?.refresh_token?.trim() ||
     getAccountIdentity(auth) ||
+    auth.tokens?.refresh_token?.trim() ||
+    auth.tokens?.account_id?.trim() ||
     auth.tokens?.access_token?.trim() ||
     "unknown";
 

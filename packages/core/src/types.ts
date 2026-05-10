@@ -22,7 +22,10 @@ export interface IdTokenPayload {
   "https://api.openai.com/auth"?: {
     chatgpt_plan_type?: string;
     chatgpt_user_id?: string;
+    user_id?: string;
     chatgpt_account_id?: string;
+    selected_organization_id?: string;
+    default_organization_id?: string;
     chatgpt_subscription_active_start?: string;
     chatgpt_subscription_active_until?: string;
     organizations?: Array<{ id: string; title: string; role: string }>;

@@ -1,5 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { createHash } = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -29,7 +30,20 @@ function jwt(payload) {
   return `${header}.${body}.fakesig`;
 }
 
-function makeAccountAuth(accountId, refreshToken, accessToken = `access-${accountId}`) {
+function makeAccountAuth(accountId, refreshToken, accessToken = `access-${accountId}`, options = {}) {
+  const email = options.email ?? `${accountId}@example.com`;
+  const name = options.name ?? accountId;
+  const plan = options.plan ?? "plus";
+  const sub = options.sub ?? `sub-${accountId}`;
+  const authInfo = {
+    chatgpt_plan_type: plan,
+    ...(options.chatgptUserId ? { chatgpt_user_id: options.chatgptUserId } : {}),
+    ...(options.userId ? { user_id: options.userId } : {}),
+    ...(options.selectedOrganizationId ? { selected_organization_id: options.selectedOrganizationId } : {}),
+    ...(options.defaultOrganizationId ? { default_organization_id: options.defaultOrganizationId } : {}),
+    ...(options.chatgptAccountId ? { chatgpt_account_id: options.chatgptAccountId } : {}),
+    ...(options.organizations ? { organizations: options.organizations } : {}),
+  };
   return {
     auth_mode: "chatgpt",
     OPENAI_API_KEY: null,
@@ -37,6 +51,12 @@ function makeAccountAuth(accountId, refreshToken, accessToken = `access-${accoun
       account_id: accountId,
       access_token: accessToken,
       refresh_token: refreshToken,
+      id_token: jwt({
+        email,
+        name,
+        sub,
+        "https://api.openai.com/auth": authInfo,
+      }),
     },
   };
 }
@@ -390,6 +410,132 @@ test("addAccountFromAuth rejects overwriting an existing account with a differen
 
   const saved = JSON.parse(fs.readFileSync(path.join(codexHome, "auth_work.json"), "utf-8"));
   assert.equal(saved.tokens.account_id, "acct-work");
+});
+
+test("addAccountFromAuth allows different users that share the same workspace account id", () => {
+  const codexHome = createTempCodexHome();
+  process.env.CODEX_HOME = codexHome;
+
+  writeJson(
+    path.join(codexHome, "auth_alice.json"),
+    makeAccountAuth("acct-team", "rt-alice", "access-alice", {
+      email: "alice@example.com",
+      name: "Alice",
+      sub: "sub-alice",
+      chatgptUserId: "cgpt-alice",
+    }),
+  );
+  writeJson(
+    path.join(codexHome, "auth.json"),
+    makeAccountAuth("acct-team", "rt-bob", "access-bob", {
+      email: "bob@example.com",
+      name: "Bob",
+      sub: "sub-bob",
+      chatgptUserId: "cgpt-bob",
+    }),
+  );
+
+  const result = core.addAccountFromAuth("bob");
+  assert.equal(result.success, true);
+  assert.equal(fs.existsSync(path.join(codexHome, "auth_bob.json")), true);
+});
+
+test("detectCurrentName matches by user identity before shared workspace account id", () => {
+  const codexHome = createTempCodexHome();
+  process.env.CODEX_HOME = codexHome;
+
+  writeJson(
+    path.join(codexHome, "auth_alice.json"),
+    makeAccountAuth("acct-team", "rt-alice", "access-alice", {
+      email: "alice@example.com",
+      name: "Alice",
+      sub: "sub-alice",
+      chatgptUserId: "cgpt-alice",
+    }),
+  );
+  writeJson(
+    path.join(codexHome, "auth_bob.json"),
+    makeAccountAuth("acct-team", "rt-bob-saved", "access-bob-saved", {
+      email: "bob@example.com",
+      name: "Bob",
+      sub: "sub-bob",
+      chatgptUserId: "cgpt-bob",
+    }),
+  );
+  writeJson(
+    path.join(codexHome, "auth.json"),
+    makeAccountAuth("acct-team", "rt-bob-current", "access-bob-current", {
+      email: "bob@example.com",
+      name: "Bob",
+      sub: "sub-bob",
+      chatgptUserId: "cgpt-bob",
+    }),
+  );
+
+  assert.equal(core.detectCurrentName(), "bob");
+});
+
+test("addAccountFromAuth allows the same email and plan when workspace ids differ", () => {
+  const codexHome = createTempCodexHome();
+  process.env.CODEX_HOME = codexHome;
+
+  writeJson(
+    path.join(codexHome, "auth_workspace-a.json"),
+    makeAccountAuth("acct-workspace-a", "rt-a", "access-a", {
+      email: "same@example.com",
+      name: "Same User",
+      sub: "sub-same-user",
+      selectedOrganizationId: "org-a",
+    }),
+  );
+  writeJson(
+    path.join(codexHome, "auth.json"),
+    makeAccountAuth("acct-workspace-b", "rt-b", "access-b", {
+      email: "same@example.com",
+      name: "Same User",
+      sub: "sub-same-user",
+      selectedOrganizationId: "org-b",
+    }),
+  );
+
+  const result = core.addAccountFromAuth("workspace-b");
+  assert.equal(result.success, true);
+  assert.equal(fs.existsSync(path.join(codexHome, "auth_workspace-b.json")), true);
+});
+
+test("detectCurrentName matches the saved account with the same email by workspace id", () => {
+  const codexHome = createTempCodexHome();
+  process.env.CODEX_HOME = codexHome;
+
+  writeJson(
+    path.join(codexHome, "auth_workspace-a.json"),
+    makeAccountAuth("acct-workspace-a", "rt-a", "access-a", {
+      email: "same@example.com",
+      name: "Same User",
+      sub: "sub-same-user",
+      selectedOrganizationId: "org-a",
+    }),
+  );
+  writeJson(
+    path.join(codexHome, "auth_workspace-b.json"),
+    makeAccountAuth("acct-workspace-b", "rt-b", "access-b", {
+      email: "same@example.com",
+      name: "Same User",
+      sub: "sub-same-user",
+      selectedOrganizationId: "org-b",
+    }),
+  );
+  writeJson(
+    path.join(codexHome, "auth.json"),
+    makeAccountAuth("acct-workspace-b", "rt-b-current", "access-b-current", {
+      email: "same@example.com",
+      name: "Same User",
+      sub: "sub-same-user",
+      selectedOrganizationId: "org-b",
+    }),
+  );
+
+  assert.equal(core.detectCurrentName(), "workspace-b");
 });
 
 test("queryQuota and refreshAccount report unsupported for provider mode without an account name", async () => {
@@ -805,10 +951,12 @@ test("queryQuota removes a stale lock left by a dead process", async () => {
     ...makeAccountAuth("acct-work", "rt-work", "access-current"),
     last_refresh: freshRefresh,
   });
+  const lockIdentity = core.getAccountIdentity(makeAccountAuth("acct-work", "rt-work", "access-current"));
+  const lockKey = createHash("sha1").update(lockIdentity || "unknown").digest("hex");
 
   const locksDir = path.join(codexHome, ".locks");
   fs.mkdirSync(locksDir, { recursive: true });
-  const staleLockPath = path.join(locksDir, "account-315faf43d55d5eea80186bb8a33c4abe6e2e05bd.lock");
+  const staleLockPath = path.join(locksDir, `account-${lockKey}.lock`);
   writeJson(staleLockPath, {
     pid: 999999,
     startedAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
