@@ -3532,6 +3532,9 @@ test("switching away from a cloud account does not auto-sync tokens by default",
   const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
   process.env.CODEX_HOME = codexHome;
   delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  const savedCloudAccessToken = makeJwt({
+    exp: Math.floor(Date.now() / 1000) + 24 * 3600,
+  });
 
   try {
     core.setSavedAuthPassphrase("manual-passphrase");
@@ -3546,7 +3549,7 @@ test("switching away from a cloud account does not auto-sync tokens by default",
         "sync-user": core.serializeSavedValue(
           "saved_auth",
           makeAuthFile("acct-cloud", {
-            accessToken: "access-cloud-old",
+            accessToken: savedCloudAccessToken,
             refreshToken: "refresh-cloud-old",
             lastRefresh: new Date().toISOString(),
           }),
@@ -3606,7 +3609,7 @@ test("switching away from a cloud account does not auto-sync tokens by default",
           "sync-user",
           "manual-passphrase"
         );
-        assert.equal(cloudAuth.tokens.access_token, "access-cloud-old");
+        assert.equal(cloudAuth.tokens.access_token, savedCloudAccessToken);
         assert.equal(cloudAuth.tokens.refresh_token, "refresh-cloud-old");
 
         for (const subscription of context.subscriptions.reverse()) {
@@ -3733,6 +3736,91 @@ test("timer refreshes local tokens when the refresh token expires within five da
   const localAuth = makeAuthFile("acct-local", {
     accessToken: "access-local-old",
     refreshToken: nearExpiryRefreshToken,
+  });
+  fs.writeFileSync(
+    path.join(codexHome, "auth_local-user.json"),
+    JSON.stringify(localAuth, null, 2),
+    "utf-8"
+  );
+  fs.writeFileSync(
+    path.join(codexHome, "auth.json"),
+    JSON.stringify(localAuth, null, 2),
+    "utf-8"
+  );
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  const requestLog = [];
+  const mocked = createVscodeMock({
+    showStatusBar: false,
+    tokenAutoUpdate: true,
+  });
+
+  try {
+    await withDisabledIntervals(() =>
+      withSuccessfulHttps(async () => {
+        const extension = loadExtensionWithMockedVscode(mocked.vscode);
+        const context = createExtensionContext(mocked);
+        await extension.activate(context);
+        await waitForBackgroundWork();
+        requestLog.length = 0;
+
+        const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
+        const [localItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
+          .filter((item) => item.account.name === "local-user" && item.account.source === "local");
+
+        await accountTreeView.treeDataProvider.refreshQuota([localItem.account.id], {
+          reason: "timer",
+        });
+
+        assert.equal(countAuthRefreshRequests(requestLog), 1);
+        assert.equal(countUsageRequests(requestLog), 1);
+
+        const savedAuth = JSON.parse(fs.readFileSync(path.join(codexHome, "auth_local-user.json"), "utf-8"));
+        const currentAuth = JSON.parse(fs.readFileSync(path.join(codexHome, "auth.json"), "utf-8"));
+        assert.equal(savedAuth.tokens.access_token, "access-rotated");
+        assert.equal(savedAuth.tokens.refresh_token, "refresh-rotated");
+        assert.equal(currentAuth.tokens.access_token, "access-rotated");
+        assert.equal(currentAuth.tokens.refresh_token, "refresh-rotated");
+
+        for (const subscription of context.subscriptions.reverse()) {
+          subscription?.dispose?.();
+        }
+      }, { requestLog })
+    );
+  } finally {
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
+test("timer refreshes local tokens when the access token is expired", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-local-expired-access-refresh-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  fs.mkdirSync(codexHome, { recursive: true });
+
+  const expiredAccessToken = makeJwt({
+    exp: Math.floor(Date.now() / 1000) - 60,
+  });
+  const localAuth = makeAuthFile("acct-local", {
+    accessToken: expiredAccessToken,
+    refreshToken: "refresh-local-stable",
   });
   fs.writeFileSync(
     path.join(codexHome, "auth_local-user.json"),
@@ -3995,7 +4083,110 @@ test("timer refreshes cloud tokens when the refresh token expires within five da
   });
 });
 
-test("automatic cloud token sync does not refresh tokens during quota refresh after the configured hour interval", async (t) => {
+test("timer refreshes cloud tokens when the access token is expired", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-cloud-expired-access-refresh-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  const authDir = path.join(tempRoot, "saved-auth");
+  const currentDeviceName = "device-current";
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(authDir, { recursive: true });
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  try {
+    core.setSavedAuthPassphrase("expired-access-passphrase");
+    const syncedStorage = {
+      version: 1,
+      accounts: {
+        "sync-user": core.serializeSavedValue(
+          "saved_auth",
+          makeAuthFile("acct-cloud", {
+            accessToken: makeJwt({
+              exp: Math.floor(Date.now() / 1000) - 60,
+            }),
+            refreshToken: "refresh-cloud-stable",
+          }),
+          {
+            requireEncryption: true,
+          }
+        ),
+      },
+      providers: {},
+      devices: [currentDeviceName],
+      autoRefreshDeviceName: null,
+    };
+    core.setSavedAuthPassphrase(null);
+
+    const requestLog = [];
+    const mocked = createVscodeMock({
+      authDirectory: authDir,
+      syncedStorage,
+      secretValues: {
+        [STORAGE_SECRET_KEY]: "expired-access-passphrase",
+      },
+      cloudTokenAutoUpdate: true,
+      cloudTokenAutoUpdateIntervalHours: 1,
+      showStatusBar: false,
+    });
+
+    await withMockedHostname(currentDeviceName, async () => {
+      await withDisabledIntervals(() =>
+        withSuccessfulHttps(async () => {
+          const extension = loadExtensionWithMockedVscode(mocked.vscode);
+          const context = createExtensionContext(mocked);
+          await extension.activate(context);
+          await waitForBackgroundWork();
+          requestLog.length = 0;
+
+          const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
+          const [cloudItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
+            .filter((item) => item.account.name === "sync-user" && item.account.source === "cloud");
+
+          await accountTreeView.treeDataProvider.refreshQuota([cloudItem.account.id], {
+            reason: "timer",
+          });
+
+          assert.equal(countAuthRefreshRequests(requestLog), 1);
+          assert.equal(countUsageRequests(requestLog), 1);
+
+          const cloudAuth = readCloudAccount(
+            mocked.config,
+            "sync-user",
+            "expired-access-passphrase"
+          );
+          assert.equal(cloudAuth.tokens.access_token, "access-rotated");
+          assert.equal(cloudAuth.tokens.refresh_token, "refresh-rotated");
+
+          for (const subscription of context.subscriptions.reverse()) {
+            subscription?.dispose?.();
+          }
+        }, { requestLog })
+      );
+    });
+  } finally {
+    core.setSavedAuthPassphrase(null);
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
+test("automatic cloud token sync refreshes expired access tokens during quota refresh", async (t) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-cloud-auto-refresh-"));
   const codexHome = path.join(tempRoot, ".codex");
   const authDir = path.join(tempRoot, "saved-auth");
@@ -4016,7 +4207,9 @@ test("automatic cloud token sync does not refresh tokens during quota refresh af
         "sync-user": core.serializeSavedValue(
           "saved_auth",
           makeAuthFile("acct-cloud", {
-            accessToken: "access-cloud-old",
+            accessToken: makeJwt({
+              exp: Math.floor(Date.now() / 1000) - 60,
+            }),
             refreshToken: "refresh-cloud-old",
             lastRefresh: new Date(Date.now() - 2 * 24 * 3600 * 1000).toISOString(),
           }),
@@ -4049,13 +4242,21 @@ test("automatic cloud token sync does not refresh tokens during quota refresh af
           await extension.activate(context);
           await waitForBackgroundWork();
 
+          const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
+          const [cloudItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
+            .filter((item) => item.account.name === "sync-user" && item.account.source === "cloud");
+
+          await accountTreeView.treeDataProvider.refreshQuota([cloudItem.account.id], {
+            reason: "timer",
+          });
+
           const cloudAuth = readCloudAccount(
             mocked.config,
             "sync-user",
             "auto-passphrase"
           );
-          assert.equal(cloudAuth.tokens.access_token, "access-cloud-old");
-          assert.equal(cloudAuth.tokens.refresh_token, "refresh-cloud-old");
+          assert.equal(cloudAuth.tokens.access_token, "access-rotated");
+          assert.equal(cloudAuth.tokens.refresh_token, "refresh-rotated");
 
           for (const subscription of context.subscriptions.reverse()) {
             subscription?.dispose?.();
@@ -4083,7 +4284,7 @@ test("automatic cloud token sync does not refresh tokens during quota refresh af
   });
 });
 
-test("automatic cloud token sync skips writes before the configured hour interval elapses", async (t) => {
+test("expired access token bypasses the automatic cloud token sync interval throttle", async (t) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-cloud-auto-throttle-"));
   const codexHome = path.join(tempRoot, ".codex");
   const authDir = path.join(tempRoot, "saved-auth");
@@ -4103,7 +4304,9 @@ test("automatic cloud token sync skips writes before the configured hour interva
         "sync-user": core.serializeSavedValue(
           "saved_auth",
           makeAuthFile("acct-cloud", {
-            accessToken: "access-cloud-old",
+            accessToken: makeJwt({
+              exp: Math.floor(Date.now() / 1000) - 60,
+            }),
             refreshToken: "refresh-cloud-old",
             lastRefresh: new Date(Date.now() - 2 * 24 * 3600 * 1000).toISOString(),
             lastCloudTokenSync: new Date().toISOString(),
@@ -4134,13 +4337,21 @@ test("automatic cloud token sync skips writes before the configured hour interva
         await extension.activate(context);
         await waitForBackgroundWork();
 
+        const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
+        const [cloudItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
+          .filter((item) => item.account.name === "sync-user" && item.account.source === "cloud");
+
+        await accountTreeView.treeDataProvider.refreshQuota([cloudItem.account.id], {
+          reason: "timer",
+        });
+
         const cloudAuth = readCloudAccount(
           mocked.config,
           "sync-user",
           "throttle-passphrase"
         );
-        assert.equal(cloudAuth.tokens.access_token, "access-cloud-old");
-        assert.equal(cloudAuth.tokens.refresh_token, "refresh-cloud-old");
+        assert.equal(cloudAuth.tokens.access_token, "access-rotated");
+        assert.equal(cloudAuth.tokens.refresh_token, "refresh-rotated");
 
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
@@ -4318,6 +4529,9 @@ test("automatic cloud token sync uses the first synced device when no explicit d
   const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
   process.env.CODEX_HOME = codexHome;
   delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  const savedCloudAccessToken = makeJwt({
+    exp: Math.floor(Date.now() / 1000) + 24 * 3600,
+  });
 
   try {
     core.setSavedAuthPassphrase("default-first-passphrase");
@@ -4327,7 +4541,7 @@ test("automatic cloud token sync uses the first synced device when no explicit d
         "sync-user": core.serializeSavedValue(
           "saved_auth",
           makeAuthFile("acct-cloud", {
-            accessToken: "access-cloud-old",
+            accessToken: savedCloudAccessToken,
             refreshToken: "refresh-cloud-old",
             lastRefresh: new Date(Date.now() - 2 * 24 * 3600 * 1000).toISOString(),
           }),
@@ -4365,7 +4579,7 @@ test("automatic cloud token sync uses the first synced device when no explicit d
             "sync-user",
             "default-first-passphrase"
           );
-          assert.equal(cloudAuth.tokens.access_token, "access-cloud-old");
+          assert.equal(cloudAuth.tokens.access_token, savedCloudAccessToken);
           assert.equal(cloudAuth.tokens.refresh_token, "refresh-cloud-old");
           assert.deepEqual(mocked.config.syncedStorage.devices, ["device-other", currentDeviceName]);
 
@@ -4395,7 +4609,7 @@ test("automatic cloud token sync uses the first synced device when no explicit d
   });
 });
 
-test("automatic cloud token sync respects the explicitly selected synced device without refreshing tokens during quota refresh", async (t) => {
+test("automatic cloud token sync respects the explicitly selected synced device when refreshing expired access tokens", async (t) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-device-explicit-select-"));
   const codexHome = path.join(tempRoot, ".codex");
   const authDir = path.join(tempRoot, "saved-auth");
@@ -4416,7 +4630,9 @@ test("automatic cloud token sync respects the explicitly selected synced device 
         "sync-user": core.serializeSavedValue(
           "saved_auth",
           makeAuthFile("acct-cloud", {
-            accessToken: "access-cloud-old",
+            accessToken: makeJwt({
+              exp: Math.floor(Date.now() / 1000) - 60,
+            }),
             refreshToken: "refresh-cloud-old",
             lastRefresh: new Date(Date.now() - 2 * 24 * 3600 * 1000).toISOString(),
           }),
@@ -4449,13 +4665,21 @@ test("automatic cloud token sync respects the explicitly selected synced device 
           await extension.activate(context);
           await waitForBackgroundWork();
 
+          const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
+          const [cloudItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
+            .filter((item) => item.account.name === "sync-user" && item.account.source === "cloud");
+
+          await accountTreeView.treeDataProvider.refreshQuota([cloudItem.account.id], {
+            reason: "timer",
+          });
+
           const cloudAuth = readCloudAccount(
             mocked.config,
             "sync-user",
             "explicit-select-passphrase"
           );
-          assert.equal(cloudAuth.tokens.access_token, "access-cloud-old");
-          assert.equal(cloudAuth.tokens.refresh_token, "refresh-cloud-old");
+          assert.equal(cloudAuth.tokens.access_token, "access-rotated");
+          assert.equal(cloudAuth.tokens.refresh_token, "refresh-rotated");
           assert.equal(mocked.config.syncedStorage.autoRefreshDeviceName, currentDeviceName);
 
           for (const subscription of context.subscriptions.reverse()) {
@@ -4496,6 +4720,9 @@ test("manual cloud token refresh still works when this device is not selected fo
   const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
   process.env.CODEX_HOME = codexHome;
   delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  const savedCloudAccessToken = makeJwt({
+    exp: Math.floor(Date.now() / 1000) + 24 * 3600,
+  });
 
   try {
     core.setSavedAuthPassphrase("manual-override-passphrase");
@@ -4505,7 +4732,7 @@ test("manual cloud token refresh still works when this device is not selected fo
         "sync-user": core.serializeSavedValue(
           "saved_auth",
           makeAuthFile("acct-cloud", {
-            accessToken: "access-cloud-old",
+            accessToken: savedCloudAccessToken,
             refreshToken: "refresh-cloud-old",
             lastRefresh: new Date(Date.now() - 2 * 24 * 3600 * 1000).toISOString(),
           }),
@@ -4543,7 +4770,7 @@ test("manual cloud token refresh still works when this device is not selected fo
             "sync-user",
             "manual-override-passphrase"
           );
-          assert.equal(cloudAuth.tokens.access_token, "access-cloud-old");
+          assert.equal(cloudAuth.tokens.access_token, savedCloudAccessToken);
           assert.equal(cloudAuth.tokens.refresh_token, "refresh-cloud-old");
 
           const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
@@ -4599,6 +4826,9 @@ test("invalid selected auto-refresh device is not replaced when quota refresh do
   const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
   process.env.CODEX_HOME = codexHome;
   delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  const savedCloudAccessToken = makeJwt({
+    exp: Math.floor(Date.now() / 1000) + 24 * 3600,
+  });
 
   try {
     core.setSavedAuthPassphrase("prompt-select-passphrase");
@@ -4608,7 +4838,7 @@ test("invalid selected auto-refresh device is not replaced when quota refresh do
         "sync-user": core.serializeSavedValue(
           "saved_auth",
           makeAuthFile("acct-cloud", {
-            accessToken: "access-cloud-old",
+            accessToken: savedCloudAccessToken,
             refreshToken: "refresh-cloud-old",
             lastRefresh: new Date(Date.now() - 2 * 24 * 3600 * 1000).toISOString(),
           }),
@@ -4649,7 +4879,7 @@ test("invalid selected auto-refresh device is not replaced when quota refresh do
             "sync-user",
             "prompt-select-passphrase"
           );
-          assert.equal(cloudAuth.tokens.access_token, "access-cloud-old");
+          assert.equal(cloudAuth.tokens.access_token, savedCloudAccessToken);
           assert.equal(cloudAuth.tokens.refresh_token, "refresh-cloud-old");
           assert.deepEqual(mocked.config.syncedStorage.devices, ["device-other", currentDeviceName]);
           assert.equal(mocked.config.syncedStorage.autoRefreshDeviceName, "device-missing");
