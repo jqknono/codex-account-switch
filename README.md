@@ -158,7 +158,7 @@ Each saved account is stored as `auth_{name}.json` inside the configured account
 
 When `refresh` or `quota` rotates tokens for a saved account, the updated auth payload is written back to the saved account file. If that account is currently active, `~/.codex/auth.json` is updated too so future switches do not restore an older refresh token snapshot.
 
-In the VS Code extension, automatic write-back after background/manual quota refresh is controlled by the shared `codex-account-switch.tokenAutoUpdate` and `codex-account-switch.tokenAutoUpdateIntervalHours` settings for both local and cloud saved accounts. Manual `Refresh Token` still writes immediately.
+In the VS Code extension, background quota refresh also pre-rotates tokens when an access token is already expired, within five days of expiry, or when a JWT refresh token is within five days of expiry. Automatic write-back after background/manual quota refresh is controlled by the shared `codex-account-switch.tokenAutoUpdate` and `codex-account-switch.tokenAutoUpdateIntervalHours` settings for both local and cloud saved accounts. Manual `Refresh Token` still writes immediately.
 
 Some tools and extensions that depend on `~/.codex/auth.json` may cache authentication state on startup. For those cases, replacing `auth.json` alone may not take effect immediately, and a VS Code window reload is required.
 

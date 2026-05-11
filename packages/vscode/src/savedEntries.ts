@@ -22,6 +22,7 @@ import {
   getNamedProviderPath,
   getQuotaInfo,
   isTokenExpired,
+  isTokenExpiringWithin,
   isRefreshTokenExpiringWithin,
   getSavedAuthPassphrase,
   hasAccountAuthTokens,
@@ -50,7 +51,7 @@ import { queryQuotaWithCache } from "./quotaCache";
 export type StorageSource = "local" | "cloud";
 export type SaveTarget = StorageSource;
 const LOG_PREFIX = "[codex-account-switch:vscode:savedEntries]";
-const TIMER_REFRESH_TOKEN_THRESHOLD_MS = 5 * 24 * 3600 * 1000;
+const TIMER_TOKEN_REFRESH_THRESHOLD_MS = 5 * 24 * 3600 * 1000;
 const SYNCED_CLOUD_STATE_KEY = "codex-account-switch.syncedCloudState.v1";
 const SYNCED_CLOUD_MIGRATION_KEY = "codex-account-switch.syncedCloudStateMigration.v1";
 
@@ -190,7 +191,11 @@ function shouldRefreshTokenDuringTimer(auth: AuthFile | null | undefined): boole
   if (!auth) {
     return false;
   }
-  return isTokenExpired(auth) || isRefreshTokenExpiringWithin(auth, TIMER_REFRESH_TOKEN_THRESHOLD_MS);
+  return (
+    isTokenExpired(auth) ||
+    isTokenExpiringWithin(auth, TIMER_TOKEN_REFRESH_THRESHOLD_MS) ||
+    isRefreshTokenExpiringWithin(auth, TIMER_TOKEN_REFRESH_THRESHOLD_MS)
+  );
 }
 
 function shouldForceQuotaFetchForAccount(account: SavedAccountInfo, reason?: string): boolean {
@@ -1437,11 +1442,13 @@ export async function querySavedAccountQuota(
 
           if (options.reason === "timer" && account.auth) {
             const accessTokenExpired = isTokenExpired(account.auth);
-            const refreshTokenExpiring = isRefreshTokenExpiringWithin(account.auth, TIMER_REFRESH_TOKEN_THRESHOLD_MS);
-            const shouldRefreshToken = accessTokenExpired || refreshTokenExpiring;
+            const accessTokenExpiring = isTokenExpiringWithin(account.auth, TIMER_TOKEN_REFRESH_THRESHOLD_MS);
+            const refreshTokenExpiring = isRefreshTokenExpiringWithin(account.auth, TIMER_TOKEN_REFRESH_THRESHOLD_MS);
+            const shouldRefreshToken = accessTokenExpired || accessTokenExpiring || refreshTokenExpiring;
             perf.mark("timer-refresh-token-check", {
               shouldRefresh: shouldRefreshToken,
               accessTokenExpired,
+              accessTokenExpiring,
               refreshTokenExpiring,
               source: account.source,
             });
@@ -1457,6 +1464,7 @@ export async function querySavedAccountQuota(
               perf.mark("timer-refresh-token", {
                 success: refreshResult.success,
                 accessTokenExpired,
+                accessTokenExpiring,
                 refreshTokenExpiring,
                 source: account.source,
               });
@@ -1551,11 +1559,13 @@ export async function querySavedAccountQuota(
 
       if (options.reason === "timer") {
         const accessTokenExpired = isTokenExpired(auth);
-        const refreshTokenExpiring = isRefreshTokenExpiringWithin(auth, TIMER_REFRESH_TOKEN_THRESHOLD_MS);
-        const shouldRefreshToken = accessTokenExpired || refreshTokenExpiring;
+        const accessTokenExpiring = isTokenExpiringWithin(auth, TIMER_TOKEN_REFRESH_THRESHOLD_MS);
+        const refreshTokenExpiring = isRefreshTokenExpiringWithin(auth, TIMER_TOKEN_REFRESH_THRESHOLD_MS);
+        const shouldRefreshToken = accessTokenExpired || accessTokenExpiring || refreshTokenExpiring;
         perf.mark("timer-refresh-token-check", {
           shouldRefresh: shouldRefreshToken,
           accessTokenExpired,
+          accessTokenExpiring,
           refreshTokenExpiring,
           source: account.source,
         });
@@ -1568,6 +1578,7 @@ export async function querySavedAccountQuota(
           perf.mark("timer-refresh-token", {
             success: true,
             accessTokenExpired,
+            accessTokenExpiring,
             refreshTokenExpiring,
             source: account.source,
           });

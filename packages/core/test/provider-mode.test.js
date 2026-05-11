@@ -192,6 +192,28 @@ test("refresh token threshold checks only refresh tokens with known expiry", () 
   assert.equal(core.isRefreshTokenExpiringWithin(unknownExpiry, 5 * 24 * 3600 * 1000), false);
 });
 
+test("access token threshold checks only access tokens with known expiry", () => {
+  const withinThreshold = {
+    tokens: {
+      access_token: jwt({ exp: Math.floor(Date.now() / 1000) + 4 * 24 * 3600 }),
+    },
+  };
+  const beyondThreshold = {
+    tokens: {
+      access_token: jwt({ exp: Math.floor(Date.now() / 1000) + 6 * 24 * 3600 }),
+    },
+  };
+  const unknownExpiry = {
+    tokens: {
+      access_token: "at-opaque-token",
+    },
+  };
+
+  assert.equal(core.isTokenExpiringWithin(withinThreshold, 5 * 24 * 3600 * 1000), true);
+  assert.equal(core.isTokenExpiringWithin(beyondThreshold, 5 * 24 * 3600 * 1000), false);
+  assert.equal(core.isTokenExpiringWithin(unknownExpiry, 5 * 24 * 3600 * 1000), false);
+});
+
 test("deserializeSavedValue accepts encrypted envelopes with visible sync metadata", () => {
   core.setSavedAuthPassphrase("sync-metadata-passphrase");
   const envelope = core.serializeSavedValue(

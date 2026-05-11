@@ -2,5 +2,6 @@
     "chat.tools.terminal.autoApprove": {
         "npx codex-account-switch": true,
         "npx @vscode/vsce": true
-    }
+    },
+    "coding-plans.commitMessage.language": "en"
 }

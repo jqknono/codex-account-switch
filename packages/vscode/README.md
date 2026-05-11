@@ -10,7 +10,7 @@ Codex Account Switch gives you a dedicated Activity Bar view for saved accounts,
 
 - Add a new account from `codex login`
 - Switch the active account with one click
-- Refresh expired tokens for saved accounts
+- Refresh expired tokens for saved accounts and auto-rotate near-expiry access tokens during background quota refresh
 - Inspect current quota usage in the account list and status bar
 - Refresh saved account quotas in the background one account at a time on a configurable interval
 - Reuse recent quota results from a shared local cache across VS Code windows

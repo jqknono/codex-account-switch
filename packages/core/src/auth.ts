@@ -275,6 +275,12 @@ export function isTokenExpired(auth: AuthFile): boolean {
   return expiry.getTime() < Date.now();
 }
 
+export function isTokenExpiringWithin(auth: AuthFile, thresholdMs: number): boolean {
+  const expiry = getTokenExpiry(auth);
+  if (!expiry) return false;
+  return expiry.getTime() - Date.now() < thresholdMs;
+}
+
 export function isRefreshTokenExpiringWithin(auth: AuthFile, thresholdMs: number): boolean {
   const expiry = getRefreshTokenExpiry(auth);
   if (!expiry) return false;

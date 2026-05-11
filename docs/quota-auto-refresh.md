@@ -44,6 +44,7 @@ flowchart LR
 | Cross-window coordination | 当多个 VS Code 实例同时需要同一账号 quota 时，使用临时 lock 文件减少重复查询。 |
 | Failure fallback | 新查询失败但 cache 中已有最近一次成功结果时，优先继续显示缓存数据。 |
 | Current status bar | 只有轮到当前账号时才复用同一次 quota 查询更新状态栏。 |
+| Timer token refresh threshold | timer 命中账号后，如果 access token 已过期或剩余有效期 `<= 5` 天，或可解码的 refresh token 剩余有效期 `<= 5` 天，则会先刷新 token 再查 quota。 |
 | Shared token auto update | local / cloud 的自动 token 回写共用 `tokenAutoUpdate*` 设置；如果本轮跳过 saved account 回写，但该账号正处于激活状态，`auth.json` 仍会更新到最新 token。 |
 | Full-cycle cost | 如果有 `N` 个 saved accounts，则完整轮转一轮约需 `N * quotaRefreshInterval`。 |
 | In-flight coalescing | 当前轮刷新未结束时，新的自动目标刷新请求进入队列，待当前轮完成后继续执行。 |

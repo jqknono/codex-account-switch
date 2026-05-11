@@ -2371,7 +2371,7 @@ test("refresh quota command reuses one saved entries snapshot for tree and statu
   });
 });
 
-test("account tree separates quota failures from local and cloud accounts", async (t) => {
+test("account tree keeps quota failures inside their source group", async (t) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-account-tree-groups-"));
   const codexHome = path.join(tempRoot, ".codex");
   const authDir = path.join(tempRoot, "saved-auth");
@@ -2428,13 +2428,119 @@ test("account tree separates quota failures from local and cloud accounts", asyn
 
         const groups = getAccountTreeRootItems(provider);
         assert.deepEqual(groups.map((item) => item.label), [
-          "Quota Failed",
           "Local Accounts",
           "Cloud Accounts",
         ]);
-        assert.deepEqual(provider.getChildren(groups[0]).map((item) => item.account.name), ["local-fail"]);
-        assert.deepEqual(provider.getChildren(groups[1]).map((item) => item.account.name), ["local-ok"]);
-        assert.deepEqual(provider.getChildren(groups[2]).map((item) => item.account.name), ["cloud-ok"]);
+        assert.deepEqual(
+          provider.getChildren(groups[0]).map((item) => item.account.name).sort(),
+          ["local-fail", "local-ok"]
+        );
+        assert.deepEqual(provider.getChildren(groups[1]).map((item) => item.account.name), ["cloud-ok"]);
+
+        for (const subscription of context.subscriptions.reverse()) {
+          subscription?.dispose?.();
+        }
+        await waitForBackgroundWork();
+      })
+    );
+  } finally {
+    core.setSavedAuthPassphrase(null);
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
+test("account tree resolves stale source group children from latest root state", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-account-tree-stale-source-group-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  fs.mkdirSync(codexHome, { recursive: true });
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  try {
+    core.setSavedAuthPassphrase("stale-group-passphrase");
+    const cloudEntry = core.serializeSavedValue("saved_auth", makeAuthFile("acct-cloud-fail"), {
+      requireEncryption: true,
+    });
+    core.setSavedAuthPassphrase(null);
+
+    const mocked = createVscodeMock({
+      syncedStorage: {
+        version: 1,
+        accounts: {
+          "cloud-fail": cloudEntry,
+        },
+        providers: {},
+      },
+      secretValues: {
+        [STORAGE_SECRET_KEY]: "stale-group-passphrase",
+      },
+      cloudTokenAutoUpdate: false,
+    });
+
+    await withDisabledIntervals(() =>
+      withSuccessfulHttps(async () => {
+        const extension = loadExtensionWithMockedVscode(mocked.vscode);
+        const context = createExtensionContext(mocked);
+        await extension.activate(context);
+
+        const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
+        const provider = accountTreeView.treeDataProvider;
+        provider.quotaState.set("cloud:cloud-fail", {
+          info: null,
+          loading: false,
+          error: true,
+          updatedAt: null,
+        });
+        provider.refresh();
+
+        const firstGroups = getAccountTreeRootItems(provider);
+        const staleCloudGroup = firstGroups[0];
+        assert.equal(staleCloudGroup.label, "Cloud Accounts");
+        assert.deepEqual(provider.getChildren(staleCloudGroup).map((item) => item.account.name), ["cloud-fail"]);
+
+        provider.quotaState.set("cloud:cloud-fail", {
+          info: {
+            plan: "plus",
+            primaryWindow: {
+              usedPercent: 10,
+              resetsAt: null,
+              windowSeconds: 18000,
+            },
+            secondaryWindow: null,
+            additional: [],
+            codeReview: null,
+            credits: null,
+            email: "acct-cloud-fail@example.com",
+            tokenExpired: false,
+            unavailableReason: null,
+          },
+          loading: false,
+          error: false,
+          updatedAt: Date.now(),
+        });
+        provider.refresh();
+
+        const secondGroups = getAccountTreeRootItems(provider);
+        assert.deepEqual(secondGroups.map((item) => item.label), ["Cloud Accounts"]);
+        assert.deepEqual(provider.getChildren(secondGroups[0]).map((item) => item.account.name), ["cloud-fail"]);
+        assert.deepEqual(provider.getChildren(staleCloudGroup).map((item) => item.account.name), ["cloud-fail"]);
 
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
@@ -3810,6 +3916,91 @@ test("timer refreshes local tokens when the refresh token expires within five da
   });
 });
 
+test("timer refreshes local tokens when the access token expires within five days", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-local-near-expiry-access-refresh-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  fs.mkdirSync(codexHome, { recursive: true });
+
+  const nearExpiryAccessToken = makeJwt({
+    exp: Math.floor(Date.now() / 1000) + 4 * 24 * 3600,
+  });
+  const localAuth = makeAuthFile("acct-local", {
+    accessToken: nearExpiryAccessToken,
+    refreshToken: "refresh-local-stable",
+  });
+  fs.writeFileSync(
+    path.join(codexHome, "auth_local-user.json"),
+    JSON.stringify(localAuth, null, 2),
+    "utf-8"
+  );
+  fs.writeFileSync(
+    path.join(codexHome, "auth.json"),
+    JSON.stringify(localAuth, null, 2),
+    "utf-8"
+  );
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  const requestLog = [];
+  const mocked = createVscodeMock({
+    showStatusBar: false,
+    tokenAutoUpdate: true,
+  });
+
+  try {
+    await withDisabledIntervals(() =>
+      withSuccessfulHttps(async () => {
+        const extension = loadExtensionWithMockedVscode(mocked.vscode);
+        const context = createExtensionContext(mocked);
+        await extension.activate(context);
+        await waitForBackgroundWork();
+        requestLog.length = 0;
+
+        const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
+        const [localItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
+          .filter((item) => item.account.name === "local-user" && item.account.source === "local");
+
+        await accountTreeView.treeDataProvider.refreshQuota([localItem.account.id], {
+          reason: "timer",
+        });
+
+        assert.equal(countAuthRefreshRequests(requestLog), 1);
+        assert.equal(countUsageRequests(requestLog), 1);
+
+        const savedAuth = JSON.parse(fs.readFileSync(path.join(codexHome, "auth_local-user.json"), "utf-8"));
+        const currentAuth = JSON.parse(fs.readFileSync(path.join(codexHome, "auth.json"), "utf-8"));
+        assert.equal(savedAuth.tokens.access_token, "access-rotated");
+        assert.equal(savedAuth.tokens.refresh_token, "refresh-rotated");
+        assert.equal(currentAuth.tokens.access_token, "access-rotated");
+        assert.equal(currentAuth.tokens.refresh_token, "refresh-rotated");
+
+        for (const subscription of context.subscriptions.reverse()) {
+          subscription?.dispose?.();
+        }
+      }, { requestLog })
+    );
+  } finally {
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
 test("timer refreshes local tokens when the access token is expired", async (t) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-local-expired-access-refresh-"));
   const codexHome = path.join(tempRoot, ".codex");
@@ -4005,6 +4196,109 @@ test("timer refreshes cloud tokens when the refresh token expires within five da
             refreshToken: makeJwt({
               exp: Math.floor(Date.now() / 1000) + 4 * 24 * 3600,
             }),
+          }),
+          {
+            requireEncryption: true,
+          }
+        ),
+      },
+      providers: {},
+      devices: [currentDeviceName],
+      autoRefreshDeviceName: null,
+    };
+    core.setSavedAuthPassphrase(null);
+
+    const requestLog = [];
+    const mocked = createVscodeMock({
+      authDirectory: authDir,
+      syncedStorage,
+      secretValues: {
+        [STORAGE_SECRET_KEY]: "timer-passphrase",
+      },
+      cloudTokenAutoUpdate: true,
+      cloudTokenAutoUpdateIntervalHours: 1,
+      showStatusBar: false,
+    });
+
+    await withMockedHostname(currentDeviceName, async () => {
+      await withDisabledIntervals(() =>
+        withSuccessfulHttps(async () => {
+          const extension = loadExtensionWithMockedVscode(mocked.vscode);
+          const context = createExtensionContext(mocked);
+          await extension.activate(context);
+          await waitForBackgroundWork();
+          requestLog.length = 0;
+
+          const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
+          const [cloudItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
+            .filter((item) => item.account.name === "sync-user" && item.account.source === "cloud");
+
+          await accountTreeView.treeDataProvider.refreshQuota([cloudItem.account.id], {
+            reason: "timer",
+          });
+
+          assert.equal(countAuthRefreshRequests(requestLog), 1);
+          assert.equal(countUsageRequests(requestLog), 1);
+
+          const cloudAuth = readCloudAccount(
+            mocked.config,
+            "sync-user",
+            "timer-passphrase"
+          );
+          assert.equal(cloudAuth.tokens.access_token, "access-rotated");
+          assert.equal(cloudAuth.tokens.refresh_token, "refresh-rotated");
+
+          for (const subscription of context.subscriptions.reverse()) {
+            subscription?.dispose?.();
+          }
+        }, { requestLog })
+      );
+    });
+  } finally {
+    core.setSavedAuthPassphrase(null);
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
+test("timer refreshes cloud tokens when the access token expires within five days", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-cloud-near-expiry-access-refresh-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  const authDir = path.join(tempRoot, "saved-auth");
+  const currentDeviceName = "device-current";
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(authDir, { recursive: true });
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  try {
+    core.setSavedAuthPassphrase("timer-passphrase");
+    const syncedStorage = {
+      version: 1,
+      accounts: {
+        "sync-user": core.serializeSavedValue(
+          "saved_auth",
+          makeAuthFile("acct-cloud", {
+            accessToken: makeJwt({
+              exp: Math.floor(Date.now() / 1000) + 4 * 24 * 3600,
+            }),
+            refreshToken: "refresh-cloud-stable",
           }),
           {
             requireEncryption: true,

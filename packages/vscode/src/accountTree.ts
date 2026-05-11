@@ -27,7 +27,7 @@ export type AccountTreeNode = AccountGroupItem | AccountTreeItem | AccountDetail
 const LOG_PREFIX = "[codex-account-switch:vscode:accountTree]";
 const ACCOUNT_REFRESH_CONCURRENCY = 4;
 const SLOW_ACCOUNT_THRESHOLD_MS = 3000;
-export type AccountGroupKind = "quotaFailed" | "local" | "cloud";
+export type AccountGroupKind = "local" | "cloud";
 
 interface AccountTreeRefreshOptions {
   snapshot?: SavedEntriesSnapshot;
@@ -171,6 +171,7 @@ export class AccountDetailItem extends vscode.TreeItem {
     public readonly rawValue?: string,
   ) {
     super(label, vscode.TreeItemCollapsibleState.None);
+    this.id = parent ? `accountDetail:${parent.account.id}:${label}` : `accountDetail:${label}`;
     this.description = description;
     this.tooltip = tooltip;
     this.contextValue = "accountDetail";
@@ -185,13 +186,9 @@ export class AccountGroupItem extends vscode.TreeItem {
     public readonly groupKind: AccountGroupKind,
   ) {
     super(label, vscode.TreeItemCollapsibleState.Expanded);
+    this.id = `accountGroup:${groupKind}`;
     this.description = `${children.length}`;
-    this.contextValue =
-      groupKind === "local"
-        ? "accountGroupLocal"
-        : groupKind === "cloud"
-          ? "accountGroupCloud"
-          : "accountGroupQuotaFailed";
+    this.contextValue = groupKind === "local" ? "accountGroupLocal" : "accountGroupCloud";
     this.iconPath = new vscode.ThemeIcon(iconId);
     for (const child of children) {
       child.groupParent = this;
@@ -204,6 +201,7 @@ export class AccountTreeItem extends vscode.TreeItem {
 
   constructor(public readonly account: SavedAccountInfo, public readonly quotaState?: QuotaState) {
     super(account.name, vscode.TreeItemCollapsibleState.Expanded);
+    this.id = `account:${account.id}`;
 
     const email = account.meta?.email ?? "unknown";
     const plan = account.meta?.plan ?? "unknown";
@@ -532,22 +530,25 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
     }
 
     if (element instanceof AccountGroupItem) {
-      return element.children;
+      return this.findCurrentGroup(element.groupKind)?.children ?? [];
     }
 
     if (element instanceof AccountDetailItem) {
       return [];
     }
 
-    return this.getAccountDetails(element);
+    return this.getAccountDetails(this.findCurrentAccountItem(element.account.id) ?? element);
   }
 
   getParent(element: AccountTreeNode): AccountTreeNode | undefined {
     if (element instanceof AccountDetailItem) {
-      return element.parent;
+      return element.parent ? (this.findCurrentAccountItem(element.parent.account.id) ?? element.parent) : undefined;
     }
     if (element instanceof AccountTreeItem) {
-      return element.groupParent;
+      const current = this.findCurrentAccountItem(element.account.id) ?? element;
+      return current.groupParent
+        ? (this.findCurrentGroup(current.groupParent.groupKind) ?? current.groupParent)
+        : undefined;
     }
     return undefined;
   }
@@ -595,21 +596,32 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
     return this.rootItems;
   }
 
+  private findCurrentGroup(groupKind: AccountGroupKind): AccountGroupItem | undefined {
+    return this.rootItems.find((group) => group.groupKind === groupKind);
+  }
+
+  private findCurrentAccountItem(accountId: string): AccountTreeItem | undefined {
+    for (const group of this.rootItems) {
+      const item = group.children.find((candidate) => candidate.account.id === accountId);
+      if (item) {
+        return item;
+      }
+    }
+    return undefined;
+  }
+
   private syncRootItems(accounts = listSavedAccounts(), options: { logPerformance?: boolean } = {}) {
     const perf = options.logPerformance === false
       ? null
       : startPerformanceLog(LOG_PREFIX, "accountTree.syncRootItems", {
         accountCount: accounts.length,
       });
-    const quotaFailed: AccountTreeItem[] = [];
     const local: AccountTreeItem[] = [];
     const cloud: AccountTreeItem[] = [];
 
     for (const account of accounts) {
       const item = new AccountTreeItem(account, this.quotaState.get(account.id));
-      if (this.quotaState.get(account.id)?.error) {
-        quotaFailed.push(item);
-      } else if (account.source === "cloud") {
+      if (account.source === "cloud") {
         cloud.push(item);
       } else {
         local.push(item);
@@ -617,9 +629,6 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
     }
 
     const groups: AccountGroupItem[] = [];
-    if (quotaFailed.length > 0) {
-      groups.push(new AccountGroupItem("Quota Failed", quotaFailed, "warning", "quotaFailed"));
-    }
     if (local.length > 0) {
       groups.push(new AccountGroupItem("Local Accounts", local, "device-desktop", "local"));
     }
@@ -628,7 +637,6 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
     }
     this.rootItems = groups;
     perf?.finish({
-      quotaFailedCount: quotaFailed.length,
       localCount: local.length,
       cloudCount: cloud.length,
       groupCount: groups.length,
