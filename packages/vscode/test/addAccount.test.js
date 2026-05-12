@@ -532,6 +532,66 @@ async function withSuccessfulHttps(fn, mockOptions = {}) {
   }
 }
 
+async function withRefreshTokenReusedHttps(fn) {
+  const originalRequest = https.request;
+  https.request = (requestOptions, handler) => {
+    const hostname = requestOptions?.hostname;
+    const isTokenRequest = hostname === "auth.openai.com";
+    const body = isTokenRequest
+      ? JSON.stringify({
+          error: {
+            message: "Your refresh token has already been used to generate a new access token. Please try signing in again.",
+            type: "invalid_request_error",
+            param: null,
+            code: "refresh_token_reused",
+          },
+        })
+      : JSON.stringify({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: 10,
+              reset_at: null,
+            },
+          },
+        });
+    const response = {
+      statusCode: isTokenRequest ? 401 : 200,
+      on(event, listener) {
+        if (event === "data") {
+          setImmediate(() => listener(body));
+        }
+        if (event === "end") {
+          setImmediate(listener);
+        }
+        return response;
+      },
+    };
+
+    const request = {
+      on() {
+        return request;
+      },
+      setTimeout() {
+        return request;
+      },
+      destroy() {},
+      write() {},
+      end() {
+        handler(response);
+      },
+    };
+
+    return request;
+  };
+
+  try {
+    return await fn();
+  } finally {
+    https.request = originalRequest;
+  }
+}
+
 async function waitForBackgroundWork() {
   await new Promise((resolve) => setTimeout(resolve, 1700));
 }
@@ -2446,6 +2506,96 @@ test("account tree keeps quota failures inside their source group", async (t) =>
   } finally {
     core.setSavedAuthPassphrase(null);
     core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
+test("account tree shows relogin required when refresh token cannot be recovered", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-account-tree-relogin-required-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  fs.mkdirSync(codexHome, { recursive: true });
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  try {
+    core.setSavedAuthPassphrase("relogin-passphrase");
+    const cloudEntry = core.serializeSavedValue("saved_auth", makeAuthFile("acct-google1"), {
+      requireEncryption: true,
+    });
+    core.setSavedAuthPassphrase(null);
+
+    const mocked = createVscodeMock({
+      syncedStorage: {
+        version: 1,
+        accounts: {
+          google1: cloudEntry,
+        },
+        providers: {},
+      },
+      secretValues: {
+        [STORAGE_SECRET_KEY]: "relogin-passphrase",
+      },
+      cloudTokenAutoUpdate: true,
+    });
+
+    await withDisabledIntervals(() =>
+      withRefreshTokenReusedHttps(async () => {
+        const extension = loadExtensionWithMockedVscode(mocked.vscode);
+        const context = createExtensionContext(mocked);
+        await extension.activate(context);
+
+        const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
+        const provider = accountTreeView.treeDataProvider;
+        await provider.refreshQuota(["cloud:google1"], {
+          reason: "timer",
+          concurrency: 1,
+        });
+
+        const [googleItem] = getAccountTreeItems(provider)
+          .filter((item) => item.account.name === "google1" && item.account.source === "cloud");
+        assert.match(String(googleItem.description ?? ""), /Relogin required/);
+        assert.match(String(googleItem.tooltip ?? ""), /Re-login this account/);
+
+        const details = getAccountDetailItems(provider, googleItem);
+        const authDetail = details.find((item) => item.label === "Auth");
+        assert.equal(authDetail?.description, "Relogin required");
+        assert.match(String(authDetail?.tooltip ?? ""), /Refresh token cannot be recovered automatically/);
+
+        provider.quotaState.delete("cloud:google1");
+        provider.refresh();
+        const [resetGoogleItem] = getAccountTreeItems(provider)
+          .filter((item) => item.account.name === "google1" && item.account.source === "cloud");
+        assert.doesNotMatch(String(resetGoogleItem.description ?? ""), /Relogin required/);
+
+        await mocked.registeredCommands.get("codex-account-switch.refreshToken")(resetGoogleItem);
+        const [manualGoogleItem] = getAccountTreeItems(provider)
+          .filter((item) => item.account.name === "google1" && item.account.source === "cloud");
+        assert.match(String(manualGoogleItem.description ?? ""), /Relogin required/);
+
+        for (const subscription of context.subscriptions.reverse()) {
+          subscription?.dispose?.();
+        }
+        await waitForBackgroundWork();
+      })
+    );
+  } finally {
+    core.setSavedAuthPassphrase(null);
     if (previousCodexHome === undefined) {
       delete process.env.CODEX_HOME;
     } else {

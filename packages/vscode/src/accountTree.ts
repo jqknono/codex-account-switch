@@ -2,7 +2,9 @@ import * as vscode from "vscode";
 import {
   getTokenExpiry,
   formatTokenExpiry,
+  isReloginRequiredRefreshError,
   QuotaInfo,
+  RELOGIN_REQUIRED_MESSAGE,
   WindowInfo,
 } from "@codex-account-switch/core";
 import { logInfo, logWarn, startPerformanceLog } from "./log";
@@ -21,6 +23,13 @@ interface QuotaState {
   loading: boolean;
   error: boolean;
   updatedAt: number | null;
+  reloginRequired?: boolean;
+  reloginMessage?: string;
+}
+
+interface QuotaResultFallbackMetadata {
+  fallbackErrorMessage?: string;
+  fallbackReloginRequired?: boolean;
 }
 
 export type AccountTreeNode = AccountGroupItem | AccountTreeItem | AccountDetailItem;
@@ -59,6 +68,17 @@ function formatQuotaSummary(info: QuotaInfo | null): string | null {
 
 function getQuotaUnavailableMessage(info: QuotaInfo | null | undefined): string | null {
   return info?.unavailableReason?.message ?? null;
+}
+
+function isQuotaInfoReloginRequired(info: QuotaInfo | null | undefined): boolean {
+  return info?.unavailableReason?.code === "relogin_required";
+}
+
+function getQuotaStateReloginMessage(quotaState: QuotaState | undefined): string | null {
+  if (quotaState?.reloginRequired || isQuotaInfoReloginRequired(quotaState?.info)) {
+    return quotaState?.reloginMessage ?? RELOGIN_REQUIRED_MESSAGE;
+  }
+  return null;
 }
 
 function formatResetTime(resetsAt: Date | null): string | null {
@@ -207,11 +227,14 @@ export class AccountTreeItem extends vscode.TreeItem {
     const plan = account.meta?.plan ?? "unknown";
     const parts: string[] = [account.source];
     const quotaSummary = formatQuotaSummary(quotaState?.info ?? null);
+    const reloginMessage = getQuotaStateReloginMessage(quotaState);
 
     if (account.storageState === "locked") {
       parts.push("Storage locked");
     } else if (account.storageState === "invalid") {
       parts.push("Invalid saved auth");
+    } else if (reloginMessage) {
+      parts.push(reloginMessage);
     } else if (quotaState?.loading) {
       parts.push("Refreshing quota");
     } else if (quotaSummary) {
@@ -234,6 +257,8 @@ export class AccountTreeItem extends vscode.TreeItem {
 
     if (account.isCurrent) {
       this.iconPath = new vscode.ThemeIcon("pass-filled", new vscode.ThemeColor("charts.green"));
+    } else if (reloginMessage) {
+      this.iconPath = new vscode.ThemeIcon("sign-in", new vscode.ThemeColor("errorForeground"));
     } else if (account.storageState === "locked") {
       this.iconPath = new vscode.ThemeIcon("lock");
     } else if (account.storageState === "invalid") {
@@ -264,12 +289,17 @@ export class AccountTreeItem extends vscode.TreeItem {
       const tokenStatus = formatTokenExpiry(account.auth);
       tooltipLines.push(`Token: ${tokenStatus}`);
 
-      if (expiry && expiry.getTime() < Date.now()) {
+      if (!reloginMessage && expiry && expiry.getTime() < Date.now()) {
         this.iconPath = new vscode.ThemeIcon(
           account.isCurrent ? "pass-filled" : "account",
           new vscode.ThemeColor("errorForeground")
         );
       }
+    }
+
+    if (reloginMessage) {
+      tooltipLines.push(`Auth: ${reloginMessage}`);
+      tooltipLines.push("Action: Re-login this account");
     }
 
     if (quotaState?.loading) {
@@ -426,11 +456,18 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
           }
 
           const previous = this.quotaState.get(account.id);
+          const fallback = result as QuotaResultFallbackMetadata;
+          const reloginRequired =
+            result.kind === "ok"
+              ? isQuotaInfoReloginRequired(result.info) || fallback.fallbackReloginRequired === true
+              : "message" in result && isReloginRequiredRefreshError(result.message);
           this.quotaState.set(account.id, {
-            info: result.kind === "ok" ? result.info : null,
+            info: result.kind === "ok" ? result.info : previous?.info ?? null,
             error: result.kind !== "ok",
             loading: false,
             updatedAt: result.kind === "ok" ? Date.now() : previous?.updatedAt ?? null,
+            reloginRequired,
+            reloginMessage: reloginRequired ? RELOGIN_REQUIRED_MESSAGE : undefined,
           });
           if (result.kind !== "ok") {
             logWarn(LOG_PREFIX, "refresh-result-not-ok", {
@@ -459,11 +496,14 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
           }
 
           const previous = this.quotaState.get(account.id);
+          const reloginRequired = isReloginRequiredRefreshError(error);
           this.quotaState.set(account.id, {
             info: previous?.info ?? null,
             error: true,
             loading: false,
             updatedAt: previous?.updatedAt ?? null,
+            reloginRequired,
+            reloginMessage: reloginRequired ? RELOGIN_REQUIRED_MESSAGE : previous?.reloginMessage,
           });
           logWarn(LOG_PREFIX, "refresh-result-error", {
             account: account.id,
@@ -555,6 +595,33 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
 
   dispose() {}
 
+  markReloginRequired(accountIds: Iterable<string>, message = RELOGIN_REQUIRED_MESSAGE): void {
+    const idSet = new Set([...accountIds].filter((id) => typeof id === "string" && id.length > 0));
+    if (idSet.size === 0) {
+      return;
+    }
+
+    const snapshot = createSavedEntriesSnapshot();
+    this.pruneQuotaState(snapshot.accounts.map((account) => account.id));
+    for (const account of snapshot.accounts) {
+      if (!idSet.has(account.id)) {
+        continue;
+      }
+      const previous = this.quotaState.get(account.id);
+      this.quotaState.set(account.id, {
+        info: previous?.info ?? null,
+        error: previous?.error ?? false,
+        loading: false,
+        updatedAt: previous?.updatedAt ?? null,
+        reloginRequired: true,
+        reloginMessage: message,
+      });
+    }
+
+    this.syncRootItems(snapshot.accounts);
+    this._onDidChangeTreeData.fire(undefined);
+  }
+
   private pruneQuotaState(validIds = listSavedAccounts().map((account) => account.id)) {
     const validIdSet = new Set(validIds);
     for (const id of this.quotaState.keys()) {
@@ -585,6 +652,7 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
         error: false,
         loading: false,
         updatedAt: cached.queriedAtMs,
+        reloginRequired: false,
       });
     }
   }
@@ -715,6 +783,18 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
         tokenItem.iconPath = new vscode.ThemeIcon("pass", new vscode.ThemeColor("charts.green"));
       }
       items.push(tokenItem);
+    }
+
+    const reloginMessage = getQuotaStateReloginMessage(quotaState);
+    if (reloginMessage) {
+      const reloginItem = new AccountDetailItem(
+        "Auth",
+        reloginMessage,
+        "Refresh token cannot be recovered automatically. Re-login this account.",
+        parent
+      );
+      reloginItem.iconPath = new vscode.ThemeIcon("sign-in", new vscode.ThemeColor("errorForeground"));
+      items.push(reloginItem);
     }
 
     if (quotaState?.loading) {

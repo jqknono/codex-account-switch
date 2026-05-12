@@ -1,7 +1,7 @@
 import * as https from "https";
 import { AuthFile, IdTokenPayload, WindowInfo, QuotaInfo, QuotaUnavailableReason } from "./types";
 import { jwtDecode } from "jwt-decode";
-import { refreshAccessToken, applyRefreshResponse } from "./refresh";
+import { RELOGIN_REQUIRED_MESSAGE, isReloginRequiredRefreshError, refreshAccessToken, applyRefreshResponse } from "./refresh";
 import { createDiagnosticPerformanceTimer } from "./log";
 
 const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
@@ -179,6 +179,14 @@ function parseUnavailableReason(auth: AuthFile, err: unknown): QuotaUnavailableR
   const httpErr = err as HttpErrorLike;
   const statusCode = typeof httpErr.statusCode === "number" ? httpErr.statusCode : null;
 
+  if (isReloginRequiredRefreshError(err)) {
+    return {
+      code: "relogin_required",
+      message: RELOGIN_REQUIRED_MESSAGE,
+      statusCode,
+    };
+  }
+
   if (typeof httpErr.body === "string" && httpErr.body) {
     try {
       const parsed = JSON.parse(httpErr.body) as {
@@ -196,6 +204,17 @@ function parseUnavailableReason(auth: AuthFile, err: unknown): QuotaUnavailableR
         return {
           code: "invalid_auth_token",
           message: "Missing auth tokens",
+          statusCode,
+        };
+      }
+
+      if (
+        typeof parsed.detail === "object"
+        && parsed.detail?.code === "refresh_token_reused"
+      ) {
+        return {
+          code: "relogin_required",
+          message: RELOGIN_REQUIRED_MESSAGE,
           statusCode,
         };
       }

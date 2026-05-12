@@ -1444,6 +1444,7 @@ export function registerCommands(
                   return;
                 }
                 if (outcome.status === "reloginRequired") {
+                  accountTree.markReloginRequired([outcome.account.id]);
                   logCommandWarn("refresh-token", "relogin-required", {
                     account: outcome.account.name,
                     source: outcome.account.source,
@@ -1469,6 +1470,7 @@ export function registerCommands(
               const conflictAccounts: string[] = [];
               const unsupportedAccounts: string[] = [];
               const reloginAccounts: string[] = [];
+              const reloginAccountIds: string[] = [];
               const failedAccounts: string[] = [];
               const unavailableAccounts: string[] = [];
 
@@ -1486,6 +1488,7 @@ export function registerCommands(
                     break;
                   case "reloginRequired":
                     reloginAccounts.push(outcome.account.name);
+                    reloginAccountIds.push(outcome.account.id);
                     break;
                   case "failed":
                     failedAccounts.push(outcome.account.name);
@@ -1507,6 +1510,9 @@ export function registerCommands(
                 failedCount: failedAccounts.length,
                 unavailableCount: unavailableAccounts.length,
               });
+              if (reloginAccountIds.length > 0) {
+                accountTree.markReloginRequired(reloginAccountIds);
+              }
 
               let quotaRefreshError: string | null = null;
               if (successfulAccountIds.length > 0) {

@@ -8,11 +8,22 @@ import { createDiagnosticPerformanceTimer } from "./log";
 const TOKEN_URL = "https://auth.openai.com/oauth/token";
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const LOG_PREFIX = "[codex-account-switch:core:refresh]";
+export const RELOGIN_REQUIRED_MESSAGE = "Relogin required";
 
 interface RefreshResponse {
   id_token?: string;
   access_token?: string;
   refresh_token?: string;
+}
+
+export function isReloginRequiredRefreshError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("refresh_token_reused")
+    || normalized.includes("signing in again")
+    || normalized.includes("sign in again")
+  );
 }
 
 export function applyRefreshResponse(auth: AuthFile, result: RefreshResponse, now = Date.now()): void {

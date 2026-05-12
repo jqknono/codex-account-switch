@@ -76,6 +76,7 @@ export type QuotaUnavailableCode =
   | "workspace_deactivated"
   | "missing_auth_tokens"
   | "invalid_auth_token"
+  | "relogin_required"
   | "request_failed";
 
 export interface QuotaUnavailableReason {

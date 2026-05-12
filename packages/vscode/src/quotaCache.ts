@@ -9,6 +9,7 @@ import {
   WindowInfo,
   getCodexConfigDir,
   getNamedAuthDir,
+  isReloginRequiredRefreshError,
 } from "@codex-account-switch/core";
 import { logInfo, logWarn } from "./log";
 
@@ -69,6 +70,13 @@ export interface CachedQuotaSnapshot {
   info: QuotaInfo;
   queriedAtMs: number;
 }
+
+export interface CachedQuotaFallbackMetadata {
+  fallbackErrorMessage?: string;
+  fallbackReloginRequired?: boolean;
+}
+
+export type QuotaQueryResultWithFallbackMetadata = QuotaQueryResult & CachedQuotaFallbackMetadata;
 
 interface QuotaCacheLock {
   key: string;
@@ -345,7 +353,7 @@ export async function queryQuotaWithCache(
     forceFetch?: boolean;
     fetch: () => Promise<QuotaQueryResult>;
   },
-): Promise<QuotaQueryResult> {
+): Promise<QuotaQueryResultWithFallbackMetadata> {
   const key = getCacheKey(account);
   const cached = getCachedQuotaSnapshotByKey(key);
   if (!options.forceFetch && cached && shouldUseCachedQuota(cached.queriedAtMs, options.minIntervalMs)) {
@@ -406,6 +414,8 @@ export async function queryQuotaWithCache(
           kind: "ok",
           displayName: account.name,
           info: cached.info,
+          fallbackErrorMessage: result.info.unavailableReason.message,
+          fallbackReloginRequired: result.info.unavailableReason.code === "relogin_required",
         };
       }
       writeCachedQuotaSnapshot(account, result.info);
@@ -428,6 +438,8 @@ export async function queryQuotaWithCache(
         kind: "ok",
         displayName: account.name,
         info: cached.info,
+        fallbackErrorMessage: error instanceof Error ? error.message : String(error),
+        fallbackReloginRequired: isReloginRequiredRefreshError(error),
       };
     }
     throw error;
