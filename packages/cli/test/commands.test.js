@@ -111,16 +111,32 @@ function cliDiagnosticLogPath(home) {
 
 function writeFakeCodexCommand(binDir, { auth, logPath }) {
   const authJson = JSON.stringify(auth);
-  const script = [
-    "@echo off",
-    "setlocal",
-    `echo %*>\"${logPath}\"`,
-    `echo ${authJson}>\"%CODEX_HOME%\\auth.json\"`,
-    "exit /b 0",
-    "",
-  ].join("\r\n");
+  if (process.platform === "win32") {
+    const script = [
+      "@echo off",
+      "setlocal",
+      `echo %*>\"${logPath}\"`,
+      `echo ${authJson}>\"%CODEX_HOME%\\auth.json\"`,
+      "exit /b 0",
+      "",
+    ].join("\r\n");
 
-  fs.writeFileSync(path.join(binDir, "codex.cmd"), script, "utf-8");
+    fs.writeFileSync(path.join(binDir, "codex.cmd"), script, "utf-8");
+    return;
+  }
+
+  const escapedAuthJson = authJson.replace(/'/g, `'\"'\"'`);
+  const script = [
+    "#!/usr/bin/env sh",
+    "set -eu",
+    `printf '%s\\n' \"$*\" > '${logPath}'`,
+    `printf '%s\\n' '${escapedAuthJson}' > \"$CODEX_HOME/auth.json\"`,
+    "",
+  ].join("\n");
+
+  const scriptPath = path.join(binDir, "codex");
+  fs.writeFileSync(scriptPath, script, "utf-8");
+  fs.chmodSync(scriptPath, 0o755);
 }
 
 // ─── Meta ────────────────────────────────────────────────────
