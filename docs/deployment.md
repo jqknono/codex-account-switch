@@ -42,6 +42,7 @@ npm trust github codex-account-switch --repo jqknono/codex-account-switch --file
 | Step | Command | Verification |
 | --- | --- | --- |
 | Install dependencies | `npm ci` | command succeeds |
+| Rehearse the GitHub workflow locally in WSL | `npm run verify:publish:cli` | downloads Linux Node toolchain if needed, runs the CLI release tests, and finishes with `npm publish --dry-run` |
 | Run CLI release tests | `npm run test -w packages/cli` | the publishable CLI package passes its integration suite |
 | Confirm target version | `node -p "require('./packages/cli/package.json').version"` | version is the one you intend to publish |
 | Trigger release | `npm run publish:cli` | pushes tag `cli-v<version>` |

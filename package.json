@@ -20,6 +20,8 @@
     "publish:vscode:preview": "npm run publish:preview -w packages/vscode",
     "publish:cli": "pwsh -NoLogo -NoProfile -File ./scripts/publish-cli.ps1 tag",
     "publish:cli:help": "pwsh -NoLogo -NoProfile -File ./scripts/publish-cli.ps1 help",
+    "verify:publish:cli": "pwsh -NoLogo -NoProfile -File ./scripts/run-publish-cli-workflow.ps1 run",
+    "verify:publish:cli:help": "pwsh -NoLogo -NoProfile -File ./scripts/run-publish-cli-workflow.ps1 help",
     "dev:core": "npm run dev -w packages/core",
     "dev:cli": "npm run dev -w packages/cli",
     "dev:vscode": "npm run dev -w packages/vscode"
