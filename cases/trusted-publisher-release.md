@@ -7,3 +7,4 @@
 | 版本与 tag 不匹配 | workflow 由 `cli-v1.8.0` 触发，但 `packages/cli/package.json` 版本不是 `1.8.0` | workflow 在发布前失败，npm 上不会出现错误版本。 |
 | 非主分支误发版 | 当前分支不是 `main`，直接执行 `npm run publish:cli` | 本地脚本拒绝创建发布 tag，并提示需要从 `main` 分支执行。 |
 | 工作区有未提交改动 | 仓库存在未提交文件，执行 `npm run publish:cli` | 本地脚本拒绝发布，避免 GitHub 发布的源码与本地预期不一致。 |
+| npm 账户未开启 2FA | 本地执行 `npm run publish:cli:check` 或 `npm run publish:cli`，且 `npm profile get --json` 返回 `tfa: false` | 本地脚本在创建 tag 前失败，并提示先启用 2FA 再配置 `npm trust github codex-account-switch --repo jqknono/codex-account-switch --file publish-cli.yml`。 |

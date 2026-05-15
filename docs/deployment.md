@@ -31,6 +31,12 @@ Configure npm Trusted Publisher once for `codex-account-switch` with the GitHub 
 | Branch | `main` |
 | Environment | leave empty |
 
+Before running `npm trust`, the publishing npm account must have 2FA enabled. Verify it with:
+
+```bash
+npm profile get --json
+```
+
 You can register the trust with the npm CLI:
 
 ```bash
@@ -42,6 +48,7 @@ npm trust github codex-account-switch --repo jqknono/codex-account-switch --file
 | Step | Command | Verification |
 | --- | --- | --- |
 | Install dependencies | `npm ci` | command succeeds |
+| Check Trusted Publisher prerequisites | `npm run publish:cli:check` | script confirms npm account 2FA is enabled and the Trusted Publisher dry-run matches `publish-cli.yml` |
 | Rehearse the GitHub workflow locally in WSL | `npm run verify:publish:cli` | downloads Linux Node toolchain if needed, runs the CLI release tests, and finishes with `npm publish --dry-run` |
 | Run CLI release tests | `npm run test -w packages/cli` | the publishable CLI package passes its integration suite |
 | Confirm target version | `node -p "require('./packages/cli/package.json').version"` | version is the one you intend to publish |
@@ -53,5 +60,6 @@ npm trust github codex-account-switch --repo jqknono/codex-account-switch --file
 | Situation | Action |
 | --- | --- |
 | Tag pushed, workflow not started | Verify the tag exists on `origin` and the workflow file path matches the npm Trusted Publisher binding. |
+| `npm trust` or GitHub Actions publish returns `403` / `404` after a Trusted Publisher migration | Enable npm account 2FA, then recreate the trust entry for `jqknono/codex-account-switch` and `publish-cli.yml`. |
 | Workflow failed before publish | Fix the branch/workflow/package metadata mismatch, then push a new version commit and a new `cli-v<version>` tag. |
 | Incorrect package already published | Publish a corrective version; do not overwrite an existing npm version. |
