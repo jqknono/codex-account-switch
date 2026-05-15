@@ -142,16 +142,21 @@ npx ovsx create-namespace techfetch-dev -p <your-openvsx-token>
 # Build the CLI package
 npm run build:cli
 
-# Publish to npm
+# Create and push the release tag that triggers the GitHub Trusted Publisher workflow
 npm run publish:cli
 ```
 
 Examples:
 
 ```bash
-npm run publish:cli -- --tag next
-npm run publish:cli -- --otp <code>
+# Show release helper usage
+npm run publish:cli:help
+
+# Tag a specific committed CLI version and push it to origin
+npm run publish:cli -- -Version 1.8.0
 ```
+
+The actual `npm publish` step now runs in GitHub Actions through npm Trusted Publisher. Configure the npm package trust once, then publish from the `main` branch by pushing a `cli-v<version>` tag that matches `packages/cli/package.json`.
 
 ## Data Storage
 

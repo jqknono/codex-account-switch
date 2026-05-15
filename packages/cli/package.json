@@ -3,19 +3,30 @@
   "version": "1.8.0",
   "description": "Quick switch between multiple Codex CLI accounts",
   "main": "dist/index.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jqknono/codex-account-switch.git"
+  },
+  "homepage": "https://github.com/jqknono/codex-account-switch",
+  "bugs": {
+    "url": "https://github.com/jqknono/codex-account-switch/issues"
+  },
   "files": [
     "dist"
   ],
   "bin": {
     "codex-account-switch": "dist/index.js"
   },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
   "scripts": {
     "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\"",
     "build": "tsc --emitDeclarationOnly && node ./scripts/build.mjs",
     "dev": "tsc --watch",
     "test": "npm run build && node --test test/**/*.test.js",
-    "prepack": "npm run build",
-    "publish:npm": "npm publish --access public"
+    "prepack": "npm run build"
   },
   "keywords": [
     "codex",
