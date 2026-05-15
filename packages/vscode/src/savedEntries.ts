@@ -21,9 +21,6 @@ import {
   getNamedAuthPath,
   getNamedProviderPath,
   getQuotaInfo,
-  isTokenExpired,
-  isTokenExpiringWithin,
-  isRefreshTokenExpiringWithin,
   getSavedAuthPassphrase,
   hasAccountAuthTokens,
   isSerializedSavedValueEncrypted,
@@ -51,7 +48,6 @@ import { queryQuotaWithCache } from "./quotaCache";
 export type StorageSource = "local" | "cloud";
 export type SaveTarget = StorageSource;
 const LOG_PREFIX = "[codex-account-switch:vscode:savedEntries]";
-const TIMER_TOKEN_REFRESH_THRESHOLD_MS = 5 * 24 * 3600 * 1000;
 const SYNCED_CLOUD_STATE_KEY = "codex-account-switch.syncedCloudState.v1";
 const SYNCED_CLOUD_MIGRATION_KEY = "codex-account-switch.syncedCloudStateMigration.v1";
 
@@ -156,11 +152,7 @@ interface SyncedCloudMigrationState {
 
 const SYNCED_STORAGE_SETTING = "syncedStorage";
 const DEFAULT_TARGET_SETTING = "defaultSaveTarget";
-const TOKEN_AUTO_UPDATE_SETTING = "tokenAutoUpdate";
-const TOKEN_AUTO_UPDATE_INTERVAL_HOURS_SETTING = "tokenAutoUpdateIntervalHours";
 const CURRENT_SELECTION_KEY = "codex-account-switch.currentSavedSelection";
-const DEFAULT_TOKEN_AUTO_UPDATE_INTERVAL_HOURS = 24;
-const HOUR_MS = 60 * 60 * 1000;
 const DEFAULT_QUOTA_CACHE_INTERVAL_MS = 30 * 1000;
 const inflightCloudQuotaQueries = new Map<string, Promise<QuotaQueryResult>>();
 let inflightAutoRefreshDevicePrompt: Promise<string | null> | null = null;
@@ -185,24 +177,6 @@ function getQuotaCacheIntervalMs(): number {
 
 function shouldForceQuotaFetch(reason?: string): boolean {
   return reason === "manual";
-}
-
-function shouldRefreshTokenDuringTimer(auth: AuthFile | null | undefined): boolean {
-  if (!auth) {
-    return false;
-  }
-  return (
-    isTokenExpired(auth) ||
-    isTokenExpiringWithin(auth, TIMER_TOKEN_REFRESH_THRESHOLD_MS) ||
-    isRefreshTokenExpiringWithin(auth, TIMER_TOKEN_REFRESH_THRESHOLD_MS)
-  );
-}
-
-function shouldForceQuotaFetchForAccount(account: SavedAccountInfo, reason?: string): boolean {
-  if (shouldForceQuotaFetch(reason)) {
-    return true;
-  }
-  return reason === "timer" && shouldRefreshTokenDuringTimer(account.auth);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -950,80 +924,20 @@ export function getDefaultSaveTarget(): SaveTarget {
   return getConfiguration().get<SaveTarget>(DEFAULT_TARGET_SETTING, "local");
 }
 
-function getTokenAutoUpdate(): boolean {
-  return getConfiguration().get<boolean>(TOKEN_AUTO_UPDATE_SETTING, true);
-}
-
-function getTokenAutoUpdateIntervalHours(): number {
-  const raw = getConfiguration().get<number>(
-    TOKEN_AUTO_UPDATE_INTERVAL_HOURS_SETTING,
-    DEFAULT_TOKEN_AUTO_UPDATE_INTERVAL_HOURS,
-  );
-  return Number.isFinite(raw) && raw >= 1 ? raw : DEFAULT_TOKEN_AUTO_UPDATE_INTERVAL_HOURS;
-}
-
-function markTokenAutoUpdate(auth: AuthFile): void {
-  auth.last_token_auto_update = new Date().toISOString();
-}
-
-function shouldAutoPersistTokens(auth: AuthFile): boolean {
-  if (!getTokenAutoUpdate()) {
-    return false;
-  }
-
-  const lastTokenAutoUpdate = auth.last_token_auto_update;
-  if (typeof lastTokenAutoUpdate !== "string" || lastTokenAutoUpdate.length === 0) {
-    return true;
-  }
-
-  const lastSyncTime = Date.parse(lastTokenAutoUpdate);
-  if (Number.isNaN(lastSyncTime)) {
-    return true;
-  }
-
-  return Date.now() - lastSyncTime >= getTokenAutoUpdateIntervalHours() * HOUR_MS;
-}
-
-function shouldPersistAutomaticTokens(auth: AuthFile, options: { force?: boolean } = {}): boolean {
-  return options.force ? getTokenAutoUpdate() : shouldAutoPersistTokens(auth);
-}
-
 async function persistCloudAccountAuth(
   name: string,
   auth: AuthFile,
-  mode: "manual" | "automatic",
   expectedEntryVersion?: number | null,
   expectedUpdatedAt?: string | null,
-  options: { force?: boolean } = {},
-): Promise<CloudMutationResult | { success: true; skipped: true }> {
-  if (mode === "automatic") {
-    if (!shouldPersistAutomaticTokens(auth, options)) {
-      return { success: true, skipped: true };
-    }
-    const authority = await resolveAutomaticRefreshAuthority();
-    if (!authority.allowed) {
-      return { success: true, skipped: true };
-    }
-  }
-
-  markTokenAutoUpdate(auth);
+): Promise<CloudMutationResult> {
   return writeCloudAccountWithExpectedVersion(name, auth, expectedEntryVersion, expectedUpdatedAt);
 }
 
 function persistLocalAccountAuth(
   name: string,
   auth: AuthFile,
-  mode: "manual" | "automatic",
-  options: { shouldSyncCurrentAuth?: boolean; force?: boolean } = {},
-): { success: true; skipped?: true } {
-  if (mode === "automatic" && !shouldPersistAutomaticTokens(auth, options)) {
-    if (options.shouldSyncCurrentAuth) {
-      writeCurrentAuth(auth);
-    }
-    return { success: true, skipped: true };
-  }
-
-  markTokenAutoUpdate(auth);
+  options: { shouldSyncCurrentAuth?: boolean } = {},
+): { success: true } {
   writeSavedAuthFile(getNamedAuthPath(name), auth);
   if (options.shouldSyncCurrentAuth) {
     writeCurrentAuth(auth);
@@ -1232,19 +1146,16 @@ export async function syncCurrentAuthToSavedSelection(): Promise<CloudMutationRe
       const result = await persistCloudAccountAuth(
         marker.name,
         auth,
-        "automatic",
         marker.entryVersion,
         marker.updatedAt,
       );
       if (!result.success) {
         return result;
       }
-      if (!("skipped" in result)) {
-        await updateMarkerSyncMetadata("account", marker.name, {
-          entryVersion: result.syncVersion ?? null,
-          updatedAt: result.syncUpdatedAt ?? null,
-        });
-      }
+      await updateMarkerSyncMetadata("account", marker.name, {
+        entryVersion: result.syncVersion ?? null,
+        updatedAt: result.syncUpdatedAt ?? null,
+      });
     }
     return null;
   }
@@ -1326,7 +1237,6 @@ export async function saveCurrentAuthAsAccount(
     }
   }
 
-  markTokenAutoUpdate(auth);
   const writeResult = await writeCloudAccountWithExpectedVersion(
     name,
     auth,
@@ -1419,71 +1329,12 @@ export async function querySavedAccountQuota(
     if (account.source === "local") {
       const resultPromise = queryQuotaWithCache(account, {
         minIntervalMs: getQuotaCacheIntervalMs(),
-        forceFetch: shouldForceQuotaFetchForAccount(account, options.reason),
-        fetch: async () => {
-          const persistAutomatically = async ({
-            auth,
-            shouldSyncCurrentAuth,
-            force,
-          }: {
-            auth: AuthFile;
-            shouldSyncCurrentAuth: boolean;
-            force?: boolean;
-          }): Promise<void> => {
-            const result = persistLocalAccountAuth(account.name, auth, "automatic", {
-              shouldSyncCurrentAuth,
-              force,
-            });
-            perf.mark("persist-local-auth", {
-              mode: "automatic",
-              skipped: Boolean(result.skipped),
-            });
-          };
-
-          if (options.reason === "timer" && account.auth) {
-            const accessTokenExpired = isTokenExpired(account.auth);
-            const accessTokenExpiring = isTokenExpiringWithin(account.auth, TIMER_TOKEN_REFRESH_THRESHOLD_MS);
-            const refreshTokenExpiring = isRefreshTokenExpiringWithin(account.auth, TIMER_TOKEN_REFRESH_THRESHOLD_MS);
-            const shouldRefreshToken = accessTokenExpired || accessTokenExpiring || refreshTokenExpiring;
-            perf.mark("timer-refresh-token-check", {
-              shouldRefresh: shouldRefreshToken,
-              accessTokenExpired,
-              accessTokenExpiring,
-              refreshTokenExpiring,
-              source: account.source,
-            });
-            if (shouldRefreshToken) {
-              const refreshResult = await refreshAccount(account.name, {
-                syncCurrentAuthBeforeRead: false,
-                persistUpdatedAuth: ({ auth, shouldSyncCurrentAuth }) => persistAutomatically({
-                  auth,
-                  shouldSyncCurrentAuth,
-                  force: accessTokenExpired,
-                }),
-              });
-              perf.mark("timer-refresh-token", {
-                success: refreshResult.success,
-                accessTokenExpired,
-                accessTokenExpiring,
-                refreshTokenExpiring,
-                source: account.source,
-              });
-              if (!refreshResult.success) {
-                throw new Error(refreshResult.message);
-              }
-            }
-          }
-          perf.mark("delegate-to-core-queryQuota");
-          return queryQuota(account.name, {
-            performanceMode: "adaptive",
-            slowThresholdMs: 3000,
-            syncCurrentAuthBeforeRead: false,
-            persistUpdatedAuth: ({ auth, shouldSyncCurrentAuth }) => persistAutomatically({
-              auth,
-              shouldSyncCurrentAuth,
-            }),
-          });
-        },
+        forceFetch: shouldForceQuotaFetch(options.reason),
+        fetch: async () => queryQuota(account.name, {
+          performanceMode: "adaptive",
+          slowThresholdMs: 3000,
+          syncCurrentAuthBeforeRead: false,
+        }),
       });
       context?.sharedQueries?.set(account.id, resultPromise);
       const result = await resultPromise;
@@ -1520,80 +1371,21 @@ export async function querySavedAccountQuota(
     const initialAuth = account.auth;
     const queryPromise = queryQuotaWithCache(account, {
       minIntervalMs: getQuotaCacheIntervalMs(),
-      forceFetch: shouldForceQuotaFetchForAccount(account, options.reason),
+      forceFetch: shouldForceQuotaFetch(options.reason),
       fetch: async (): Promise<QuotaQueryResult> => {
-      const auth = clone(initialAuth);
-      const expectedSyncMetadata: SavedStorageSyncMetadata = {
-        entryVersion: account.syncVersion,
-        updatedAt: account.syncUpdatedAt,
-      };
-      const persist = async (mode: "manual" | "automatic", persistOptions: { force?: boolean } = {}): Promise<void> => {
-        const result = await persistCloudAccountAuth(
-          account.name,
-          auth,
-          mode,
-          expectedSyncMetadata.entryVersion,
-          expectedSyncMetadata.updatedAt,
-          persistOptions,
-        );
-        if (!result.success) {
-          throw new Error(result.message);
-        }
-        perf.mark("persist-cloud-auth", {
-          mode,
-          skipped: "skipped" in result,
+        const auth = clone(initialAuth);
+        const info = await getQuotaInfo(auth, {
+          performanceMode: "adaptive",
+          slowThresholdMs: 3000,
         });
-        const current = getSavedCurrentSelection(context?.snapshot);
-        if (current.kind === "account" && current.source === "cloud" && current.name === account.name) {
-          writeCurrentAuth(auth);
-        }
-        if (!("skipped" in result)) {
-          expectedSyncMetadata.entryVersion = result.syncVersion ?? null;
-          expectedSyncMetadata.updatedAt = result.syncUpdatedAt ?? null;
-          await updateMarkerSyncMetadata("account", account.name, {
-            entryVersion: result.syncVersion ?? null,
-            updatedAt: result.syncUpdatedAt ?? null,
-          });
-        }
-      };
-
-      if (options.reason === "timer") {
-        const accessTokenExpired = isTokenExpired(auth);
-        const accessTokenExpiring = isTokenExpiringWithin(auth, TIMER_TOKEN_REFRESH_THRESHOLD_MS);
-        const refreshTokenExpiring = isRefreshTokenExpiringWithin(auth, TIMER_TOKEN_REFRESH_THRESHOLD_MS);
-        const shouldRefreshToken = accessTokenExpired || accessTokenExpiring || refreshTokenExpiring;
-        perf.mark("timer-refresh-token-check", {
-          shouldRefresh: shouldRefreshToken,
-          accessTokenExpired,
-          accessTokenExpiring,
-          refreshTokenExpiring,
-          source: account.source,
+        perf.mark("get-quota-info", {
+          unavailableReason: info.unavailableReason?.code ?? null,
         });
-        if (shouldRefreshToken) {
-          const refreshed = await refreshAccessToken(auth);
-          applyRefreshResponse(auth, refreshed);
-          await persist("automatic", {
-            force: accessTokenExpired,
-          });
-          perf.mark("timer-refresh-token", {
-            success: true,
-            accessTokenExpired,
-            accessTokenExpiring,
-            refreshTokenExpiring,
-            source: account.source,
-          });
-        }
-      }
-
-      const info = await getQuotaInfo(auth, () => persist("automatic"));
-      perf.mark("get-quota-info", {
-        unavailableReason: info.unavailableReason?.code ?? null,
-      });
-      return {
-        kind: "ok",
-        displayName: account.name,
-        info,
-      };
+        return {
+          kind: "ok",
+          displayName: account.name,
+          info,
+        };
       },
     });
 
@@ -1633,7 +1425,7 @@ export async function refreshSavedAccountEntry(account: SavedAccountInfo): Promi
   if (account.source === "local") {
     return refreshAccount(account.name, {
       persistUpdatedAuth: ({ auth, shouldSyncCurrentAuth }) => {
-        persistLocalAccountAuth(account.name, auth, "manual", {
+        persistLocalAccountAuth(account.name, auth, {
           shouldSyncCurrentAuth,
         });
       },
@@ -1651,7 +1443,6 @@ export async function refreshSavedAccountEntry(account: SavedAccountInfo): Promi
     const persistResult = await persistCloudAccountAuth(
       account.name,
       auth,
-      "manual",
       account.syncVersion,
       account.syncUpdatedAt,
     );
@@ -1665,12 +1456,10 @@ export async function refreshSavedAccountEntry(account: SavedAccountInfo): Promi
     const current = getSavedCurrentSelection();
     if (current.kind === "account" && current.source === "cloud" && current.name === account.name) {
       writeCurrentAuth(auth);
-      if (!("skipped" in persistResult)) {
-        await updateMarkerSyncMetadata("account", account.name, {
-          entryVersion: persistResult.syncVersion ?? null,
-          updatedAt: persistResult.syncUpdatedAt ?? null,
-        });
-      }
+      await updateMarkerSyncMetadata("account", account.name, {
+        entryVersion: persistResult.syncVersion ?? null,
+        updatedAt: persistResult.syncUpdatedAt ?? null,
+      });
     }
     return {
       success: true,
@@ -1755,7 +1544,6 @@ export async function moveSavedAccountEntry(
   } else {
     requireCloudPassphrase();
     const auth = clone(account.auth);
-    markTokenAutoUpdate(auth);
     const writeResult = await writeCloudAccountWithExpectedVersion(account.name, auth);
     if (!writeResult.success) {
       return { success: false, message: writeResult.message, conflict: writeResult.conflict };

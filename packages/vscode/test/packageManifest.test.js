@@ -98,26 +98,6 @@ test("storage target settings are contributed", () => {
     properties["codex-account-switch.defaultSaveTarget"]?.enumDescriptions?.[1] ?? "",
     /synced extension storage/i
   );
-  assert.equal(
-    properties["codex-account-switch.tokenAutoUpdate"]?.type,
-    "boolean"
-  );
-  assert.equal(
-    properties["codex-account-switch.tokenAutoUpdate"]?.default,
-    true
-  );
-  assert.equal(
-    properties["codex-account-switch.tokenAutoUpdateIntervalHours"]?.type,
-    "number"
-  );
-  assert.equal(
-    properties["codex-account-switch.tokenAutoUpdateIntervalHours"]?.default,
-    24
-  );
-  assert.equal(
-    properties["codex-account-switch.tokenAutoUpdateIntervalHours"]?.minimum,
-    1
-  );
   assert.match(
     properties["codex-account-switch.syncedStorage"]?.markdownDeprecationMessage ?? "",
     /legacy migration-only setting/i

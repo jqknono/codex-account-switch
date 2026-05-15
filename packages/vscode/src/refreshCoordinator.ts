@@ -1,11 +1,13 @@
 import * as vscode from "vscode";
+import { isRefreshTokenExpiringWithin, isReloginRequiredRefreshError, isTokenExpired, isTokenExpiringWithin } from "@codex-account-switch/core";
 import { AccountTreeProvider } from "./accountTree";
 import { logWarn, startPerformanceLog } from "./log";
 import { ProviderTreeProvider } from "./providerTree";
-import { createSavedEntriesSnapshot, SavedAccountQuotaQueryContext } from "./savedEntries";
+import { createSavedEntriesSnapshot, refreshSavedAccountEntry, SavedAccountInfo, SavedAccountQuotaQueryContext } from "./savedEntries";
 import { StatusBarManager } from "./statusBar";
 
 const LOG_PREFIX = "[codex-account-switch:vscode:refreshCoordinator]";
+const TOKEN_REFRESH_THRESHOLD_MS = 120 * 60 * 60 * 1000;
 let refreshSequence = 0;
 
 export type RefreshReason =
@@ -213,12 +215,9 @@ export class RefreshCoordinator implements vscode.Disposable {
     });
 
     const refreshId = `refresh-${++refreshSequence}`;
-    const snapshot = createSavedEntriesSnapshot();
-    const queryContext: SavedAccountQuotaQueryContext = {
-      snapshot,
-      sharedQueries: new Map(),
-    };
-    const currentSelectionAccountId = this.getCurrentSelectionAccountId(snapshot);
+    let snapshot = createSavedEntriesSnapshot();
+    let currentSelectionAccountId = this.getCurrentSelectionAccountId(snapshot);
+    let autoTargetAccount: SavedAccountInfo | null = null;
     let targetIds: string[] | undefined;
     if (pendingFullRefresh) {
       targetIds = snapshot.accounts
@@ -227,12 +226,27 @@ export class RefreshCoordinator implements vscode.Disposable {
     } else if (explicitTargetIds && explicitTargetIds.length > 0) {
       targetIds = explicitTargetIds;
     } else if (pendingAutoRefresh && pendingReason === "timer") {
-      targetIds = this.getNextAutoRefreshTargetIds(snapshot);
+      autoTargetAccount = this.getNextAutoRefreshTarget(snapshot);
+      targetIds = autoTargetAccount ? [autoTargetAccount.id] : [];
     } else if (pendingAutoRefresh && snapshot.selection.kind === "account") {
       targetIds = currentSelectionAccountId ? [currentSelectionAccountId] : [];
     } else {
       targetIds = [];
     }
+
+    if (pendingReason === "timer" && autoTargetAccount) {
+      const tokenRefreshResult = await this.maybeRefreshExpiringToken(autoTargetAccount, refreshId);
+      if (tokenRefreshResult.skipQuota) {
+        targetIds = [];
+      }
+      snapshot = createSavedEntriesSnapshot();
+      currentSelectionAccountId = this.getCurrentSelectionAccountId(snapshot);
+    }
+
+    const queryContext: SavedAccountQuotaQueryContext = {
+      snapshot,
+      sharedQueries: new Map(),
+    };
 
     if (
       pendingReason !== "timer"
@@ -317,7 +331,7 @@ export class RefreshCoordinator implements vscode.Disposable {
     return current?.id ?? null;
   }
 
-  private getNextAutoRefreshTargetIds(snapshot: ReturnType<typeof createSavedEntriesSnapshot>): string[] {
+  private getNextAutoRefreshTarget(snapshot: ReturnType<typeof createSavedEntriesSnapshot>): SavedAccountInfo | null {
     const readyAccounts = snapshot.accounts
       .filter((account) => account.storageState === "ready")
       .sort((left, right) => {
@@ -326,7 +340,7 @@ export class RefreshCoordinator implements vscode.Disposable {
       });
 
     if (readyAccounts.length === 0) {
-      return [];
+      return null;
     }
 
     const fallbackCursorId = this.lastAutoRefreshAccountId ?? this.getCurrentSelectionAccountId(snapshot);
@@ -335,11 +349,85 @@ export class RefreshCoordinator implements vscode.Disposable {
       if (currentIndex >= 0) {
         const next = readyAccounts[(currentIndex + 1) % readyAccounts.length];
         this.lastAutoRefreshAccountId = next.id;
-        return [next.id];
+        return next;
       }
     }
 
     this.lastAutoRefreshAccountId = readyAccounts[0].id;
-    return [readyAccounts[0].id];
+    return readyAccounts[0];
+  }
+
+  private shouldRefreshToken(account: SavedAccountInfo): boolean {
+    if (account.storageState !== "ready" || !account.auth) {
+      return false;
+    }
+
+    return (
+      isTokenExpired(account.auth)
+      || isTokenExpiringWithin(account.auth, TOKEN_REFRESH_THRESHOLD_MS)
+      || isRefreshTokenExpiringWithin(account.auth, TOKEN_REFRESH_THRESHOLD_MS)
+    );
+  }
+
+  private async maybeRefreshExpiringToken(account: SavedAccountInfo, refreshId: string): Promise<{ skipQuota: boolean }> {
+    const perf = startPerformanceLog(LOG_PREFIX, "refreshCoordinator.maybeRefreshExpiringToken", {
+      account: account.name,
+      source: account.source,
+      refreshId,
+    });
+
+    try {
+      if (!this.shouldRefreshToken(account)) {
+        perf.finish({
+          result: "skipped-threshold",
+        });
+        return { skipQuota: false };
+      }
+
+      if (account.source === "cloud" && account.autoRefreshAllowed === false) {
+        perf.finish({
+          result: "skipped-device-authority",
+          effectiveAutoRefreshDeviceName: account.effectiveAutoRefreshDeviceName,
+          currentDeviceName: account.currentDeviceName,
+        });
+        return { skipQuota: false };
+      }
+
+      const result = await refreshSavedAccountEntry(account);
+      if (result.success) {
+        perf.finish({
+          result: "refreshed",
+          lastRefresh: result.lastRefresh ?? null,
+        });
+        return { skipQuota: false };
+      }
+
+      if (isReloginRequiredRefreshError(result.message)) {
+        this.accountTree.markReloginRequired([account.id]);
+        perf.finish({
+          result: "relogin-required",
+        });
+        return { skipQuota: true };
+      }
+
+      logWarn(LOG_PREFIX, "background-token-refresh-failed", {
+        account: account.id,
+        refreshId,
+        message: result.message,
+        conflict: result.conflict ?? false,
+      });
+      perf.finish({
+        result: result.conflict ? "conflict" : "failed",
+      });
+      return { skipQuota: false };
+    } catch (error) {
+      logWarn(LOG_PREFIX, "background-token-refresh-error", {
+        account: account.id,
+        refreshId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      perf.fail(error);
+      return { skipQuota: false };
+    }
   }
 }

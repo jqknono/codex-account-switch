@@ -62,21 +62,12 @@ test("getQuotaInfo reports workspace deactivated when usage API returns deactiva
   );
 });
 
-test("getQuotaInfo reports relogin required when refresh token was reused", async () => {
+test("getQuotaInfo does not refresh tokens when usage API returns authentication errors", async () => {
+  const requests = [];
   await withMockedHttpsRequest(
     (options, handler) => {
-      const isTokenRequest = options?.hostname === "auth.openai.com";
-      const body = isTokenRequest
-        ? JSON.stringify({
-            error: {
-              message: "Your refresh token has already been used to generate a new access token. Please try signing in again.",
-              type: "invalid_request_error",
-              param: null,
-              code: "refresh_token_reused",
-            },
-          })
-        : JSON.stringify({ detail: "authentication token expired" });
-      return createMockRequest(401, body)(options, handler);
+      requests.push(options?.hostname ?? "");
+      return createMockRequest(401, JSON.stringify({ detail: "authentication token expired" }))(options, handler);
     },
     async () => {
       const info = await getQuotaInfo({
@@ -86,10 +77,11 @@ test("getQuotaInfo reports relogin required when refresh token was reused", asyn
         },
       });
 
-      assert.equal(info.unavailableReason?.code, "relogin_required");
-      assert.equal(info.unavailableReason?.message, "Relogin required");
+      assert.equal(info.unavailableReason?.code, "invalid_auth_token");
+      assert.equal(info.unavailableReason?.message, "Missing auth tokens");
       assert.equal(info.primaryWindow, null);
       assert.equal(info.secondaryWindow, null);
+      assert.deepEqual(requests, ["chatgpt.com"]);
     }
   );
 });

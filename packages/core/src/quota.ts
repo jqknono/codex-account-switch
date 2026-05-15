@@ -1,7 +1,7 @@
 import * as https from "https";
 import { AuthFile, IdTokenPayload, WindowInfo, QuotaInfo, QuotaUnavailableReason } from "./types";
 import { jwtDecode } from "jwt-decode";
-import { RELOGIN_REQUIRED_MESSAGE, isReloginRequiredRefreshError, refreshAccessToken, applyRefreshResponse } from "./refresh";
+import { RELOGIN_REQUIRED_MESSAGE, isReloginRequiredRefreshError } from "./refresh";
 import { createDiagnosticPerformanceTimer } from "./log";
 
 const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
@@ -41,12 +41,12 @@ interface HttpErrorLike {
   message?: string;
 }
 
-type AuthUpdateHook = (auth: AuthFile) => void | Promise<void>;
-
 export interface QuotaPerformanceOptions {
   performanceMode?: "summary" | "adaptive";
   slowThresholdMs?: number;
 }
+
+type AuthUpdateHook = (auth: AuthFile) => void | Promise<void>;
 
 function httpsGet(url: string, headers: Record<string, string>): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -82,7 +82,6 @@ function httpsGet(url: string, headers: Record<string, string>): Promise<string>
 
 async function fetchUsageApi(
   auth: AuthFile,
-  onAuthUpdated?: AuthUpdateHook,
   options: QuotaPerformanceOptions = {},
 ): Promise<UsageApiResponse> {
   const perf = createDiagnosticPerformanceTimer(
@@ -119,7 +118,7 @@ async function fetchUsageApi(
     const parsed = JSON.parse(raw) as UsageApiResponse;
     perf.mark("parse-usage-response");
     perf.finish({
-      retriedAfterAuthError: false,
+      authError: false,
     });
     return parsed;
   } catch (err: unknown) {
@@ -128,30 +127,10 @@ async function fetchUsageApi(
       perf.mark("usage-request-auth-error", {
         statusCode: httpErr.statusCode,
       });
-      const refreshed = await refreshAccessToken(auth);
-      applyRefreshResponse(auth, refreshed);
-      perf.mark("refresh-access-token");
-      await onAuthUpdated?.(auth);
-      perf.mark("persist-refreshed-auth");
-      const refreshedAccessToken = auth.tokens?.access_token;
-
-      if (!refreshedAccessToken) {
-        const error = new Error("No access_token in auth file");
-        perf.fail(error, {
-          retriedAfterAuthError: true,
-        });
-        throw error;
-      }
-
-      headers.Authorization = `Bearer ${refreshedAccessToken}`;
-      const raw = await httpsGet(USAGE_URL, headers);
-      perf.mark("retry-usage-request");
-      const parsed = JSON.parse(raw) as UsageApiResponse;
-      perf.mark("parse-retry-usage-response");
-      perf.finish({
-        retriedAfterAuthError: true,
+      perf.fail(err, {
+        authError: true,
       });
-      return parsed;
+      throw err;
     }
     perf.fail(err);
     throw err;
@@ -240,9 +219,13 @@ function parseUnavailableReason(auth: AuthFile, err: unknown): QuotaUnavailableR
 
 export async function getQuotaInfo(
   auth: AuthFile,
-  onAuthUpdated?: AuthUpdateHook,
-  options: QuotaPerformanceOptions = {},
+  onAuthUpdatedOrOptions?: AuthUpdateHook | QuotaPerformanceOptions,
+  maybeOptions: QuotaPerformanceOptions = {},
 ): Promise<QuotaInfo> {
+  const options =
+    typeof onAuthUpdatedOrOptions === "function"
+      ? maybeOptions
+      : onAuthUpdatedOrOptions ?? {};
   const perf = createDiagnosticPerformanceTimer(
     LOG_PREFIX,
     "getQuotaInfo",
@@ -284,7 +267,7 @@ export async function getQuotaInfo(
 
   let apiData: UsageApiResponse;
   try {
-    apiData = await fetchUsageApi(auth, onAuthUpdated, options);
+    apiData = await fetchUsageApi(auth, options);
     perf.mark("fetch-usage-api");
   } catch (err: unknown) {
     const unavailable = {

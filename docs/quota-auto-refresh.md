@@ -10,7 +10,8 @@
 | Account tree refresh | `AccountTreeProvider` | 只负责渲染与执行目标 quota 查询，不再维护自己的 timer。 |
 | Status bar refresh | `StatusBarManager` | 只负责展示与 `showStatusBar` 配置联动；timer 轮到非当前账号时不额外发起 quota 请求。 |
 | Group refresh action | `refreshQuota` command | 支持从 `Local Accounts` / `Cloud Accounts` 分组节点一次刷新组内全部账号 quota。 |
-| Token auto update | `savedEntries.ts` | local / cloud 共用 `tokenAutoUpdate` 与 `tokenAutoUpdateIntervalHours`；自动 quota 刷新只在满足条件时回写 saved account。 |
+| Quota persistence | `quotaCache.ts` | quota 结果仅写入本机共享 cache，不修改 local/cloud saved auth。 |
+| Token maintenance boundary | `RefreshCoordinator` | timer 周期可在 quota 前单独执行 token 检查；详细规则见 `docs/token-auto-refresh.md`。 |
 
 ## Refresh Flow
 
@@ -44,8 +45,7 @@ flowchart LR
 | Cross-window coordination | 当多个 VS Code 实例同时需要同一账号 quota 时，使用临时 lock 文件减少重复查询。 |
 | Failure fallback | 新查询失败但 cache 中已有最近一次成功结果时，优先继续显示缓存数据。 |
 | Current status bar | 只有轮到当前账号时才复用同一次 quota 查询更新状态栏。 |
-| Timer token refresh threshold | timer 命中账号后，如果 access token 已过期或剩余有效期 `<= 5` 天，或可解码的 refresh token 剩余有效期 `<= 5` 天，则会先刷新 token 再查 quota。 |
-| Relogin required signal | 如果 token endpoint 返回 `refresh_token_reused` 或等价的 sign-in-again 错误，账号树优先显示 `Relogin required`，即使 quota cache 仍有旧数据可展示。 |
-| Shared token auto update | local / cloud 的自动 token 回写共用 `tokenAutoUpdate*` 设置；如果本轮跳过 saved account 回写，但该账号正处于激活状态，`auth.json` 仍会更新到最新 token。 |
+| Read-only quota refresh | quota 刷新不会触发 token refresh，也不会把 auth/token 写回 local 或 cloud saved account。 |
+| Auth failures | 如果 quota 请求因为认证失败返回 `401/403`，本轮直接标记 quota unavailable，不通过 quota 路径补做 token refresh。 |
 | Full-cycle cost | 如果有 `N` 个 saved accounts，则完整轮转一轮约需 `N * quotaRefreshInterval`。 |
 | In-flight coalescing | 当前轮刷新未结束时，新的自动目标刷新请求进入队列，待当前轮完成后继续执行。 |

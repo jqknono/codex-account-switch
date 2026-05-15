@@ -71,6 +71,7 @@ Activity Bar account view:
 - Add, remove, switch, import, and export accounts
 - Mode-aware status bar display for the current account or provider mode
 - Token refresh actions for saved accounts
+- Background token maintenance that checks saved accounts for tokens expiring within 120 hours
 - Background quota refresh that rotates through saved accounts one at a time on a configurable interval
 - Shared local quota cache so multiple VS Code windows can reuse recent results before querying again
 - Optional prompt or automatic window reload after switching accounts so the Codex extension can re-read `~/.codex/auth.json`
@@ -79,7 +80,7 @@ Activity Bar account view:
 
 | Setting | Default | Description |
 |---|---|---|
-| `codex-account-switch.quotaRefreshInterval` | `30` | Automatic background quota refresh interval, in seconds; minimum `5`; each interval refreshes one saved account quota in rotation |
+| `codex-account-switch.quotaRefreshInterval` | `30` | Background maintenance interval, in seconds; minimum `5`; each interval checks one saved account for token refresh and rotates one saved account quota refresh |
 | `codex-account-switch.showStatusBar` | `true` | Show the current account quota in the status bar |
 | `codex-account-switch.reloadWindowAfterSwitch` | `prompt` | Whether to prompt or automatically reload the window after switching accounts |
 | `codex-account-switch.authDirectory` | `""` | Directory used to save and load `auth_{name}.json`; empty means the default Codex config directory |
@@ -156,9 +157,11 @@ npm run publish:cli -- --otp <code>
 
 Each saved account is stored as `auth_{name}.json` inside the configured account directory. By default this is the Codex config directory, typically `~/.codex`. Before any account or provider switch overwrites `~/.codex/auth.json`, the tool first syncs the latest current account auth back to its matching saved `auth_{name}.json`. Switching accounts then restores the selected file into `~/.codex/auth.json` and clears the active `model_provider` in `~/.codex/config.toml`.
 
-When `refresh` or `quota` rotates tokens for a saved account, the updated auth payload is written back to the saved account file. If that account is currently active, `~/.codex/auth.json` is updated too so future switches do not restore an older refresh token snapshot.
+When `refresh` rotates tokens for a saved account, the updated auth payload is written back to the saved account file. If that account is currently active, `~/.codex/auth.json` is updated too so future switches do not restore an older refresh token snapshot.
 
-In the VS Code extension, background quota refresh also pre-rotates tokens when an access token is already expired, within five days of expiry, or when a JWT refresh token is within five days of expiry. Automatic write-back after background/manual quota refresh is controlled by the shared `codex-account-switch.tokenAutoUpdate` and `codex-account-switch.tokenAutoUpdateIntervalHours` settings for both local and cloud saved accounts. Manual `Refresh Token` still writes immediately.
+Quota refresh is read-only. The CLI `quota` command and the VS Code background/manual quota refresh paths do not refresh tokens, do not rewrite saved auth payloads, and only cache quota results locally on the current machine.
+
+In the VS Code extension, background maintenance separately checks one saved account per timer step. If the access token is expired, within `120` hours of expiry, or a decodable refresh token is within `120` hours of expiry, the extension refreshes that account token before continuing with the independent quota step. Automatic cloud token refresh still respects the selected synced auto-refresh device.
 
 Some tools and extensions that depend on `~/.codex/auth.json` may cache authentication state on startup. For those cases, replacing `auth.json` alone may not take effect immediately, and a VS Code window reload is required.
 

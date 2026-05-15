@@ -7,7 +7,7 @@
 | Cloud accounts | VS Code `globalState` synced key | Payload stays encrypted with the saved-auth passphrase. |
 | Cloud providers | VS Code `globalState` synced key | Uses the same encrypted envelope format as accounts. |
 | Device list | VS Code `globalState` synced key | Shared across machines through Settings Sync. |
-| Auto-refresh device | VS Code `globalState` synced key | Syncs with the rest of the cloud state. |
+| Auto-refresh device | VS Code `globalState` synced key | Controls which synced device may perform automatic cloud token refresh. |
 | Saved-auth passphrase | VS Code `SecretStorage` | Local-only secret, never synced. |
 | Current selection marker | VS Code `globalState` unsynced key | Per-device UI state. |
 
@@ -18,7 +18,7 @@ flowchart LR
   A[Legacy syncedStorage setting] -->|first activation migration| B[globalState synced cloud state]
   B -->|activation appends current hostname when cloud state exists| C[Device list]
   B --> D[Settings Sync]
-  E[Selected auto-refresh device] --> F[Only this device may refresh and persist cloud tokens]
+  E[Selected auto-refresh device] --> F[Only this device may automatically refresh cloud tokens]
   D --> F
   G[SecretStorage passphrase] --> H[Decrypt encrypted envelopes locally]
   B --> H
@@ -41,7 +41,7 @@ flowchart LR
 | Activation runs again on the same machine | Keep a single entry for that hostname; do not duplicate it. |
 | Synced cloud state is still empty | Do not create a device record just because the extension activated once. |
 | `autoRefreshDeviceName` is unset | The first synced device remains the effective refresh authority until the user explicitly changes it. |
-| Current machine is not the selected auto-refresh device | This machine can still read synced entries and appear in the device list, but it must not persist refreshed cloud tokens. |
+| Current machine is not the selected auto-refresh device | This machine can still read synced entries and appear in the device list, but it must not persist automatically refreshed cloud tokens. |
 
 ## Constraints
 

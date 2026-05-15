@@ -607,6 +607,15 @@ function countAuthRefreshRequests(requestLog) {
   return requestLog.filter((request) => request.hostname === "auth.openai.com").length;
 }
 
+function getRefreshCoordinator(context) {
+  return context.subscriptions.find(
+    (item) =>
+      item
+      && typeof item.scheduleQuotaRefresh === "function"
+      && typeof item.refreshViews === "function"
+  );
+}
+
 test("addAccount can use device auth for a new account", async (t) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-add-account-"));
   const codexHome = path.join(tempRoot, ".codex");
@@ -2005,23 +2014,32 @@ test("background quota refresh rotates one saved account per interval without ex
   };
 
   try {
+    const stableAccessAlpha = makeJwt({
+      exp: Math.floor(Date.now() / 1000) + 10 * 24 * 3600,
+    });
+    const stableAccessBeta = makeJwt({
+      exp: Math.floor(Date.now() / 1000) + 10 * 24 * 3600,
+    });
+    const stableAccessGamma = makeJwt({
+      exp: Math.floor(Date.now() / 1000) + 10 * 24 * 3600,
+    });
     core.setNamedAuthDir(authDir);
     core.writeSavedAuthFile(
       path.join(authDir, "auth_alpha.json"),
-      makeAuthFile("acct-alpha", { accessToken: "access-alpha" })
+      makeAuthFile("acct-alpha", { accessToken: stableAccessAlpha })
     );
     core.writeSavedAuthFile(
       path.join(authDir, "auth_beta.json"),
-      makeAuthFile("acct-beta", { accessToken: "access-beta" })
+      makeAuthFile("acct-beta", { accessToken: stableAccessBeta })
     );
     core.writeSavedAuthFile(
       path.join(authDir, "auth_gamma.json"),
-      makeAuthFile("acct-gamma", { accessToken: "access-gamma" })
+      makeAuthFile("acct-gamma", { accessToken: stableAccessGamma })
     );
     core.setNamedAuthDir(undefined);
     fs.writeFileSync(
       path.join(codexHome, "auth.json"),
-      JSON.stringify(makeAuthFile("acct-beta", { accessToken: "access-beta" }), null, 2),
+      JSON.stringify(makeAuthFile("acct-beta", { accessToken: stableAccessBeta }), null, 2),
       "utf-8",
     );
 
@@ -2042,7 +2060,7 @@ test("background quota refresh rotates one saved account per interval without ex
       assert.equal(intervalHandles.length, 1);
       assert.equal(intervalHandles[0].ms, 30000);
       assert.equal(usageRequests.length, 1);
-      assert.equal(usageRequests[0].authorization, "Bearer access-beta");
+      assert.equal(usageRequests[0].authorization, `Bearer ${stableAccessBeta}`);
 
       await mocked.vscode.workspace
         .getConfiguration("codex-account-switch")
@@ -2068,7 +2086,7 @@ test("background quota refresh rotates one saved account per interval without ex
       assert.equal(countUsageRequests(requestLog), 2);
       assert.equal(
         requestLog.filter((request) => request.hostname === "chatgpt.com")[1]?.authorization,
-        "Bearer access-gamma"
+        `Bearer ${stableAccessGamma}`
       );
 
       intervalHandles[2].callback();
@@ -2077,7 +2095,7 @@ test("background quota refresh rotates one saved account per interval without ex
       assert.equal(countUsageRequests(requestLog), 3);
       assert.equal(
         requestLog.filter((request) => request.hostname === "chatgpt.com")[2]?.authorization,
-        "Bearer access-alpha"
+        `Bearer ${stableAccessAlpha}`
       );
 
       for (const subscription of context.subscriptions.reverse()) {
@@ -2596,7 +2614,7 @@ test("account tree keeps quota failures inside their source group", async (t) =>
   });
 });
 
-test("account tree shows relogin required when refresh token cannot be recovered", async (t) => {
+test("account tree shows relogin required only after manual token refresh fails", async (t) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-account-tree-relogin-required-"));
   const codexHome = path.join(tempRoot, ".codex");
   fs.mkdirSync(codexHome, { recursive: true });
@@ -2642,13 +2660,7 @@ test("account tree shows relogin required when refresh token cannot be recovered
 
         const [googleItem] = getAccountTreeItems(provider)
           .filter((item) => item.account.name === "google1" && item.account.source === "cloud");
-        assert.match(String(googleItem.description ?? ""), /Relogin required/);
-        assert.match(String(googleItem.tooltip ?? ""), /Re-login this account/);
-
-        const details = getAccountDetailItems(provider, googleItem);
-        const authDetail = details.find((item) => item.label === "Auth");
-        assert.equal(authDetail?.description, "Relogin required");
-        assert.match(String(authDetail?.tooltip ?? ""), /Refresh token cannot be recovered automatically/);
+        assert.doesNotMatch(String(googleItem.description ?? ""), /Relogin required/);
 
         provider.quotaState.delete("cloud:google1");
         provider.refresh();
@@ -2660,6 +2672,12 @@ test("account tree shows relogin required when refresh token cannot be recovered
         const [manualGoogleItem] = getAccountTreeItems(provider)
           .filter((item) => item.account.name === "google1" && item.account.source === "cloud");
         assert.match(String(manualGoogleItem.description ?? ""), /Relogin required/);
+        assert.match(String(manualGoogleItem.tooltip ?? ""), /Re-login this account/);
+
+        const details = getAccountDetailItems(provider, manualGoogleItem);
+        const authDetail = details.find((item) => item.label === "Auth");
+        assert.equal(authDetail?.description, "Relogin required");
+        assert.match(String(authDetail?.tooltip ?? ""), /Refresh token cannot be recovered automatically/);
 
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
@@ -3850,7 +3868,7 @@ test("moveAccountToLocal refreshes only the affected account quota", async (t) =
   });
 });
 
-test("switching away from a cloud account does not auto-sync tokens by default", async (t) => {
+test("switching away from a cloud account syncs the current auth back to cloud storage", async (t) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-cloud-manual-switch-"));
   const codexHome = path.join(tempRoot, ".codex");
   const authDir = path.join(tempRoot, "saved-auth");
@@ -3938,8 +3956,8 @@ test("switching away from a cloud account does not auto-sync tokens by default",
           "sync-user",
           "manual-passphrase"
         );
-        assert.equal(cloudAuth.tokens.access_token, savedCloudAccessToken);
-        assert.equal(cloudAuth.tokens.refresh_token, "refresh-cloud-old");
+        assert.equal(cloudAuth.tokens.access_token, "access-cloud-current");
+        assert.equal(cloudAuth.tokens.refresh_token, "refresh-cloud-current");
 
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
@@ -4054,7 +4072,290 @@ test("manual refresh still updates cloud tokens when automatic sync is disabled"
   });
 });
 
-test("timer refreshes local tokens when the refresh token expires within five days", async (t) => {
+test("timer maintenance refreshes local tokens when remaining validity is below 120 hours", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-local-token-maintenance-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  fs.mkdirSync(codexHome, { recursive: true });
+
+  const nearExpiryAccessToken = makeJwt({
+    exp: Math.floor(Date.now() / 1000) + 4 * 24 * 3600,
+  });
+  const localAuth = makeAuthFile("acct-local", {
+    accessToken: nearExpiryAccessToken,
+    refreshToken: "refresh-local-old",
+  });
+  fs.writeFileSync(
+    path.join(codexHome, "auth_local-user.json"),
+    JSON.stringify(localAuth, null, 2),
+    "utf-8"
+  );
+  fs.writeFileSync(
+    path.join(codexHome, "auth.json"),
+    JSON.stringify(localAuth, null, 2),
+    "utf-8"
+  );
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  const requestLog = [];
+  const mocked = createVscodeMock({
+    showStatusBar: false,
+  });
+
+  try {
+    await withDisabledIntervals(() =>
+      withSuccessfulHttps(async () => {
+        const extension = loadExtensionWithMockedVscode(mocked.vscode);
+        const context = createExtensionContext(mocked);
+        await extension.activate(context);
+        await waitForBackgroundWork();
+        requestLog.length = 0;
+
+        const refreshCoordinator = getRefreshCoordinator(context);
+        assert.ok(refreshCoordinator);
+
+        refreshCoordinator.scheduleQuotaRefresh({
+          reason: "timer",
+        });
+        await waitForBackgroundWork();
+
+        assert.equal(countAuthRefreshRequests(requestLog), 1);
+
+        const savedAuth = JSON.parse(fs.readFileSync(path.join(codexHome, "auth_local-user.json"), "utf-8"));
+        const currentAuth = JSON.parse(fs.readFileSync(path.join(codexHome, "auth.json"), "utf-8"));
+        assert.equal(savedAuth.tokens.access_token, "access-rotated");
+        assert.equal(savedAuth.tokens.refresh_token, "refresh-rotated");
+        assert.equal(currentAuth.tokens.access_token, "access-rotated");
+        assert.equal(currentAuth.tokens.refresh_token, "refresh-rotated");
+
+        for (const subscription of context.subscriptions.reverse()) {
+          subscription?.dispose?.();
+        }
+      }, { requestLog })
+    );
+  } finally {
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
+test("timer maintenance refreshes cloud tokens on the selected auto-refresh device", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-cloud-token-maintenance-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  const authDir = path.join(tempRoot, "saved-auth");
+  const currentDeviceName = "device-current";
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(authDir, { recursive: true });
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  try {
+    core.setSavedAuthPassphrase("maintenance-passphrase");
+    const syncedStorage = {
+      version: 1,
+      accounts: {
+        "sync-user": core.serializeSavedValue(
+          "saved_auth",
+          makeAuthFile("acct-cloud", {
+            accessToken: makeJwt({
+              exp: Math.floor(Date.now() / 1000) + 4 * 24 * 3600,
+            }),
+            refreshToken: "refresh-cloud-old",
+          }),
+          {
+            requireEncryption: true,
+          }
+        ),
+      },
+      providers: {},
+      devices: ["device-other", currentDeviceName],
+      autoRefreshDeviceName: currentDeviceName,
+    };
+    core.setSavedAuthPassphrase(null);
+
+    const requestLog = [];
+    const mocked = createVscodeMock({
+      authDirectory: authDir,
+      syncedStorage,
+      secretValues: {
+        [STORAGE_SECRET_KEY]: "maintenance-passphrase",
+      },
+      showStatusBar: false,
+    });
+
+    await withMockedHostname(currentDeviceName, async () => {
+      await withDisabledIntervals(() =>
+        withSuccessfulHttps(async () => {
+          const extension = loadExtensionWithMockedVscode(mocked.vscode);
+          const context = createExtensionContext(mocked);
+          await extension.activate(context);
+          await waitForBackgroundWork();
+          requestLog.length = 0;
+
+          const refreshCoordinator = getRefreshCoordinator(context);
+          assert.ok(refreshCoordinator);
+
+          refreshCoordinator.scheduleQuotaRefresh({
+            reason: "timer",
+          });
+          await waitForBackgroundWork();
+
+          assert.equal(countAuthRefreshRequests(requestLog), 1);
+
+          const cloudAuth = readCloudAccount(
+            mocked.config,
+            "sync-user",
+            "maintenance-passphrase"
+          );
+          assert.equal(cloudAuth.tokens.access_token, "access-rotated");
+          assert.equal(cloudAuth.tokens.refresh_token, "refresh-rotated");
+
+          for (const subscription of context.subscriptions.reverse()) {
+            subscription?.dispose?.();
+          }
+        }, { requestLog })
+      );
+    });
+  } finally {
+    core.setSavedAuthPassphrase(null);
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
+test("timer maintenance skips cloud token refresh on a non-selected device", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-cloud-token-maintenance-skip-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  const authDir = path.join(tempRoot, "saved-auth");
+  const currentDeviceName = "device-current";
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(authDir, { recursive: true });
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  try {
+    core.setSavedAuthPassphrase("maintenance-skip-passphrase");
+    const syncedStorage = {
+      version: 1,
+      accounts: {
+        "sync-user": core.serializeSavedValue(
+          "saved_auth",
+          makeAuthFile("acct-cloud", {
+            accessToken: makeJwt({
+              exp: Math.floor(Date.now() / 1000) + 4 * 24 * 3600,
+            }),
+            refreshToken: "refresh-cloud-old",
+          }),
+          {
+            requireEncryption: true,
+          }
+        ),
+      },
+      providers: {},
+      devices: ["device-other", currentDeviceName],
+      autoRefreshDeviceName: "device-other",
+    };
+    core.setSavedAuthPassphrase(null);
+
+    const requestLog = [];
+    const mocked = createVscodeMock({
+      authDirectory: authDir,
+      syncedStorage,
+      secretValues: {
+        [STORAGE_SECRET_KEY]: "maintenance-skip-passphrase",
+      },
+      showStatusBar: false,
+    });
+
+    await withMockedHostname(currentDeviceName, async () => {
+      await withDisabledIntervals(() =>
+        withSuccessfulHttps(async () => {
+          const extension = loadExtensionWithMockedVscode(mocked.vscode);
+          const context = createExtensionContext(mocked);
+          await extension.activate(context);
+          await waitForBackgroundWork();
+          requestLog.length = 0;
+
+          const refreshCoordinator = getRefreshCoordinator(context);
+          assert.ok(refreshCoordinator);
+
+          refreshCoordinator.scheduleQuotaRefresh({
+            reason: "timer",
+          });
+          await waitForBackgroundWork();
+
+          assert.equal(countAuthRefreshRequests(requestLog), 0);
+
+          const cloudAuth = readCloudAccount(
+            mocked.config,
+            "sync-user",
+            "maintenance-skip-passphrase"
+          );
+          assert.notEqual(cloudAuth.tokens.access_token, "access-rotated");
+          assert.equal(cloudAuth.tokens.refresh_token, "refresh-cloud-old");
+
+          for (const subscription of context.subscriptions.reverse()) {
+            subscription?.dispose?.();
+          }
+        }, { requestLog })
+      );
+    });
+  } finally {
+    core.setSavedAuthPassphrase(null);
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
+test("timer quota refresh leaves local tokens unchanged when the refresh token expires within five days", async (t) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-local-timer-refresh-"));
   const codexHome = path.join(tempRoot, ".codex");
   fs.mkdirSync(codexHome, { recursive: true });
@@ -4085,7 +4386,6 @@ test("timer refreshes local tokens when the refresh token expires within five da
   const requestLog = [];
   const mocked = createVscodeMock({
     showStatusBar: false,
-    tokenAutoUpdate: true,
   });
 
   try {
@@ -4105,15 +4405,15 @@ test("timer refreshes local tokens when the refresh token expires within five da
           reason: "timer",
         });
 
-        assert.equal(countAuthRefreshRequests(requestLog), 1);
-        assert.equal(countUsageRequests(requestLog), 1);
+        assert.equal(countAuthRefreshRequests(requestLog), 0);
+        assert.equal(countUsageRequests(requestLog), 0);
 
         const savedAuth = JSON.parse(fs.readFileSync(path.join(codexHome, "auth_local-user.json"), "utf-8"));
         const currentAuth = JSON.parse(fs.readFileSync(path.join(codexHome, "auth.json"), "utf-8"));
-        assert.equal(savedAuth.tokens.access_token, "access-rotated");
-        assert.equal(savedAuth.tokens.refresh_token, "refresh-rotated");
-        assert.equal(currentAuth.tokens.access_token, "access-rotated");
-        assert.equal(currentAuth.tokens.refresh_token, "refresh-rotated");
+        assert.equal(savedAuth.tokens.access_token, "access-local-old");
+        assert.equal(savedAuth.tokens.refresh_token, nearExpiryRefreshToken);
+        assert.equal(currentAuth.tokens.access_token, "access-local-old");
+        assert.equal(currentAuth.tokens.refresh_token, nearExpiryRefreshToken);
 
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
@@ -4139,7 +4439,7 @@ test("timer refreshes local tokens when the refresh token expires within five da
   });
 });
 
-test("timer refreshes local tokens when the access token expires within five days", async (t) => {
+test("timer quota refresh leaves local tokens unchanged when the access token expires within five days", async (t) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-local-near-expiry-access-refresh-"));
   const codexHome = path.join(tempRoot, ".codex");
   fs.mkdirSync(codexHome, { recursive: true });
@@ -4170,7 +4470,6 @@ test("timer refreshes local tokens when the access token expires within five day
   const requestLog = [];
   const mocked = createVscodeMock({
     showStatusBar: false,
-    tokenAutoUpdate: true,
   });
 
   try {
@@ -4190,15 +4489,15 @@ test("timer refreshes local tokens when the access token expires within five day
           reason: "timer",
         });
 
-        assert.equal(countAuthRefreshRequests(requestLog), 1);
-        assert.equal(countUsageRequests(requestLog), 1);
+        assert.equal(countAuthRefreshRequests(requestLog), 0);
+        assert.equal(countUsageRequests(requestLog), 0);
 
         const savedAuth = JSON.parse(fs.readFileSync(path.join(codexHome, "auth_local-user.json"), "utf-8"));
         const currentAuth = JSON.parse(fs.readFileSync(path.join(codexHome, "auth.json"), "utf-8"));
-        assert.equal(savedAuth.tokens.access_token, "access-rotated");
-        assert.equal(savedAuth.tokens.refresh_token, "refresh-rotated");
-        assert.equal(currentAuth.tokens.access_token, "access-rotated");
-        assert.equal(currentAuth.tokens.refresh_token, "refresh-rotated");
+        assert.equal(savedAuth.tokens.access_token, nearExpiryAccessToken);
+        assert.equal(savedAuth.tokens.refresh_token, "refresh-local-stable");
+        assert.equal(currentAuth.tokens.access_token, nearExpiryAccessToken);
+        assert.equal(currentAuth.tokens.refresh_token, "refresh-local-stable");
 
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
@@ -4224,7 +4523,7 @@ test("timer refreshes local tokens when the access token expires within five day
   });
 });
 
-test("timer refreshes local tokens when the access token is expired", async (t) => {
+test("timer quota refresh leaves local tokens unchanged when the access token is expired", async (t) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-local-expired-access-refresh-"));
   const codexHome = path.join(tempRoot, ".codex");
   fs.mkdirSync(codexHome, { recursive: true });
@@ -4255,7 +4554,6 @@ test("timer refreshes local tokens when the access token is expired", async (t) 
   const requestLog = [];
   const mocked = createVscodeMock({
     showStatusBar: false,
-    tokenAutoUpdate: true,
   });
 
   try {
@@ -4275,15 +4573,15 @@ test("timer refreshes local tokens when the access token is expired", async (t) 
           reason: "timer",
         });
 
-        assert.equal(countAuthRefreshRequests(requestLog), 1);
-        assert.equal(countUsageRequests(requestLog), 1);
+        assert.equal(countAuthRefreshRequests(requestLog), 0);
+        assert.equal(countUsageRequests(requestLog), 0);
 
         const savedAuth = JSON.parse(fs.readFileSync(path.join(codexHome, "auth_local-user.json"), "utf-8"));
         const currentAuth = JSON.parse(fs.readFileSync(path.join(codexHome, "auth.json"), "utf-8"));
-        assert.equal(savedAuth.tokens.access_token, "access-rotated");
-        assert.equal(savedAuth.tokens.refresh_token, "refresh-rotated");
-        assert.equal(currentAuth.tokens.access_token, "access-rotated");
-        assert.equal(currentAuth.tokens.refresh_token, "refresh-rotated");
+        assert.equal(savedAuth.tokens.access_token, expiredAccessToken);
+        assert.equal(savedAuth.tokens.refresh_token, "refresh-local-stable");
+        assert.equal(currentAuth.tokens.access_token, expiredAccessToken);
+        assert.equal(currentAuth.tokens.refresh_token, "refresh-local-stable");
 
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
@@ -4309,7 +4607,7 @@ test("timer refreshes local tokens when the access token is expired", async (t) 
   });
 });
 
-test("timer refresh keeps the saved local account unchanged when automatic token updates are disabled", async (t) => {
+test("timer quota refresh keeps the local account unchanged", async (t) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-local-timer-refresh-disabled-"));
   const codexHome = path.join(tempRoot, ".codex");
   fs.mkdirSync(codexHome, { recursive: true });
@@ -4360,15 +4658,15 @@ test("timer refresh keeps the saved local account unchanged when automatic token
           reason: "timer",
         });
 
-        assert.equal(countAuthRefreshRequests(requestLog), 1);
-        assert.equal(countUsageRequests(requestLog), 1);
+        assert.equal(countAuthRefreshRequests(requestLog), 0);
+        assert.equal(countUsageRequests(requestLog), 0);
 
         const savedAuth = JSON.parse(fs.readFileSync(path.join(codexHome, "auth_local-user.json"), "utf-8"));
         const currentAuth = JSON.parse(fs.readFileSync(path.join(codexHome, "auth.json"), "utf-8"));
         assert.equal(savedAuth.tokens.access_token, "access-local-old");
         assert.equal(savedAuth.tokens.refresh_token, nearExpiryRefreshToken);
-        assert.equal(currentAuth.tokens.access_token, "access-rotated");
-        assert.equal(currentAuth.tokens.refresh_token, "refresh-rotated");
+        assert.equal(currentAuth.tokens.access_token, "access-local-old");
+        assert.equal(currentAuth.tokens.refresh_token, nearExpiryRefreshToken);
 
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
@@ -4394,7 +4692,7 @@ test("timer refresh keeps the saved local account unchanged when automatic token
   });
 });
 
-test("timer refreshes cloud tokens when the refresh token expires within five days", async (t) => {
+test("timer quota refresh leaves cloud tokens unchanged when the refresh token expires within five days", async (t) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-cloud-timer-refresh-"));
   const codexHome = path.join(tempRoot, ".codex");
   const authDir = path.join(tempRoot, "saved-auth");
@@ -4438,8 +4736,6 @@ test("timer refreshes cloud tokens when the refresh token expires within five da
       secretValues: {
         [STORAGE_SECRET_KEY]: "timer-passphrase",
       },
-      cloudTokenAutoUpdate: true,
-      cloudTokenAutoUpdateIntervalHours: 1,
       showStatusBar: false,
     });
 
@@ -4460,7 +4756,7 @@ test("timer refreshes cloud tokens when the refresh token expires within five da
             reason: "timer",
           });
 
-          assert.equal(countAuthRefreshRequests(requestLog), 1);
+          assert.equal(countAuthRefreshRequests(requestLog), 0);
           assert.equal(countUsageRequests(requestLog), 1);
 
           const cloudAuth = readCloudAccount(
@@ -4468,8 +4764,8 @@ test("timer refreshes cloud tokens when the refresh token expires within five da
             "sync-user",
             "timer-passphrase"
           );
-          assert.equal(cloudAuth.tokens.access_token, "access-rotated");
-          assert.equal(cloudAuth.tokens.refresh_token, "refresh-rotated");
+          assert.equal(cloudAuth.tokens.access_token, "access-cloud-old");
+          assert.notEqual(cloudAuth.tokens.refresh_token, "refresh-rotated");
 
           for (const subscription of context.subscriptions.reverse()) {
             subscription?.dispose?.();
@@ -4497,7 +4793,7 @@ test("timer refreshes cloud tokens when the refresh token expires within five da
   });
 });
 
-test("timer refreshes cloud tokens when the access token expires within five days", async (t) => {
+test("timer quota refresh leaves cloud tokens unchanged when the access token expires within five days", async (t) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-cloud-near-expiry-access-refresh-"));
   const codexHome = path.join(tempRoot, ".codex");
   const authDir = path.join(tempRoot, "saved-auth");
@@ -4541,8 +4837,6 @@ test("timer refreshes cloud tokens when the access token expires within five day
       secretValues: {
         [STORAGE_SECRET_KEY]: "timer-passphrase",
       },
-      cloudTokenAutoUpdate: true,
-      cloudTokenAutoUpdateIntervalHours: 1,
       showStatusBar: false,
     });
 
@@ -4563,7 +4857,7 @@ test("timer refreshes cloud tokens when the access token expires within five day
             reason: "timer",
           });
 
-          assert.equal(countAuthRefreshRequests(requestLog), 1);
+          assert.equal(countAuthRefreshRequests(requestLog), 0);
           assert.equal(countUsageRequests(requestLog), 1);
 
           const cloudAuth = readCloudAccount(
@@ -4571,8 +4865,8 @@ test("timer refreshes cloud tokens when the access token expires within five day
             "sync-user",
             "timer-passphrase"
           );
-          assert.equal(cloudAuth.tokens.access_token, "access-rotated");
-          assert.equal(cloudAuth.tokens.refresh_token, "refresh-rotated");
+          assert.notEqual(cloudAuth.tokens.access_token, "access-rotated");
+          assert.equal(cloudAuth.tokens.refresh_token, "refresh-cloud-stable");
 
           for (const subscription of context.subscriptions.reverse()) {
             subscription?.dispose?.();
@@ -4600,7 +4894,7 @@ test("timer refreshes cloud tokens when the access token expires within five day
   });
 });
 
-test("timer refreshes cloud tokens when the access token is expired", async (t) => {
+test("timer quota refresh leaves cloud tokens unchanged when the access token is expired", async (t) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-cloud-expired-access-refresh-"));
   const codexHome = path.join(tempRoot, ".codex");
   const authDir = path.join(tempRoot, "saved-auth");
@@ -4644,8 +4938,6 @@ test("timer refreshes cloud tokens when the access token is expired", async (t) 
       secretValues: {
         [STORAGE_SECRET_KEY]: "expired-access-passphrase",
       },
-      cloudTokenAutoUpdate: true,
-      cloudTokenAutoUpdateIntervalHours: 1,
       showStatusBar: false,
     });
 
@@ -4666,7 +4958,7 @@ test("timer refreshes cloud tokens when the access token is expired", async (t) 
             reason: "timer",
           });
 
-          assert.equal(countAuthRefreshRequests(requestLog), 1);
+          assert.equal(countAuthRefreshRequests(requestLog), 0);
           assert.equal(countUsageRequests(requestLog), 1);
 
           const cloudAuth = readCloudAccount(
@@ -4674,8 +4966,8 @@ test("timer refreshes cloud tokens when the access token is expired", async (t) 
             "sync-user",
             "expired-access-passphrase"
           );
-          assert.equal(cloudAuth.tokens.access_token, "access-rotated");
-          assert.equal(cloudAuth.tokens.refresh_token, "refresh-rotated");
+          assert.notEqual(cloudAuth.tokens.access_token, "access-rotated");
+          assert.equal(cloudAuth.tokens.refresh_token, "refresh-cloud-stable");
 
           for (const subscription of context.subscriptions.reverse()) {
             subscription?.dispose?.();
@@ -4703,7 +4995,7 @@ test("timer refreshes cloud tokens when the access token is expired", async (t) 
   });
 });
 
-test("automatic cloud token sync refreshes expired access tokens during quota refresh", async (t) => {
+test("quota refresh does not refresh expired cloud access tokens", async (t) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-cloud-auto-refresh-"));
   const codexHome = path.join(tempRoot, ".codex");
   const authDir = path.join(tempRoot, "saved-auth");
@@ -4741,14 +5033,13 @@ test("automatic cloud token sync refreshes expired access tokens during quota re
     };
     core.setSavedAuthPassphrase(null);
 
+    const requestLog = [];
     const mocked = createVscodeMock({
       authDirectory: authDir,
       syncedStorage,
       secretValues: {
         [STORAGE_SECRET_KEY]: "auto-passphrase",
       },
-      cloudTokenAutoUpdate: true,
-      cloudTokenAutoUpdateIntervalHours: 1,
     });
 
     await withMockedHostname(currentDeviceName, async () => {
@@ -4772,13 +5063,15 @@ test("automatic cloud token sync refreshes expired access tokens during quota re
             "sync-user",
             "auto-passphrase"
           );
-          assert.equal(cloudAuth.tokens.access_token, "access-rotated");
-          assert.equal(cloudAuth.tokens.refresh_token, "refresh-rotated");
+          assert.notEqual(countUsageRequests(requestLog), 0);
+          assert.equal(countAuthRefreshRequests(requestLog), 0);
+          assert.notEqual(cloudAuth.tokens.access_token, "access-rotated");
+          assert.equal(cloudAuth.tokens.refresh_token, "refresh-cloud-old");
 
           for (const subscription of context.subscriptions.reverse()) {
             subscription?.dispose?.();
           }
-        })
+        }, { requestLog })
       );
     });
   } finally {
@@ -4801,7 +5094,7 @@ test("automatic cloud token sync refreshes expired access tokens during quota re
   });
 });
 
-test("expired access token bypasses the automatic cloud token sync interval throttle", async (t) => {
+test("quota refresh does not update cloud auth even when sync metadata already exists", async (t) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-cloud-auto-throttle-"));
   const codexHome = path.join(tempRoot, ".codex");
   const authDir = path.join(tempRoot, "saved-auth");
@@ -4837,14 +5130,13 @@ test("expired access token bypasses the automatic cloud token sync interval thro
     };
     core.setSavedAuthPassphrase(null);
 
+    const requestLog = [];
     const mocked = createVscodeMock({
       authDirectory: authDir,
       syncedStorage,
       secretValues: {
         [STORAGE_SECRET_KEY]: "throttle-passphrase",
       },
-      cloudTokenAutoUpdate: true,
-      cloudTokenAutoUpdateIntervalHours: 1,
     });
 
     await withDisabledIntervals(() =>
@@ -4867,13 +5159,15 @@ test("expired access token bypasses the automatic cloud token sync interval thro
           "sync-user",
           "throttle-passphrase"
         );
-        assert.equal(cloudAuth.tokens.access_token, "access-rotated");
-        assert.equal(cloudAuth.tokens.refresh_token, "refresh-rotated");
+        assert.notEqual(countUsageRequests(requestLog), 0);
+        assert.equal(countAuthRefreshRequests(requestLog), 0);
+        assert.notEqual(cloudAuth.tokens.access_token, "access-rotated");
+        assert.equal(cloudAuth.tokens.refresh_token, "refresh-cloud-old");
 
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
         }
-      })
+      }, { requestLog })
     );
   } finally {
     core.setSavedAuthPassphrase(null);
@@ -5034,7 +5328,7 @@ test("activate does not create a synced device entry when synced cloud state is 
   });
 });
 
-test("automatic cloud token sync uses the first synced device when no explicit device is selected", async (t) => {
+test("activate appends the current synced device without mutating cloud auth", async (t) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-device-first-default-"));
   const codexHome = path.join(tempRoot, ".codex");
   const authDir = path.join(tempRoot, "saved-auth");
@@ -5079,8 +5373,6 @@ test("automatic cloud token sync uses the first synced device when no explicit d
       secretValues: {
         [STORAGE_SECRET_KEY]: "default-first-passphrase",
       },
-      cloudTokenAutoUpdate: true,
-      cloudTokenAutoUpdateIntervalHours: 1,
     });
 
     await withMockedHostname(currentDeviceName, async () => {
@@ -5126,7 +5418,7 @@ test("automatic cloud token sync uses the first synced device when no explicit d
   });
 });
 
-test("automatic cloud token sync respects the explicitly selected synced device when refreshing expired access tokens", async (t) => {
+test("quota refresh preserves cloud auth when a synced device is explicitly selected", async (t) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-device-explicit-select-"));
   const codexHome = path.join(tempRoot, ".codex");
   const authDir = path.join(tempRoot, "saved-auth");
@@ -5164,14 +5456,13 @@ test("automatic cloud token sync respects the explicitly selected synced device 
     };
     core.setSavedAuthPassphrase(null);
 
+    const requestLog = [];
     const mocked = createVscodeMock({
       authDirectory: authDir,
       syncedStorage,
       secretValues: {
         [STORAGE_SECRET_KEY]: "explicit-select-passphrase",
       },
-      cloudTokenAutoUpdate: true,
-      cloudTokenAutoUpdateIntervalHours: 1,
     });
 
     await withMockedHostname(currentDeviceName, async () => {
@@ -5195,14 +5486,16 @@ test("automatic cloud token sync respects the explicitly selected synced device 
             "sync-user",
             "explicit-select-passphrase"
           );
-          assert.equal(cloudAuth.tokens.access_token, "access-rotated");
-          assert.equal(cloudAuth.tokens.refresh_token, "refresh-rotated");
+          assert.notEqual(countUsageRequests(requestLog), 0);
+          assert.equal(countAuthRefreshRequests(requestLog), 0);
+          assert.notEqual(cloudAuth.tokens.access_token, "access-rotated");
+          assert.equal(cloudAuth.tokens.refresh_token, "refresh-cloud-old");
           assert.equal(mocked.config.syncedStorage.autoRefreshDeviceName, currentDeviceName);
 
           for (const subscription of context.subscriptions.reverse()) {
             subscription?.dispose?.();
           }
-        })
+        }, { requestLog })
       );
     });
   } finally {

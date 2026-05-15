@@ -8,4 +8,4 @@
 | 第二台机器同步 | 另一台机器通过 Settings Sync 拿到 synced `globalState` 中的 cloud state，但本机尚未保存密码 | 账号/Provider 条目可见但处于 locked；输入同一密码后可以正常解密和使用。 |
 | 激活自动登记设备 | synced cloud state 中已有 cloud accounts/providers/devices 任一项，当前主机名尚未出现在 `devices` | 激活时自动把当前设备追加到 `devices`；重复激活不会重复追加。 |
 | 空云状态不制造设备记录 | synced cloud state 为空，当前机器首次激活扩展 | 不为了“仅本机启动过一次”而创建新的 synced device 记录。 |
-| 设备授权同步 | synced cloud state 中已有 `devices` 与 `autoRefreshDeviceName` | 激活后自动登记当前设备，但定时自动刷新与 cloud token 写回仍只在被授权设备上执行。 |
+| 设备授权同步 | synced cloud state 中已有 `devices` 与 `autoRefreshDeviceName` | 激活后自动登记当前设备；自动 cloud token 刷新仍只在被授权设备上执行。 |
