@@ -5,6 +5,7 @@ export const STORAGE_PASSWORD_SECRET_KEY = "codex-account-switch.savedAuthPassph
 
 async function promptForPassword(prompt: string, placeHolder: string): Promise<string | undefined> {
   return vscode.window.showInputBox({
+    ignoreFocusOut: true,
     prompt,
     placeHolder,
     password: true,

@@ -124,6 +124,7 @@ function createVscodeMock(options) {
   const warningMessages = [];
   const informationMessages = [];
   const errorMessages = [];
+  const inputBoxCalls = [];
   const inputBoxResponses = [...(options.inputBoxResponses ?? [])];
   const warningResponses = [...(options.warningResponses ?? [])];
   const infoResponses = [...(options.infoResponses ?? [])];
@@ -288,7 +289,8 @@ function createVscodeMock(options) {
           },
         };
       },
-      async showInputBox() {
+      async showInputBox(inputOptions) {
+        inputBoxCalls.push(inputOptions);
         return inputBoxResponses.shift();
       },
       async showWarningMessage(message, ...actions) {
@@ -384,6 +386,7 @@ function createVscodeMock(options) {
     warningMessages,
     informationMessages,
     errorMessages,
+    inputBoxCalls,
     treeViews,
     createdChannels,
     config,
@@ -2342,6 +2345,76 @@ test("provider switch refreshes views without triggering quota requests", async 
         }
       }, { requestLog })
     );
+  } finally {
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
+test("creating a provider keeps each input box open across focus changes", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-provider-input-focus-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  const authDir = path.join(tempRoot, "saved-auth");
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(authDir, { recursive: true });
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  try {
+    const mocked = createVscodeMock({
+      authDirectory: authDir,
+      quickPickResponses: [
+        (items) => items.find((item) => item.action === "create" && item.source === "local"),
+      ],
+      inputBoxResponses: [
+        "my-proxy",
+        "sk-test-provider",
+        "https://proxy.example.com/v1",
+        "responses",
+      ],
+    });
+
+    await withDisabledIntervals(async () => {
+      const extension = loadExtensionWithMockedVscode(mocked.vscode);
+      const context = createExtensionContext(mocked);
+      await extension.activate(context);
+
+      await mocked.registeredCommands.get("codex-account-switch.switchMode")();
+
+      assert.equal(mocked.inputBoxCalls.length, 4);
+      assert.deepEqual(
+        mocked.inputBoxCalls.map((options) => options?.ignoreFocusOut),
+        [true, true, true, true],
+      );
+
+      core.setNamedAuthDir(authDir);
+      const providerResult = core.readProviderProfileResult("my-proxy");
+      core.setNamedAuthDir(undefined);
+      assert.equal(providerResult.status, "ok");
+      assert.equal(providerResult.value.config.base_url, "https://proxy.example.com/v1");
+      assert.equal(providerResult.value.config.wire_api, "responses");
+      assert.equal(providerResult.value.auth.OPENAI_API_KEY, "sk-test-provider");
+
+      for (const subscription of context.subscriptions.reverse()) {
+        subscription?.dispose?.();
+      }
+    });
   } finally {
     core.setNamedAuthDir(undefined);
     if (previousCodexHome === undefined) {

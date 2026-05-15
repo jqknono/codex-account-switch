@@ -651,6 +651,7 @@ async function askRequiredValue(options: {
   password?: boolean;
 }): Promise<string | undefined> {
   return vscode.window.showInputBox({
+    ignoreFocusOut: true,
     prompt: options.prompt,
     placeHolder: options.placeHolder,
     value: options.value,
@@ -1172,6 +1173,7 @@ export function registerCommands(
           return;
         }
         const newName = await vscode.window.showInputBox({
+          ignoreFocusOut: true,
           prompt: "Enter a name for the new provider",
           placeHolder: "e.g. my-proxy, local-api",
           validateInput: (v) => {
