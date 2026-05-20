@@ -150,6 +150,24 @@
         "icon": "$(device-desktop)"
       },
       {
+        "command": "codex-account-switch.enableAutoSwitch",
+        "title": "Enable Auto-Switch",
+        "category": "Codex Account Switch",
+        "icon": "$(check)"
+      },
+      {
+        "command": "codex-account-switch.disableAutoSwitch",
+        "title": "Disable Auto-Switch",
+        "category": "Codex Account Switch",
+        "icon": "$(circle-slash)"
+      },
+      {
+        "command": "codex-account-switch.configureAutoSwitch",
+        "title": "Auto-Switch Settings",
+        "category": "Codex Account Switch",
+        "icon": "$(sync-ignored)"
+      },
+      {
         "command": "codex-account-switch.reloadWindow",
         "title": "Reload Window",
         "category": "Codex Account Switch",
@@ -266,6 +284,21 @@
           "group": "navigation@7"
         },
         {
+          "command": "codex-account-switch.enableAutoSwitch",
+          "when": "view == codexAccountSwitchAccounts && !codexAccountSwitch.autoSwitchEnabled",
+          "group": "navigation@8"
+        },
+        {
+          "command": "codex-account-switch.disableAutoSwitch",
+          "when": "view == codexAccountSwitchAccounts && codexAccountSwitch.autoSwitchEnabled",
+          "group": "navigation@8"
+        },
+        {
+          "command": "codex-account-switch.configureAutoSwitch",
+          "when": "view == codexAccountSwitchAccounts",
+          "group": "navigation@9"
+        },
+        {
           "command": "codex-account-switch.switchMode",
           "when": "view == codexAccountSwitchProviders",
           "group": "navigation@1"
@@ -377,6 +410,17 @@
           "default": 30,
           "minimum": 5,
           "description": "Background maintenance interval, in seconds. Each interval checks one saved account for token refresh and refreshes one saved account quota in rotation."
+        },
+        "codex-account-switch.autoSwitchOnZeroQuota": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically switch away from the currently selected saved account when its 5-hour quota reaches 0%, but only if another saved account has freshly confirmed 5-hour quota remaining."
+        },
+        "codex-account-switch.autoSwitchCooldownSeconds": {
+          "type": "number",
+          "default": 90,
+          "minimum": 15,
+          "description": "Minimum time to wait before retrying automatic switching for the same exhausted account after no eligible replacement was found or a switch attempt failed."
         },
         "codex-account-switch.showStatusBar": {
           "type": "boolean",

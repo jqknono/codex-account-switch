@@ -26,6 +26,7 @@ Open the **Codex Account Switch** view from the Activity Bar to:
 - Identify the currently active account
 - Inspect account email, plan, and quota usage
 - Run inline actions such as switch and refresh
+- Toggle auto-switch behavior from the view toolbar through **Auto-Switch Settings**
 
 ## Commands
 
