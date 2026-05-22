@@ -5,10 +5,12 @@ import {
   importAccounts,
   ExportData,
   ProviderProfile,
+  QuotaInfo,
   getModeDisplayName,
   switchMode,
 } from "@codex-account-switch/core";
 import { AccountDetailItem, AccountGroupItem, AccountTreeProvider, AccountTreeItem, AccountTreeNode } from "./accountTree";
+import { getRemainingQuotaPercent, isFiveHourQuotaExhausted, rankAutoSwitchCandidates } from "./autoSwitch";
 import { ProviderDetailItem, ProviderTreeItem, ProviderTreeProvider } from "./providerTree";
 import { StatusBarManager } from "./statusBar";
 import { buildCompletedProviderProfile } from "./providerProfile";
@@ -39,6 +41,7 @@ import {
   saveCurrentAuthAsAccount,
   saveProviderProfileToSource,
   SavedAccountInfo,
+  querySavedAccountQuota,
   SavedProviderInfo,
   setAutoRefreshDeviceName,
   StorageSource,
@@ -46,6 +49,7 @@ import {
   useSavedAccountEntry,
 } from "./savedEntries";
 const LOG_PREFIX = "[codex-account-switch:vscode:commands]";
+const AUTO_SWITCH_ENABLED_CONTEXT_KEY = "codexAccountSwitch.autoSwitchEnabled";
 
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -67,6 +71,34 @@ function getUseDeviceAuthForLogin(): boolean {
   return vscode.workspace
     .getConfiguration("codex-account-switch")
     .get<boolean>("useDeviceAuthForLogin", false);
+}
+
+function isAutoSwitchOnZeroQuotaEnabled(): boolean {
+  return vscode.workspace
+    .getConfiguration("codex-account-switch")
+    .get<boolean>("autoSwitchOnZeroQuota", false);
+}
+
+function getAutoSwitchCooldownMs(): number {
+  const cooldownSeconds = vscode.workspace
+    .getConfiguration("codex-account-switch")
+    .get<number>("autoSwitchCooldownSeconds", 90);
+  if (!Number.isFinite(cooldownSeconds)) {
+    return 90_000;
+  }
+  return Math.max(15, cooldownSeconds) * 1000;
+}
+
+function getAutoSwitchCooldownSeconds(): number {
+  return Math.round(getAutoSwitchCooldownMs() / 1000);
+}
+
+async function syncAutoSwitchEnabledContext(): Promise<void> {
+  await vscode.commands.executeCommand(
+    "setContext",
+    AUTO_SWITCH_ENABLED_CONTEXT_KEY,
+    isAutoSwitchOnZeroQuotaEnabled(),
+  );
 }
 
 function getCodexLoginCommand(useDeviceAuth = getUseDeviceAuthForLogin()): string {
@@ -194,6 +226,145 @@ async function maybeReloadWindowAfterSwitch(label: string, kind: "account" | "mo
 
   await promptReloadWindow(
     `Switched to ${noun} "${displayLabel}". Reload the window if the Codex extension is still using the previous configuration.`
+  );
+}
+
+interface AutoSwitchRequest {
+  exhaustedAccountId: string;
+  exhaustedAccountName?: string;
+  refreshId?: string;
+}
+
+interface AutoSwitchState {
+  exhaustedAccountId: string;
+  attemptedAt: number;
+}
+
+async function performAutomaticAccountSwitch(
+  account: SavedAccountInfo,
+  refreshCoordinator: RefreshCoordinator,
+  options: {
+    exhaustedAccountName: string;
+    remainingPercent: number;
+    refreshId?: string;
+  },
+): Promise<boolean> {
+  const result = await useSavedAccountEntry(account);
+  if (!result.success) {
+    logCommandWarn("auto-switch", "switch-failed", {
+      account: account.name,
+      source: account.source,
+      conflict: result.conflict ?? false,
+      message: result.message,
+      refreshId: options.refreshId ?? null,
+    });
+    if (result.conflict) {
+      await showSyncConflictWarning(result.message);
+    } else {
+      void vscode.window.showWarningMessage(result.message);
+    }
+    return false;
+  }
+
+  logCommandInfo("auto-switch", "switched", {
+    fromAccount: options.exhaustedAccountName,
+    toAccount: account.name,
+    source: account.source,
+    remainingPercent: options.remainingPercent,
+    refreshId: options.refreshId ?? null,
+  });
+  void vscode.window.showInformationMessage(
+    `Automatically switched from "${options.exhaustedAccountName}" to "${account.name}" because the active 5h quota hit 0%. "${account.name}" has ${options.remainingPercent}% remaining.`
+  );
+  refreshViews(refreshCoordinator, "account-switch");
+  refreshCoordinator.scheduleQuotaRefresh({
+    targetIds: [account.id],
+    reason: "account-switch",
+  });
+  await maybeReloadWindowAfterSwitch(account.name, "account");
+  return true;
+}
+
+async function configureAutoSwitchSetting(): Promise<void> {
+  const enabled = isAutoSwitchOnZeroQuotaEnabled();
+  const cooldownSeconds = getAutoSwitchCooldownSeconds();
+  const picked = await vscode.window.showQuickPick(
+    [
+      {
+        label: enabled ? "$(circle-slash) Disable Auto-Switch" : "$(check) Enable Auto-Switch",
+        description: enabled
+          ? "Stop automatic switching when the current 5h quota reaches 0%"
+          : "Automatically switch when the current 5h quota reaches 0%",
+        action: enabled ? "disable" : "enable",
+      },
+      {
+        label: "$(clock) Set Auto-Switch Cooldown",
+        description: `Current cooldown: ${cooldownSeconds}s`,
+        action: "cooldown",
+      },
+      {
+        label: "$(json) Open Settings JSON",
+        description: "Edit the raw extension settings directly",
+        action: "open-settings-json",
+      },
+    ],
+    {
+      placeHolder: `Auto-switch is currently ${enabled ? "enabled" : "disabled"}`,
+    },
+  );
+
+  if (!picked) {
+    return;
+  }
+
+  if (picked.action === "enable" || picked.action === "disable") {
+    await setAutoSwitchEnabled(picked.action === "enable");
+    return;
+  }
+
+  if (picked.action === "cooldown") {
+    const value = await vscode.window.showInputBox({
+      prompt: "Enter the auto-switch cooldown in seconds",
+      value: String(cooldownSeconds),
+      validateInput: (input) => {
+        const parsed = Number(input.trim());
+        if (!Number.isFinite(parsed) || !Number.isInteger(parsed)) {
+          return "Enter a whole number of seconds.";
+        }
+        if (parsed < 15) {
+          return "Cooldown must be at least 15 seconds.";
+        }
+        return null;
+      },
+    });
+    if (!value) {
+      return;
+    }
+
+    const nextCooldown = Number(value.trim());
+    await vscode.workspace.getConfiguration("codex-account-switch").update(
+      "autoSwitchCooldownSeconds",
+      nextCooldown,
+      vscode.ConfigurationTarget.Global,
+    );
+    void vscode.window.showInformationMessage(
+      `Auto-switch cooldown set to ${nextCooldown} seconds.`
+    );
+    return;
+  }
+
+  await vscode.commands.executeCommand("workbench.action.openSettingsJson");
+}
+
+async function setAutoSwitchEnabled(enabled: boolean): Promise<void> {
+  await vscode.workspace.getConfiguration("codex-account-switch").update(
+    "autoSwitchOnZeroQuota",
+    enabled,
+    vscode.ConfigurationTarget.Global,
+  );
+  await syncAutoSwitchEnabledContext();
+  void vscode.window.showInformationMessage(
+    `Auto-switch on zero quota ${enabled ? "enabled" : "disabled"}.`
   );
 }
 
@@ -738,7 +909,168 @@ export function registerCommands(
   accountTreeView: vscode.TreeView<AccountTreeNode>,
   refreshCoordinator: RefreshCoordinator,
 ) {
+  let autoSwitchInFlight: Promise<void> | null = null;
+  let lastAutoSwitchState: AutoSwitchState | null = null;
+  void syncAutoSwitchEnabledContext();
+
+  const autoSwitchConfigListener = vscode.workspace.onDidChangeConfiguration((e) => {
+    if (
+      e.affectsConfiguration("codex-account-switch.autoSwitchOnZeroQuota")
+      || e.affectsConfiguration("codex-account-switch.autoSwitchCooldownSeconds")
+    ) {
+      void syncAutoSwitchEnabledContext();
+    }
+  });
+
   context.subscriptions.push(
+    autoSwitchConfigListener,
+    vscode.commands.registerCommand("codex-account-switch.maybeAutoSwitchExhaustedAccount", async (request?: AutoSwitchRequest) => {
+      if (!isAutoSwitchOnZeroQuotaEnabled() || !request?.exhaustedAccountId) {
+        return;
+      }
+
+      if (autoSwitchInFlight) {
+        logCommandInfo("auto-switch", "skip-inflight", {
+          exhaustedAccountId: request.exhaustedAccountId,
+          refreshId: request.refreshId ?? null,
+        });
+        return;
+      }
+
+      const now = Date.now();
+      if (
+        lastAutoSwitchState
+        && lastAutoSwitchState.exhaustedAccountId === request.exhaustedAccountId
+        && now - lastAutoSwitchState.attemptedAt < getAutoSwitchCooldownMs()
+      ) {
+        logCommandInfo("auto-switch", "skip-cooldown", {
+          exhaustedAccountId: request.exhaustedAccountId,
+          refreshId: request.refreshId ?? null,
+        });
+        return;
+      }
+
+      const run = (async () => {
+        lastAutoSwitchState = {
+          exhaustedAccountId: request.exhaustedAccountId,
+          attemptedAt: now,
+        };
+
+        const snapshot = createSavedEntriesSnapshot();
+        const selection = getSavedCurrentSelection(snapshot);
+        if (selection.kind !== "account") {
+          lastAutoSwitchState = null;
+          return;
+        }
+
+        const currentAccount = snapshot.bySourceAndName.get(`${selection.source}:${selection.name}`);
+        if (!currentAccount || currentAccount.id !== request.exhaustedAccountId || currentAccount.storageState !== "ready") {
+          lastAutoSwitchState = null;
+          return;
+        }
+
+        const currentResult = await querySavedAccountQuota(
+          currentAccount,
+          {
+            snapshot,
+            sharedQueries: new Map(),
+          },
+          {
+            reason: "auto-switch",
+            forceFetch: true,
+            allowCachedFallback: false,
+          },
+        );
+        if (currentResult.kind !== "ok" || currentResult.info.unavailableReason || !isFiveHourQuotaExhausted(currentResult.info)) {
+          lastAutoSwitchState = null;
+          return;
+        }
+
+        const candidates = snapshot.accounts.filter((account) => (
+          account.id !== currentAccount.id
+          && account.storageState === "ready"
+        ));
+
+        const rankedCandidates = rankAutoSwitchCandidates(
+          (await Promise.all(candidates.map(async (candidate) => {
+            try {
+              const result = await querySavedAccountQuota(
+                candidate,
+                {
+                  snapshot,
+                  sharedQueries: new Map(),
+                },
+                {
+                  reason: "auto-switch",
+                  forceFetch: true,
+                  allowCachedFallback: false,
+                },
+              );
+              if (result.kind !== "ok" || result.info.unavailableReason) {
+                return null;
+              }
+              return {
+                candidate,
+                info: result.info,
+              };
+            } catch (error) {
+              logCommandWarn("auto-switch", "candidate-query-failed", {
+                account: candidate.name,
+                source: candidate.source,
+                error: toErrorMessage(error),
+                refreshId: request.refreshId ?? null,
+              });
+              return null;
+            }
+          }))).filter((entry): entry is { candidate: SavedAccountInfo; info: QuotaInfo } => entry != null),
+        );
+
+        if (rankedCandidates.length === 0) {
+          logCommandWarn("auto-switch", "no-eligible-candidate", {
+            exhaustedAccount: currentAccount.name,
+            refreshId: request.refreshId ?? null,
+          });
+          void vscode.window.showWarningMessage(
+            `"${currentAccount.name}" hit 0% remaining in the 5h window, and no other saved account currently has 5h quota left.`
+          );
+          return;
+        }
+
+        const latestSnapshot = createSavedEntriesSnapshot();
+        const latestSelection = getSavedCurrentSelection(latestSnapshot);
+        const latestCurrentAccount = latestSelection.kind === "account"
+          ? latestSnapshot.bySourceAndName.get(`${latestSelection.source}:${latestSelection.name}`)
+          : null;
+        if (!latestCurrentAccount || latestCurrentAccount.id !== currentAccount.id) {
+          lastAutoSwitchState = null;
+          return;
+        }
+
+        const bestCandidate = rankedCandidates[0];
+        const switched = await performAutomaticAccountSwitch(bestCandidate.candidate, refreshCoordinator, {
+          exhaustedAccountName: request.exhaustedAccountName ?? currentAccount.name,
+          remainingPercent: getRemainingQuotaPercent(bestCandidate.window),
+          refreshId: request.refreshId,
+        });
+        if (switched) {
+          lastAutoSwitchState = null;
+        }
+      })().finally(() => {
+        autoSwitchInFlight = null;
+      });
+
+      autoSwitchInFlight = run;
+      await run;
+    }),
+
+    vscode.commands.registerCommand("codex-account-switch.enableAutoSwitch", async () => {
+      await setAutoSwitchEnabled(true);
+    }),
+
+    vscode.commands.registerCommand("codex-account-switch.disableAutoSwitch", async () => {
+      await setAutoSwitchEnabled(false);
+    }),
+
     vscode.commands.registerCommand("codex-account-switch.addAccount", async () => {
       await runTimedCommand("addAccount", async (perf) => {
         const name = await vscode.window.showInputBox({
@@ -1610,6 +1942,13 @@ export function registerCommands(
                 : "Refresh quota for all accounts",
               command: "codex-account-switch.refreshQuota",
             },
+            {
+              label: "Auto-Switch Settings",
+              description: isAutoSwitchOnZeroQuotaEnabled()
+                ? `Auto-switch enabled · cooldown ${getAutoSwitchCooldownSeconds()}s`
+                : "Enable or configure automatic switch on 0% 5h quota",
+              command: "codex-account-switch.configureAutoSwitch",
+            },
           ],
           { placeHolder: "Choose what to refresh" },
         );
@@ -2002,6 +2341,10 @@ export function registerCommands(
         `Automatic token refresh is now assigned to "${picked.deviceName}".`
       );
       refreshAll(refreshCoordinator);
+    }),
+
+    vscode.commands.registerCommand("codex-account-switch.configureAutoSwitch", async () => {
+      await configureAutoSwitchSetting();
     }),
 
     vscode.commands.registerCommand("codex-account-switch.expandAllAccounts", async () => {

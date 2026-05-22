@@ -1,9 +1,10 @@
 import * as vscode from "vscode";
 import { isRefreshTokenExpiringWithin, isReloginRequiredRefreshError, isTokenExpired, isTokenExpiringWithin } from "@codex-account-switch/core";
 import { AccountTreeProvider } from "./accountTree";
+import { isFiveHourQuotaExhausted } from "./autoSwitch";
 import { logWarn, startPerformanceLog } from "./log";
 import { ProviderTreeProvider } from "./providerTree";
-import { createSavedEntriesSnapshot, refreshSavedAccountEntry, SavedAccountInfo, SavedAccountQuotaQueryContext } from "./savedEntries";
+import { createSavedEntriesSnapshot, querySavedAccountQuota, refreshSavedAccountEntry, SavedAccountInfo, SavedAccountQuotaQueryContext } from "./savedEntries";
 import { StatusBarManager } from "./statusBar";
 
 const LOG_PREFIX = "[codex-account-switch:vscode:refreshCoordinator]";
@@ -152,6 +153,10 @@ export class RefreshCoordinator implements vscode.Disposable {
     }, effectiveIntervalSec * 1000);
   }
 
+  private isAutoSwitchEnabled(): boolean {
+    return vscode.workspace.getConfiguration("codex-account-switch").get<boolean>("autoSwitchOnZeroQuota", false);
+  }
+
   private enqueueQuotaRefresh(request: ScheduledQuotaRefresh & { targetIds?: Iterable<string> }): void {
     this.pendingReason = request.reason;
     if (request.fullRefresh) {
@@ -227,7 +232,14 @@ export class RefreshCoordinator implements vscode.Disposable {
       targetIds = explicitTargetIds;
     } else if (pendingAutoRefresh && pendingReason === "timer") {
       autoTargetAccount = this.getNextAutoRefreshTarget(snapshot);
-      targetIds = autoTargetAccount ? [autoTargetAccount.id] : [];
+      const timerTargetIds = new Set<string>();
+      if (autoTargetAccount) {
+        timerTargetIds.add(autoTargetAccount.id);
+      }
+      if (this.isAutoSwitchEnabled() && currentSelectionAccountId) {
+        timerTargetIds.add(currentSelectionAccountId);
+      }
+      targetIds = [...timerTargetIds];
     } else if (pendingAutoRefresh && snapshot.selection.kind === "account") {
       targetIds = currentSelectionAccountId ? [currentSelectionAccountId] : [];
     } else {
@@ -247,6 +259,23 @@ export class RefreshCoordinator implements vscode.Disposable {
       snapshot,
       sharedQueries: new Map(),
     };
+    const shouldEvaluateAutoSwitch =
+      this.isAutoSwitchEnabled()
+      && currentSelectionAccountId != null
+      && targetIds.includes(currentSelectionAccountId);
+    const currentSelectionAccountIdForAutoSwitch = shouldEvaluateAutoSwitch ? currentSelectionAccountId : null;
+    const currentSelectionAccount = currentSelectionAccountIdForAutoSwitch != null
+      ? snapshot.byId.get(currentSelectionAccountIdForAutoSwitch) ?? null
+      : null;
+    let currentSelectionQuotaPromise: Promise<Awaited<ReturnType<typeof querySavedAccountQuota>>> | null = null;
+    if (currentSelectionAccount) {
+      currentSelectionQuotaPromise = querySavedAccountQuota(currentSelectionAccount, queryContext, {
+        reason: pendingReason,
+        forceFetch: true,
+        allowCachedFallback: false,
+      });
+      queryContext.sharedQueries?.set(currentSelectionAccount.id, currentSelectionQuotaPromise);
+    }
 
     if (
       pendingReason !== "timer"
@@ -321,6 +350,29 @@ export class RefreshCoordinator implements vscode.Disposable {
 
     this.runningRefresh = refreshPromise;
     await refreshPromise;
+
+    if (!shouldEvaluateAutoSwitch || !currentSelectionAccount || !currentSelectionQuotaPromise) {
+      return;
+    }
+
+    try {
+      const currentResult = await currentSelectionQuotaPromise;
+      if (currentResult.kind !== "ok" || currentResult.info.unavailableReason || !isFiveHourQuotaExhausted(currentResult.info)) {
+        return;
+      }
+
+      void vscode.commands.executeCommand("codex-account-switch.maybeAutoSwitchExhaustedAccount", {
+        exhaustedAccountId: currentSelectionAccount.id,
+        exhaustedAccountName: currentSelectionAccount.name,
+        refreshId,
+      });
+    } catch (error) {
+      logWarn(LOG_PREFIX, "auto-switch-evaluation-failed", {
+        account: currentSelectionAccount.id,
+        refreshId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   private getCurrentSelectionAccountId(snapshot: ReturnType<typeof createSavedEntriesSnapshot>): string | null {

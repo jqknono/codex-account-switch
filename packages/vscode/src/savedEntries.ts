@@ -126,6 +126,8 @@ export interface SavedAccountQuotaQueryContext {
 
 interface SavedAccountQuotaQueryOptions {
   reason?: string;
+  forceFetch?: boolean;
+  allowCachedFallback?: boolean;
 }
 
 interface SyncedStorageData {
@@ -176,7 +178,7 @@ function getQuotaCacheIntervalMs(): number {
 }
 
 function shouldForceQuotaFetch(reason?: string): boolean {
-  return reason === "manual";
+  return reason === "manual" || reason === "auto-switch";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1329,7 +1331,8 @@ export async function querySavedAccountQuota(
     if (account.source === "local") {
       const resultPromise = queryQuotaWithCache(account, {
         minIntervalMs: getQuotaCacheIntervalMs(),
-        forceFetch: shouldForceQuotaFetch(options.reason),
+        forceFetch: options.forceFetch ?? shouldForceQuotaFetch(options.reason),
+        allowCachedFallback: options.allowCachedFallback,
         fetch: async () => queryQuota(account.name, {
           performanceMode: "adaptive",
           slowThresholdMs: 3000,
@@ -1338,6 +1341,9 @@ export async function querySavedAccountQuota(
       });
       context?.sharedQueries?.set(account.id, resultPromise);
       const result = await resultPromise;
+      perf.mark("query-local-quota", {
+        resultKind: result.kind,
+      });
       perf.finish({
         resultKind: result.kind,
         source: "direct",
@@ -1371,7 +1377,8 @@ export async function querySavedAccountQuota(
     const initialAuth = account.auth;
     const queryPromise = queryQuotaWithCache(account, {
       minIntervalMs: getQuotaCacheIntervalMs(),
-      forceFetch: shouldForceQuotaFetch(options.reason),
+      forceFetch: options.forceFetch ?? shouldForceQuotaFetch(options.reason),
+      allowCachedFallback: options.allowCachedFallback,
       fetch: async (): Promise<QuotaQueryResult> => {
         const auth = clone(initialAuth);
         const info = await getQuotaInfo(auth, {

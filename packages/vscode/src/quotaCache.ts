@@ -351,6 +351,7 @@ export async function queryQuotaWithCache(
   options: {
     minIntervalMs: number;
     forceFetch?: boolean;
+    allowCachedFallback?: boolean;
     fetch: () => Promise<QuotaQueryResult>;
   },
 ): Promise<QuotaQueryResultWithFallbackMetadata> {
@@ -404,7 +405,7 @@ export async function queryQuotaWithCache(
   try {
     const result = await options.fetch();
     if (result.kind === "ok") {
-      if (result.info.unavailableReason && cached) {
+      if (result.info.unavailableReason && cached && options.allowCachedFallback !== false) {
         logWarn(LOG_PREFIX, "fallback-to-cache-after-unavailable-result", {
           account: account.name,
           source: account.source,
@@ -419,7 +420,7 @@ export async function queryQuotaWithCache(
         };
       }
       writeCachedQuotaSnapshot(account, result.info);
-    } else if (cached) {
+    } else if (cached && options.allowCachedFallback !== false) {
       return {
         kind: "ok",
         displayName: account.name,
@@ -428,7 +429,7 @@ export async function queryQuotaWithCache(
     }
     return result;
   } catch (error) {
-    if (cached) {
+    if (cached && options.allowCachedFallback !== false) {
       logWarn(LOG_PREFIX, "fallback-to-cache-after-query-error", {
         account: account.name,
         source: account.source,

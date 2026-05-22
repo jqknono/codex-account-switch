@@ -126,6 +126,21 @@ test("quota refresh setting defaults to 30 seconds for rotating background refre
   assert.match(setting?.description ?? "", /rotation/i);
 });
 
+test("auto-switch settings are contributed with conservative defaults", () => {
+  const properties = manifest.contributes.configuration.properties;
+  const enabledSetting = properties["codex-account-switch.autoSwitchOnZeroQuota"];
+  const cooldownSetting = properties["codex-account-switch.autoSwitchCooldownSeconds"];
+
+  assert.equal(enabledSetting?.type, "boolean");
+  assert.equal(enabledSetting?.default, false);
+  assert.match(enabledSetting?.description ?? "", /5-hour quota reaches 0%/i);
+
+  assert.equal(cooldownSetting?.type, "number");
+  assert.equal(cooldownSetting?.default, 90);
+  assert.equal(cooldownSetting?.minimum, 15);
+  assert.match(cooldownSetting?.description ?? "", /retrying automatic switching/i);
+});
+
 test("storage migration commands are contributed", () => {
   const byId = new Map(commands.map((command) => [command.command, command]));
 
@@ -148,6 +163,18 @@ test("storage migration commands are contributed", () => {
   assert.equal(
     byId.get("codex-account-switch.selectAutoRefreshDevice")?.title,
     "Select Auto-Refresh Device"
+  );
+  assert.equal(
+    byId.get("codex-account-switch.enableAutoSwitch")?.title,
+    "Enable Auto-Switch"
+  );
+  assert.equal(
+    byId.get("codex-account-switch.disableAutoSwitch")?.title,
+    "Disable Auto-Switch"
+  );
+  assert.equal(
+    byId.get("codex-account-switch.configureAutoSwitch")?.title,
+    "Auto-Switch Settings"
   );
 });
 
@@ -223,6 +250,31 @@ test("accounts view title menu exposes a single refresh entrypoint", () => {
   );
 
   assert.deepEqual(present, ["codex-account-switch.refresh"]);
+});
+
+test("accounts view title menu exposes auto-switch settings", () => {
+  const titleMenus = manifest.contributes.menus["view/title"] ?? [];
+  const enabledItem = titleMenus.find(
+    (item) =>
+      item.command === "codex-account-switch.enableAutoSwitch" &&
+      item.when ===
+        "view == codexAccountSwitchAccounts && !codexAccountSwitch.autoSwitchEnabled"
+  );
+  const disabledItem = titleMenus.find(
+    (item) =>
+      item.command === "codex-account-switch.disableAutoSwitch" &&
+      item.when ===
+        "view == codexAccountSwitchAccounts && codexAccountSwitch.autoSwitchEnabled"
+  );
+  const settingsItem = titleMenus.find(
+    (item) =>
+      item.command === "codex-account-switch.configureAutoSwitch" &&
+      item.when === "view == codexAccountSwitchAccounts"
+  );
+
+  assert.equal(enabledItem?.group, "navigation@8");
+  assert.equal(disabledItem?.group, "navigation@8");
+  assert.equal(settingsItem?.group, "navigation@9");
 });
 
 test("locked cloud accounts expose unlock in the context menu", () => {
