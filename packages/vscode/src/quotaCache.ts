@@ -74,6 +74,7 @@ export interface CachedQuotaSnapshot {
 export interface CachedQuotaFallbackMetadata {
   fallbackErrorMessage?: string;
   fallbackReloginRequired?: boolean;
+  usedCachedQuota?: boolean;
 }
 
 export type QuotaQueryResultWithFallbackMetadata = QuotaQueryResult & CachedQuotaFallbackMetadata;
@@ -367,6 +368,7 @@ export async function queryQuotaWithCache(
       kind: "ok",
       displayName: account.name,
       info: cached.info,
+      usedCachedQuota: true,
     };
   }
 
@@ -382,6 +384,7 @@ export async function queryQuotaWithCache(
         kind: "ok",
         displayName: account.name,
         info: cached.info,
+        usedCachedQuota: true,
       };
     }
 
@@ -395,6 +398,7 @@ export async function queryQuotaWithCache(
         kind: "ok",
         displayName: account.name,
         info: waited.info,
+        usedCachedQuota: true,
       };
     }
 
@@ -417,6 +421,7 @@ export async function queryQuotaWithCache(
           info: cached.info,
           fallbackErrorMessage: result.info.unavailableReason.message,
           fallbackReloginRequired: result.info.unavailableReason.code === "relogin_required",
+          usedCachedQuota: true,
         };
       }
       writeCachedQuotaSnapshot(account, result.info);
@@ -425,6 +430,8 @@ export async function queryQuotaWithCache(
         kind: "ok",
         displayName: account.name,
         info: cached.info,
+        fallbackErrorMessage: result.message,
+        usedCachedQuota: true,
       };
     }
     return result;
@@ -441,6 +448,7 @@ export async function queryQuotaWithCache(
         info: cached.info,
         fallbackErrorMessage: error instanceof Error ? error.message : String(error),
         fallbackReloginRequired: isReloginRequiredRefreshError(error),
+        usedCachedQuota: true,
       };
     }
     throw error;

@@ -4,7 +4,8 @@
 
 | Area | Storage | Notes |
 | --- | --- | --- |
-| Cloud accounts | VS Code `globalState` synced key | Payload stays encrypted with the saved-auth passphrase. |
+| Cloud account index | VS Code `globalState` synced key `codex-account-switch.syncedCloudState.v1` | Stores account names plus shared cloud metadata; account payloads are not stored in this aggregate key. |
+| Cloud accounts | Per-account VS Code `globalState` synced keys `codex-account-switch.syncedCloudAccount.v1.{name}` | Payload stays encrypted with the saved-auth passphrase; updating one account does not rewrite sibling accounts. |
 | Cloud providers | VS Code `globalState` synced key | Uses the same encrypted envelope format as accounts, plus sync revision metadata and provider audit metadata (`lastWriterDeviceName`, `lastWriterAction`). |
 | Device list | VS Code `globalState` synced key | Shared across machines through Settings Sync. |
 | Auto-refresh device | VS Code `globalState` synced key | Controls which synced device may perform automatic cloud token refresh. |
@@ -17,6 +18,7 @@
 flowchart LR
   A[Legacy syncedStorage setting] -->|first activation migration| B[globalState synced cloud state]
   B -->|activation appends current hostname when cloud state exists| C[Device list]
+  B -->|accountNames index| I[Per-account synced keys]
   B --> D[Settings Sync]
   E[Selected auto-refresh device] --> F[Only this device may automatically refresh cloud tokens]
   D --> F
@@ -50,6 +52,7 @@ flowchart LR
 | No `globalState` change event for remote sync | Reload/activation or explicit refresh is the supported pickup boundary. |
 | Passphrase is local-only | A second machine must enter the same password before synced cloud entries can be decrypted. |
 | Envelope format must stay unchanged | `@codex-account-switch/core` remains the canonical serializer/deserializer. |
+| Account writes are per-entry | Updating one cloud account must not rewrite other cloud account payload keys. |
 
 ## Provider Audit Metadata
 

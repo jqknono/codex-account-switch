@@ -9,6 +9,7 @@ const core = require("@codex-account-switch/core");
 
 const STORAGE_SECRET_KEY = "codex-account-switch.savedAuthPassphrase";
 const SYNCED_CLOUD_STATE_KEY = "codex-account-switch.syncedCloudState.v1";
+const SYNCED_CLOUD_ACCOUNT_KEY_PREFIX = "codex-account-switch.syncedCloudAccount.v1.";
 
 function makeJwt(payload) {
   const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url");
@@ -71,6 +72,63 @@ function getCloudEnvelope(config, kind, name) {
   assert.equal(typeof entry, "object");
   assert.notEqual(entry, null);
   return entry;
+}
+
+function getSyncedCloudAccountKey(name) {
+  return `${SYNCED_CLOUD_ACCOUNT_KEY_PREFIX}${encodeURIComponent(name)}`;
+}
+
+function readMockSyncedStorage(globalStateValues, legacySyncedStorage) {
+  const raw = globalStateValues.get(SYNCED_CLOUD_STATE_KEY) ?? legacySyncedStorage;
+  const accounts = { ...(raw?.accounts ?? {}) };
+  const accountNames = new Set([
+    ...Object.keys(accounts),
+    ...(
+      Array.isArray(raw?.accountNames)
+        ? raw.accountNames.filter((name) => typeof name === "string")
+        : []
+    ),
+  ]);
+  for (const name of accountNames) {
+    const value = globalStateValues.get(getSyncedCloudAccountKey(name));
+    if (value !== undefined) {
+      accounts[name] = value;
+    }
+  }
+  const syncAccountNames = () => {
+    const state = globalStateValues.get(SYNCED_CLOUD_STATE_KEY);
+    if (state) {
+      state.accountNames = Object.keys(accounts).sort();
+      state.accounts = {};
+    }
+  };
+  return {
+    version: 1,
+    accounts: new Proxy(accounts, {
+      set(target, property, value) {
+        if (typeof property !== "string") {
+          return false;
+        }
+        target[property] = value;
+        globalStateValues.set(getSyncedCloudAccountKey(property), value);
+        syncAccountNames();
+        return true;
+      },
+      deleteProperty(target, property) {
+        if (typeof property !== "string") {
+          return false;
+        }
+        delete target[property];
+        globalStateValues.delete(getSyncedCloudAccountKey(property));
+        syncAccountNames();
+        return true;
+      },
+    }),
+    accountNames: [...accountNames].sort(),
+    providers: raw?.providers ?? {},
+    devices: raw?.devices ?? [],
+    autoRefreshDeviceName: raw?.autoRefreshDeviceName ?? null,
+  };
 }
 
 async function withMockedHostname(hostname, fn) {
@@ -167,7 +225,7 @@ function createVscodeMock(options) {
   Object.defineProperty(config, "syncedStorage", {
     enumerable: true,
     get() {
-      return globalStateValues.get(SYNCED_CLOUD_STATE_KEY) ?? legacySyncedStorage;
+      return readMockSyncedStorage(globalStateValues, legacySyncedStorage);
     },
     set(value) {
       legacySyncedStorage = value;
@@ -175,7 +233,17 @@ function createVscodeMock(options) {
   });
 
   if (options.syncedStorage && !globalStateValues.has(SYNCED_CLOUD_STATE_KEY)) {
-    globalStateValues.set(SYNCED_CLOUD_STATE_KEY, JSON.parse(JSON.stringify(syncedStorage)));
+    for (const [name, account] of Object.entries(syncedStorage.accounts)) {
+      globalStateValues.set(getSyncedCloudAccountKey(name), JSON.parse(JSON.stringify(account)));
+    }
+    globalStateValues.set(SYNCED_CLOUD_STATE_KEY, {
+      version: 1,
+      accounts: {},
+      accountNames: Object.keys(syncedStorage.accounts).sort(),
+      providers: JSON.parse(JSON.stringify(syncedStorage.providers)),
+      devices: [...syncedStorage.devices],
+      autoRefreshDeviceName: syncedStorage.autoRefreshDeviceName,
+    });
   }
 
   class EventEmitter {
@@ -452,14 +520,51 @@ function createExtensionContext(mocked) {
 async function withDisabledIntervals(fn) {
   const originalSetInterval = global.setInterval;
   const originalClearInterval = global.clearInterval;
+  const originalSetTimeout = global.setTimeout;
+  const originalClearTimeout = global.clearTimeout;
+  const zeroTimeouts = [];
   global.setInterval = () => ({ __mockInterval: true });
   global.clearInterval = () => {};
+  global.setTimeout = (callback, delay, ...args) => {
+    if (delay === 0) {
+      const handle = {
+        __mockTimeout: true,
+        callback,
+        args,
+        cleared: false,
+      };
+      zeroTimeouts.push(handle);
+      return handle;
+    }
+    return originalSetTimeout(callback, delay, ...args);
+  };
+  global.clearTimeout = (handle) => {
+    if (handle?.__mockTimeout) {
+      handle.cleared = true;
+      return;
+    }
+    return originalClearTimeout(handle);
+  };
+
+  const flushTimers = async () => {
+    while (true) {
+      const handle = zeroTimeouts.find((timer) => !timer.cleared);
+      if (!handle) {
+        return;
+      }
+      handle.cleared = true;
+      handle.callback(...handle.args);
+      await Promise.resolve();
+    }
+  };
 
   try {
-    return await fn();
+    return await fn({ flushTimers });
   } finally {
     global.setInterval = originalSetInterval;
     global.clearInterval = originalClearInterval;
+    global.setTimeout = originalSetTimeout;
+    global.clearTimeout = originalClearTimeout;
   }
 }
 
@@ -535,6 +640,40 @@ async function withSuccessfulHttps(fn, mockOptions = {}) {
   }
 }
 
+async function withFailingHttps(fn, mockOptions = {}) {
+  const originalRequest = https.request;
+  https.request = (requestOptions) => {
+    mockOptions?.requestLog?.push?.({
+      hostname: requestOptions?.hostname,
+      path: requestOptions?.path ?? "",
+      method: requestOptions?.method ?? "GET",
+    });
+    const listeners = new Map();
+    const request = {
+      on(event, listener) {
+        listeners.set(event, listener);
+        return request;
+      },
+      setTimeout() {
+        return request;
+      },
+      destroy() {},
+      write() {},
+      end() {
+        setImmediate(() => listeners.get("error")?.(new Error("quota network failed")));
+      },
+    };
+
+    return request;
+  };
+
+  try {
+    return await fn();
+  } finally {
+    https.request = originalRequest;
+  }
+}
+
 async function withRefreshTokenReusedHttps(fn) {
   const originalRequest = https.request;
   https.request = (requestOptions, handler) => {
@@ -595,8 +734,10 @@ async function withRefreshTokenReusedHttps(fn) {
   }
 }
 
-async function waitForBackgroundWork() {
-  await new Promise((resolve) => setTimeout(resolve, 1700));
+async function waitForRefreshCoordinatorIdle(context) {
+  const refreshCoordinator = getRefreshCoordinator(context);
+  assert.ok(refreshCoordinator);
+  await refreshCoordinator.whenIdle();
 }
 
 function countUsageRequests(requestLog) {
@@ -652,7 +793,7 @@ test("addAccount can use device auth for a new account", async (t) => {
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
         }
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
 
         assert.deepEqual(mocked.sentTerminalCommands, ["codex login --device-auth"]);
         assert.match(
@@ -723,7 +864,7 @@ test("activate restores the saved storage password from SecretStorage", async ()
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
         }
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
       })
     );
   } finally {
@@ -770,14 +911,17 @@ test("activate migrates legacy synced storage into synced globalState and regist
       const context = createExtensionContext(mocked);
       await extension.activate(context);
 
-      assert.deepEqual(mocked.globalState.syncedKeys, [SYNCED_CLOUD_STATE_KEY]);
+      assert.deepEqual(mocked.globalState.syncedKeys, [
+        SYNCED_CLOUD_STATE_KEY,
+        getSyncedCloudAccountKey("migrated"),
+      ]);
       assert.deepEqual(mocked.config.syncedStorage.accounts, syncedStorage.accounts);
       assert.equal(mocked.legacySyncedStorage(), undefined);
 
       for (const subscription of context.subscriptions.reverse()) {
         subscription?.dispose?.();
       }
-      await waitForBackgroundWork();
+      await waitForRefreshCoordinatorIdle(context);
     })
   );
 });
@@ -824,7 +968,7 @@ test("activation keeps migrated globalState data active when clearing legacy syn
       for (const subscription of context.subscriptions.reverse()) {
         subscription?.dispose?.();
       }
-      await waitForBackgroundWork();
+      await waitForRefreshCoordinatorIdle(context);
     })
   );
 });
@@ -874,7 +1018,7 @@ test("forget storage password removes the local secret and locks encrypted saved
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
         }
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
       })
     );
   } finally {
@@ -952,7 +1096,7 @@ test("unlock command restores access to locked cloud accounts", async () => {
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
         }
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
       })
     );
   } finally {
@@ -1022,7 +1166,7 @@ test("useAccount prompts again to unlock locked cloud auth after activation was 
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
         }
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
       })
     );
   } finally {
@@ -1086,7 +1230,7 @@ test("addAccount can save to synced settings when cloud storage is selected", as
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
         }
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
       })
     );
   } finally {
@@ -1187,7 +1331,7 @@ test("reloginAccount updates the saved cloud auth without changing the active ac
           .filter((item) => item.account.name === "cloud" && item.account.source === "cloud");
 
         await mocked.registeredCommands.get("codex-account-switch.reloginAccount")(cloudItem);
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
 
         const updated = readCloudAccount(mocked.config, "cloud", "cloud-passphrase");
         assert.equal(updated.tokens.access_token, "access-new");
@@ -1213,7 +1357,7 @@ test("reloginAccount updates the saved cloud auth without changing the active ac
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
         }
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
       })
     );
   } finally {
@@ -1300,7 +1444,7 @@ test("legacy cloud account upgrades with visible sync metadata on manual refresh
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
         }
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
       })
     );
   } finally {
@@ -1350,6 +1494,18 @@ test("manual cloud refresh increments visible sync version metadata", async (t) 
     );
     syncedEntry.entryVersion = 1;
     syncedEntry.updatedAt = "2026-04-01T00:00:00.000Z";
+    const siblingEntry = core.serializeSavedValue(
+      "saved_auth",
+      makeAuthFile("acct-sibling", {
+        accessToken: "access-sibling-old",
+        refreshToken: "refresh-sibling-old",
+      }),
+      {
+        requireEncryption: true,
+      }
+    );
+    siblingEntry.entryVersion = 5;
+    siblingEntry.updatedAt = "2026-04-02T00:00:00.000Z";
     core.setSavedAuthPassphrase(null);
 
     const mocked = createVscodeMock({
@@ -1358,6 +1514,7 @@ test("manual cloud refresh increments visible sync version metadata", async (t) 
         version: 1,
         accounts: {
           "sync-user": syncedEntry,
+          sibling: siblingEntry,
         },
         providers: {},
       },
@@ -1382,11 +1539,17 @@ test("manual cloud refresh increments visible sync version metadata", async (t) 
         assert.equal(nextEntry.entryVersion, 2);
         assert.notEqual(nextEntry.updatedAt, "2026-04-01T00:00:00.000Z");
         assert.match(nextEntry.updatedAt ?? "", /^\d{4}-\d{2}-\d{2}T/);
+        const nextSibling = getCloudEnvelope(mocked.config, "account", "sibling");
+        assert.equal(nextSibling.entryVersion, 5);
+        assert.equal(nextSibling.updatedAt, "2026-04-02T00:00:00.000Z");
+        assert.deepEqual(mocked.globalStateValues.get(SYNCED_CLOUD_STATE_KEY).accounts, {});
+        assert.equal(typeof mocked.globalStateValues.get(getSyncedCloudAccountKey("sync-user"))?.ciphertext, "string");
+        assert.equal(typeof mocked.globalStateValues.get(getSyncedCloudAccountKey("sibling"))?.ciphertext, "string");
 
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
         }
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
       })
     );
   } finally {
@@ -1470,7 +1633,7 @@ test("cloud account tooltip keeps sync metadata while hiding redundant detail fi
           for (const subscription of context.subscriptions.reverse()) {
             subscription?.dispose?.();
           }
-          await waitForBackgroundWork();
+          await waitForRefreshCoordinatorIdle(context);
         })
       );
     });
@@ -1550,7 +1713,7 @@ test("account details hide last refresh and support copying email", async (t) =>
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
         }
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
       })
     );
   } finally {
@@ -1622,7 +1785,7 @@ test("refresh quota command writes command, account tree, and status bar perform
         await extension.activate(context);
 
         await mocked.registeredCommands.get("codex-account-switch.refreshQuota")();
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
 
         const lines = mocked.createdChannels.flatMap((channel) => channel.entries.map((entry) => entry.line));
         assert.equal(
@@ -1696,7 +1859,7 @@ test("refresh command tolerates non-account context payloads", async (t) => {
       await extension.activate(context);
 
       await mocked.registeredCommands.get("codex-account-switch.refresh")({});
-      await waitForBackgroundWork();
+      await waitForRefreshCoordinatorIdle(context);
 
       assert.equal(mocked.errorMessages.length, 0);
       assert.equal(
@@ -1788,11 +1951,11 @@ test("refreshToken command offers All and refreshes every saved account", async 
         const extension = loadExtensionWithMockedVscode(mocked.vscode);
         const context = createExtensionContext(mocked);
         await extension.activate(context);
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
         requestLog.length = 0;
 
         await mocked.registeredCommands.get("codex-account-switch.refreshToken")();
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
 
         assert.equal(countAuthRefreshRequests(requestLog), 2);
         assert.equal(countUsageRequests(requestLog), 2);
@@ -1876,7 +2039,7 @@ test("activate in provider mode skips quota refresh and logs zero effective targ
         const extension = loadExtensionWithMockedVscode(mocked.vscode);
         const context = createExtensionContext(mocked);
         await extension.activate(context);
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
 
         assert.equal(requestLog.length, 0);
         const lines = mocked.createdChannels.flatMap((channel) => channel.entries.map((entry) => entry.line));
@@ -1948,7 +2111,7 @@ test("activate in account mode refreshes only the current account quota", async 
         const extension = loadExtensionWithMockedVscode(mocked.vscode);
         const context = createExtensionContext(mocked);
         await extension.activate(context);
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
 
         assert.equal(requestLog.length, 1);
         const lines = mocked.createdChannels.flatMap((channel) => channel.entries.map((entry) => entry.line));
@@ -2054,7 +2217,7 @@ test("background quota refresh rotates one saved account per interval without ex
       const extension = loadExtensionWithMockedVscode(mocked.vscode);
       const context = createExtensionContext(mocked);
       await extension.activate(context);
-      await waitForBackgroundWork();
+      await waitForRefreshCoordinatorIdle(context);
 
       const usageRequests = requestLog.filter((request) => request.hostname === "chatgpt.com");
       assert.equal(intervalHandles.length, 1);
@@ -2081,7 +2244,7 @@ test("background quota refresh rotates one saved account per interval without ex
       assert.equal(intervalHandles[2].ms, 5000);
 
       intervalHandles[2].callback();
-      await waitForBackgroundWork();
+      await waitForRefreshCoordinatorIdle(context);
 
       assert.equal(countUsageRequests(requestLog), 2);
       assert.equal(
@@ -2090,7 +2253,7 @@ test("background quota refresh rotates one saved account per interval without ex
       );
 
       intervalHandles[2].callback();
-      await waitForBackgroundWork();
+      await waitForRefreshCoordinatorIdle(context);
 
       assert.equal(countUsageRequests(requestLog), 3);
       assert.equal(
@@ -2164,7 +2327,7 @@ test("refreshQuota command on Local Accounts group refreshes all local account q
         const extension = loadExtensionWithMockedVscode(mocked.vscode);
         const context = createExtensionContext(mocked);
         await extension.activate(context);
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
 
         requestLog.length = 0;
         const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
@@ -2240,7 +2403,7 @@ test("second VS Code window reuses cached quota data and skips a fresh network r
         const extension = loadExtensionWithMockedVscode(firstWindow.vscode);
         const context = createExtensionContext(firstWindow);
         await extension.activate(context);
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
 
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
@@ -2266,14 +2429,114 @@ test("second VS Code window reuses cached quota data and skips a fresh network r
         assert.ok(cacheItem);
         assert.match(String(cacheItem.description ?? ""), /Quota 90%/);
         assert.doesNotMatch(String(cacheItem.description ?? ""), /No quota data/i);
+        assert.equal(cacheItem.iconPath?.id, "pass-filled");
+        assert.equal(cacheItem.iconPath?.color?.id, "editorWarning.foreground");
+        const cacheDetails = getAccountDetailItems(accountTreeView.treeDataProvider, cacheItem);
+        const freshnessItem = cacheDetails.find((item) => item.label === "Quota freshness");
+        assert.equal(freshnessItem?.description, "Cached");
+        assert.equal(freshnessItem?.iconPath?.color?.id, "editorWarning.foreground");
 
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
         assert.equal(countUsageRequests(secondRequestLog), 0);
 
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
         }
       }, { requestLog: secondRequestLog })
+    );
+  } finally {
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
+test("current account uses yellow icon when quota refresh falls back to cache", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-quota-cache-fallback-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  const authDir = path.join(tempRoot, "saved-auth");
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(authDir, { recursive: true });
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  try {
+    core.setNamedAuthDir(authDir);
+    core.writeSavedAuthFile(
+      path.join(authDir, "auth_apple1.json"),
+      makeAuthFile("acct-apple1", { accessToken: "access-apple1" })
+    );
+    core.setNamedAuthDir(undefined);
+    fs.writeFileSync(
+      path.join(codexHome, "auth.json"),
+      JSON.stringify(makeAuthFile("acct-apple1", { accessToken: "access-apple1" }), null, 2),
+      "utf-8",
+    );
+
+    const firstWindow = createVscodeMock({
+      authDirectory: authDir,
+      showStatusBar: false,
+      cloudTokenAutoUpdate: false,
+    });
+    await withDisabledIntervals(() =>
+      withSuccessfulHttps(async () => {
+        const extension = loadExtensionWithMockedVscode(firstWindow.vscode);
+        const context = createExtensionContext(firstWindow);
+        await extension.activate(context);
+        await waitForRefreshCoordinatorIdle(context);
+
+        for (const subscription of context.subscriptions.reverse()) {
+          subscription?.dispose?.();
+        }
+      })
+    );
+
+    const secondWindow = createVscodeMock({
+      authDirectory: authDir,
+      showStatusBar: false,
+      cloudTokenAutoUpdate: false,
+    });
+    await withDisabledIntervals(() =>
+      withFailingHttps(async () => {
+        const extension = loadExtensionWithMockedVscode(secondWindow.vscode);
+        const context = createExtensionContext(secondWindow);
+        await extension.activate(context);
+
+        const accountTreeView = secondWindow.treeViews.get("codexAccountSwitchAccounts");
+        const provider = accountTreeView.treeDataProvider;
+        await provider.refreshQuota(["local:apple1"], { reason: "manual", concurrency: 1 });
+        const appleItem = getAccountTreeItems(provider)
+          .find((item) => item.account.name === "apple1");
+        assert.ok(appleItem);
+        assert.match(String(appleItem.description ?? ""), /Quota 90%/);
+        assert.equal(appleItem.iconPath?.id, "pass-filled");
+        assert.equal(appleItem.iconPath?.color?.id, "editorWarning.foreground");
+        assert.match(String(appleItem.tooltip ?? ""), /Showing cached data/);
+
+        const details = getAccountDetailItems(provider, appleItem);
+        const freshnessItem = details.find((item) => item.label === "Quota freshness");
+        assert.equal(freshnessItem?.description, "Cached");
+
+        for (const subscription of context.subscriptions.reverse()) {
+          subscription?.dispose?.();
+        }
+        await waitForRefreshCoordinatorIdle(context);
+      })
     );
   } finally {
     core.setNamedAuthDir(undefined);
@@ -2341,11 +2604,11 @@ test("provider switch refreshes views without triggering quota requests", async 
         const extension = loadExtensionWithMockedVscode(mocked.vscode);
         const context = createExtensionContext(mocked);
         await extension.activate(context);
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
 
         requestLog.length = 0;
         await mocked.registeredCommands.get("codex-account-switch.switchMode")();
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
 
         assert.equal(requestLog.length, 0);
         const lines = mocked.createdChannels.flatMap((channel) => channel.entries.map((entry) => entry.line));
@@ -2486,14 +2749,14 @@ test("refresh quota command reuses one saved entries snapshot for tree and statu
         const extension = loadExtensionWithMockedVscode(mocked.vscode);
         const context = createExtensionContext(mocked);
         await extension.activate(context);
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
 
         mocked.createdChannels.forEach((channel) => {
           channel.entries.length = 0;
         });
 
         await mocked.registeredCommands.get("codex-account-switch.refreshQuota")();
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
 
         const lines = mocked.createdChannels.flatMap((channel) => channel.entries.map((entry) => entry.line));
         assert.equal(countOperationLogs(lines, "listSavedAccounts"), 1);
@@ -2539,6 +2802,11 @@ test("account tree keeps quota failures inside their source group", async (t) =>
     core.writeSavedAuthFile(path.join(authDir, "auth_local-ok.json"), makeAuthFile("acct-local-ok"));
     core.writeSavedAuthFile(path.join(authDir, "auth_local-fail.json"), makeAuthFile("acct-local-fail"));
     core.setNamedAuthDir(undefined);
+    fs.writeFileSync(
+      path.join(codexHome, "auth.json"),
+      JSON.stringify(makeAuthFile("acct-local-fail"), null, 2),
+      "utf-8"
+    );
 
     core.setSavedAuthPassphrase("group-passphrase");
     const cloudEntry = core.serializeSavedValue("saved_auth", makeAuthFile("acct-cloud-ok"), {
@@ -2587,13 +2855,14 @@ test("account tree keeps quota failures inside their source group", async (t) =>
           ["local-fail", "local-ok"]
         );
         const failedLocalItem = provider.getChildren(groups[0]).find((item) => item.account.name === "local-fail");
+        assert.equal(failedLocalItem?.iconPath?.id, "pass-filled");
         assert.equal(failedLocalItem?.iconPath?.color?.id, "errorForeground");
         assert.deepEqual(provider.getChildren(groups[1]).map((item) => item.account.name), ["cloud-ok"]);
 
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
         }
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
       })
     );
   } finally {
@@ -2684,7 +2953,7 @@ test("account tree shows relogin required only after manual token refresh fails"
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
         }
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
       })
     );
   } finally {
@@ -2788,7 +3057,7 @@ test("account tree resolves stale source group children from latest root state",
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
         }
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
       })
     );
   } finally {
@@ -2879,7 +3148,7 @@ test("stale cloud account mutations are blocked and can open settings json", asy
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
         }
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
       })
     );
   } finally {
@@ -2960,7 +3229,7 @@ test("remotely deleted cloud accounts are treated as conflicts instead of being 
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
         }
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
       })
     );
   } finally {
@@ -3075,7 +3344,7 @@ test("stale cloud provider mutations are blocked and keep the latest synced entr
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
         }
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
       })
     );
   } finally {
@@ -3193,7 +3462,7 @@ test("move account to local keeps an existing local account when cloud removal c
           for (const subscription of context.subscriptions.reverse()) {
             subscription?.dispose?.();
           }
-          await waitForBackgroundWork();
+          await waitForRefreshCoordinatorIdle(context);
         })
       );
     });
@@ -3318,7 +3587,7 @@ test("move provider to local keeps an existing local provider when cloud removal
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
         }
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
       })
     );
   } finally {
@@ -3411,7 +3680,7 @@ test("cloud provider tooltip shows visible sync revision metadata", async (t) =>
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
         }
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
       })
     );
   } finally {
@@ -3488,7 +3757,7 @@ test("moving a local provider to cloud records provider audit metadata", async (
           for (const subscription of context.subscriptions.reverse()) {
             subscription?.dispose?.();
           }
-          await waitForBackgroundWork();
+          await waitForRefreshCoordinatorIdle(context);
         })
       )
     );
@@ -3574,7 +3843,7 @@ test("account tree shows duplicate local and cloud accounts with source labels",
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
         }
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
       })
     );
   } finally {
@@ -3656,7 +3925,7 @@ test("account migration moves saved auth between local and cloud storage", async
           for (const subscription of context.subscriptions.reverse()) {
             subscription?.dispose?.();
           }
-          await waitForBackgroundWork();
+          await waitForRefreshCoordinatorIdle(context);
         })
       );
     });
@@ -3714,7 +3983,7 @@ test("useAccount shares one cloud quota request between tree and status bar", as
         const extension = loadExtensionWithMockedVscode(mocked.vscode);
         const context = createExtensionContext(mocked);
         await extension.activate(context);
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
         requestLog.length = 0;
 
         const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
@@ -3722,7 +3991,7 @@ test("useAccount shares one cloud quota request between tree and status bar", as
           .filter((item) => item.account.name === "sync" && item.account.source === "cloud");
 
         await mocked.registeredCommands.get("codex-account-switch.useAccount")(cloudItem);
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
 
         assert.equal(countUsageRequests(requestLog), 1);
         assert.equal(countAuthRefreshRequests(requestLog), 0);
@@ -3730,7 +3999,7 @@ test("useAccount shares one cloud quota request between tree and status bar", as
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
         }
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
       }, { requestLog })
     );
   } finally {
@@ -3788,7 +4057,7 @@ test("moveAccountToCloud avoids duplicate quota refresh after synced storage upd
         const extension = loadExtensionWithMockedVscode(mocked.vscode);
         const context = createExtensionContext(mocked);
         await extension.activate(context);
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
         requestLog.length = 0;
 
         const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
@@ -3796,14 +4065,14 @@ test("moveAccountToCloud avoids duplicate quota refresh after synced storage upd
           .filter((item) => item.account.name === "work" && item.account.source === "local");
 
         await mocked.registeredCommands.get("codex-account-switch.moveAccountToCloud")(localItem);
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
 
         assert.equal(countUsageRequests(requestLog), 1);
 
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
         }
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
       }, { requestLog })
     );
   } finally {
@@ -3860,7 +4129,7 @@ test("hidden status bar does not add extra quota requests on activate or switch"
         const extension = loadExtensionWithMockedVscode(mocked.vscode);
         const context = createExtensionContext(mocked);
         await extension.activate(context);
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
 
         assert.equal(countUsageRequests(requestLog), 0);
 
@@ -3870,14 +4139,14 @@ test("hidden status bar does not add extra quota requests on activate or switch"
           .filter((item) => item.account.name === "hidden" && item.account.source === "cloud");
 
         await mocked.registeredCommands.get("codex-account-switch.useAccount")(cloudItem);
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
 
         assert.equal(countUsageRequests(requestLog), 1);
 
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
         }
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
       }, { requestLog })
     );
   } finally {
@@ -3945,7 +4214,7 @@ test("moveAccountToLocal refreshes only the affected account quota", async (t) =
           const extension = loadExtensionWithMockedVscode(mocked.vscode);
           const context = createExtensionContext(mocked);
           await extension.activate(context);
-          await waitForBackgroundWork();
+          await waitForRefreshCoordinatorIdle(context);
           requestLog.length = 0;
 
           const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
@@ -3953,14 +4222,14 @@ test("moveAccountToLocal refreshes only the affected account quota", async (t) =
             .filter((item) => item.account.name === "work" && item.account.source === "cloud");
 
           await mocked.registeredCommands.get("codex-account-switch.moveAccountToLocal")(cloudItem);
-          await waitForBackgroundWork();
+          await waitForRefreshCoordinatorIdle(context);
 
           assert.equal(countUsageRequests(requestLog), 1);
 
           for (const subscription of context.subscriptions.reverse()) {
             subscription?.dispose?.();
           }
-          await waitForBackgroundWork();
+          await waitForRefreshCoordinatorIdle(context);
         }, { requestLog })
       );
     });
@@ -4077,9 +4346,132 @@ test("switching away from a cloud account syncs the current auth back to cloud s
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
         }
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
       })
     );
+  } finally {
+    core.setSavedAuthPassphrase(null);
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
+test("switching away from a cloud account on a non-authorized device does not update cloud storage", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-cloud-switch-nonauthority-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  const authDir = path.join(tempRoot, "saved-auth");
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(authDir, { recursive: true });
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  try {
+    core.setSavedAuthPassphrase("manual-passphrase");
+    core.setNamedAuthDir(authDir);
+    core.writeSavedAuthFile(
+      path.join(authDir, "auth_local-user.json"),
+      makeAuthFile("acct-local")
+    );
+    const cloudEntry = core.serializeSavedValue(
+      "saved_auth",
+      makeAuthFile("acct-cloud", {
+        accessToken: "access-cloud-saved",
+        refreshToken: "refresh-cloud-saved",
+      }),
+      {
+        requireEncryption: true,
+      }
+    );
+    cloudEntry.entryVersion = 6;
+    cloudEntry.updatedAt = "2026-05-01T00:00:00.000Z";
+    const syncedStorage = {
+      version: 1,
+      accounts: {
+        "sync-user": cloudEntry,
+      },
+      providers: {},
+      devices: ["authorized-device"],
+      autoRefreshDeviceName: "authorized-device",
+    };
+    core.setSavedAuthPassphrase(null);
+    core.setNamedAuthDir(undefined);
+
+    fs.writeFileSync(
+      path.join(codexHome, "auth.json"),
+      JSON.stringify(
+        makeAuthFile("acct-cloud", {
+          accessToken: "access-cloud-current",
+          refreshToken: "refresh-cloud-current",
+        }),
+        null,
+        2
+      ),
+      "utf-8"
+    );
+
+    const mocked = createVscodeMock({
+      authDirectory: authDir,
+      syncedStorage,
+      secretValues: {
+        [STORAGE_SECRET_KEY]: "manual-passphrase",
+      },
+      globalStateValues: {
+        "codex-account-switch.currentSavedSelection": {
+          kind: "account",
+          name: "sync-user",
+          source: "cloud",
+          entryVersion: 6,
+          updatedAt: "2026-05-01T00:00:00.000Z",
+        },
+      },
+    });
+
+    await withMockedHostname("non-authorized-device", async () => {
+      await withDisabledIntervals(() =>
+        withSuccessfulHttps(async () => {
+          const extension = loadExtensionWithMockedVscode(mocked.vscode);
+          const context = createExtensionContext(mocked);
+          await extension.activate(context);
+
+          const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
+          const [localItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
+            .filter((item) => item.account.name === "local-user" && item.account.source === "local");
+
+          await mocked.registeredCommands.get("codex-account-switch.useAccount")(localItem);
+
+          const cloudAuth = readCloudAccount(
+            mocked.config,
+            "sync-user",
+            "manual-passphrase"
+          );
+          assert.equal(cloudAuth.tokens.access_token, "access-cloud-saved");
+          assert.equal(cloudAuth.tokens.refresh_token, "refresh-cloud-saved");
+          assert.equal(mocked.config.syncedStorage.accounts["sync-user"].entryVersion, 6);
+          assert.equal(mocked.config.syncedStorage.accounts["sync-user"].updatedAt, "2026-05-01T00:00:00.000Z");
+
+          for (const subscription of context.subscriptions.reverse()) {
+            subscription?.dispose?.();
+          }
+          await waitForRefreshCoordinatorIdle(context);
+        })
+      );
+    });
   } finally {
     core.setSavedAuthPassphrase(null);
     core.setNamedAuthDir(undefined);
@@ -4203,7 +4595,7 @@ test("stale cloud provider marker self-heals before switching account", async (t
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
         }
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
       })
     );
   } finally {
@@ -4326,7 +4718,7 @@ test("stale cloud provider marker self-heals before switching to another provide
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
         }
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
       })
     );
   } finally {
@@ -4446,7 +4838,7 @@ test("stale cloud account marker self-heals before switching account", async (t)
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
         }
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
       })
     );
   } finally {
@@ -4544,7 +4936,7 @@ test("deleted cloud account marker is not auto-healed before switching account",
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
         }
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
       })
     );
   } finally {
@@ -4657,7 +5049,7 @@ test("current cloud marker does not prompt when already up to date", async (t) =
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
         }
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
       })
     );
   } finally {
@@ -4744,7 +5136,7 @@ test("manual refresh still updates cloud tokens when automatic sync is disabled"
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
         }
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
       })
     );
   } finally {
@@ -4806,7 +5198,7 @@ test("timer maintenance refreshes local tokens when remaining validity is below 
         const extension = loadExtensionWithMockedVscode(mocked.vscode);
         const context = createExtensionContext(mocked);
         await extension.activate(context);
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
         requestLog.length = 0;
 
         const refreshCoordinator = getRefreshCoordinator(context);
@@ -4815,7 +5207,7 @@ test("timer maintenance refreshes local tokens when remaining validity is below 
         refreshCoordinator.scheduleQuotaRefresh({
           reason: "timer",
         });
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
 
         assert.equal(countAuthRefreshRequests(requestLog), 1);
 
@@ -4903,7 +5295,7 @@ test("timer maintenance refreshes cloud tokens on the selected auto-refresh devi
           const extension = loadExtensionWithMockedVscode(mocked.vscode);
           const context = createExtensionContext(mocked);
           await extension.activate(context);
-          await waitForBackgroundWork();
+          await waitForRefreshCoordinatorIdle(context);
           requestLog.length = 0;
 
           const refreshCoordinator = getRefreshCoordinator(context);
@@ -4912,7 +5304,7 @@ test("timer maintenance refreshes cloud tokens on the selected auto-refresh devi
           refreshCoordinator.scheduleQuotaRefresh({
             reason: "timer",
           });
-          await waitForBackgroundWork();
+          await waitForRefreshCoordinatorIdle(context);
 
           assert.equal(countAuthRefreshRequests(requestLog), 1);
 
@@ -5003,7 +5395,7 @@ test("timer maintenance skips cloud token refresh on a non-selected device", asy
           const extension = loadExtensionWithMockedVscode(mocked.vscode);
           const context = createExtensionContext(mocked);
           await extension.activate(context);
-          await waitForBackgroundWork();
+          await waitForRefreshCoordinatorIdle(context);
           requestLog.length = 0;
 
           const refreshCoordinator = getRefreshCoordinator(context);
@@ -5012,7 +5404,7 @@ test("timer maintenance skips cloud token refresh on a non-selected device", asy
           refreshCoordinator.scheduleQuotaRefresh({
             reason: "timer",
           });
-          await waitForBackgroundWork();
+          await waitForRefreshCoordinatorIdle(context);
 
           assert.equal(countAuthRefreshRequests(requestLog), 0);
 
@@ -5089,7 +5481,7 @@ test("timer quota refresh leaves local tokens unchanged when the refresh token e
         const extension = loadExtensionWithMockedVscode(mocked.vscode);
         const context = createExtensionContext(mocked);
         await extension.activate(context);
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
         requestLog.length = 0;
 
         const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
@@ -5173,7 +5565,7 @@ test("timer quota refresh leaves local tokens unchanged when the access token ex
         const extension = loadExtensionWithMockedVscode(mocked.vscode);
         const context = createExtensionContext(mocked);
         await extension.activate(context);
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
         requestLog.length = 0;
 
         const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
@@ -5257,7 +5649,7 @@ test("timer quota refresh leaves local tokens unchanged when the access token is
         const extension = loadExtensionWithMockedVscode(mocked.vscode);
         const context = createExtensionContext(mocked);
         await extension.activate(context);
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
         requestLog.length = 0;
 
         const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
@@ -5342,7 +5734,7 @@ test("timer quota refresh keeps the local account unchanged", async (t) => {
         const extension = loadExtensionWithMockedVscode(mocked.vscode);
         const context = createExtensionContext(mocked);
         await extension.activate(context);
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
         requestLog.length = 0;
 
         const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
@@ -5440,7 +5832,7 @@ test("timer quota refresh leaves cloud tokens unchanged when the refresh token e
           const extension = loadExtensionWithMockedVscode(mocked.vscode);
           const context = createExtensionContext(mocked);
           await extension.activate(context);
-          await waitForBackgroundWork();
+          await waitForRefreshCoordinatorIdle(context);
           requestLog.length = 0;
 
           const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
@@ -5541,7 +5933,7 @@ test("timer quota refresh leaves cloud tokens unchanged when the access token ex
           const extension = loadExtensionWithMockedVscode(mocked.vscode);
           const context = createExtensionContext(mocked);
           await extension.activate(context);
-          await waitForBackgroundWork();
+          await waitForRefreshCoordinatorIdle(context);
           requestLog.length = 0;
 
           const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
@@ -5642,7 +6034,7 @@ test("timer quota refresh leaves cloud tokens unchanged when the access token is
           const extension = loadExtensionWithMockedVscode(mocked.vscode);
           const context = createExtensionContext(mocked);
           await extension.activate(context);
-          await waitForBackgroundWork();
+          await waitForRefreshCoordinatorIdle(context);
           requestLog.length = 0;
 
           const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
@@ -5743,7 +6135,7 @@ test("quota refresh does not refresh expired cloud access tokens", async (t) => 
           const extension = loadExtensionWithMockedVscode(mocked.vscode);
           const context = createExtensionContext(mocked);
           await extension.activate(context);
-          await waitForBackgroundWork();
+          await waitForRefreshCoordinatorIdle(context);
 
           const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
           const [cloudItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
@@ -5839,7 +6231,7 @@ test("quota refresh does not update cloud auth even when sync metadata already e
         const extension = loadExtensionWithMockedVscode(mocked.vscode);
         const context = createExtensionContext(mocked);
         await extension.activate(context);
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
 
         const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
         const [cloudItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
@@ -5928,7 +6320,7 @@ test("activate registers the current device once when synced cloud state exists"
           const extension = loadExtensionWithMockedVscode(mocked.vscode);
           const context = createExtensionContext(mocked);
           await extension.activate(context);
-          await waitForBackgroundWork();
+          await waitForRefreshCoordinatorIdle(context);
 
           assert.deepEqual(mocked.config.syncedStorage.devices, [currentDeviceName]);
           assert.equal(mocked.config.syncedStorage.autoRefreshDeviceName, null);
@@ -5940,7 +6332,7 @@ test("activate registers the current device once when synced cloud state exists"
           const extensionAgain = loadExtensionWithMockedVscode(mocked.vscode);
           const contextAgain = createExtensionContext(mocked);
           await extensionAgain.activate(contextAgain);
-          await waitForBackgroundWork();
+          await waitForRefreshCoordinatorIdle(contextAgain);
 
           assert.deepEqual(mocked.config.syncedStorage.devices, [currentDeviceName]);
 
@@ -5993,7 +6385,7 @@ test("activate does not create a synced device entry when synced cloud state is 
         const extension = loadExtensionWithMockedVscode(mocked.vscode);
         const context = createExtensionContext(mocked);
         await extension.activate(context);
-        await waitForBackgroundWork();
+        await waitForRefreshCoordinatorIdle(context);
 
         assert.deepEqual(mocked.config.syncedStorage.devices, []);
         assert.equal(mocked.config.syncedStorage.autoRefreshDeviceName, null);
@@ -6076,7 +6468,7 @@ test("activate appends the current synced device without mutating cloud auth", a
           const extension = loadExtensionWithMockedVscode(mocked.vscode);
           const context = createExtensionContext(mocked);
           await extension.activate(context);
-          await waitForBackgroundWork();
+          await waitForRefreshCoordinatorIdle(context);
 
           const cloudAuth = readCloudAccount(
             mocked.config,
@@ -6166,7 +6558,7 @@ test("quota refresh preserves cloud auth when a synced device is explicitly sele
           const extension = loadExtensionWithMockedVscode(mocked.vscode);
           const context = createExtensionContext(mocked);
           await extension.activate(context);
-          await waitForBackgroundWork();
+          await waitForRefreshCoordinatorIdle(context);
 
           const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
           const [cloudItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
@@ -6268,7 +6660,7 @@ test("manual cloud token refresh is blocked when this device is not selected for
           const extension = loadExtensionWithMockedVscode(mocked.vscode);
           const context = createExtensionContext(mocked);
           await extension.activate(context);
-          await waitForBackgroundWork();
+          await waitForRefreshCoordinatorIdle(context);
 
           let cloudAuth = readCloudAccount(
             mocked.config,
@@ -6303,7 +6695,7 @@ test("manual cloud token refresh is blocked when this device is not selected for
           for (const subscription of context.subscriptions.reverse()) {
             subscription?.dispose?.();
           }
-          await waitForBackgroundWork();
+          await waitForRefreshCoordinatorIdle(context);
         })
       );
     });
@@ -6385,7 +6777,7 @@ test("invalid selected auto-refresh device is not replaced when quota refresh do
           const extension = loadExtensionWithMockedVscode(mocked.vscode);
           const context = createExtensionContext(mocked);
           await extension.activate(context);
-          await waitForBackgroundWork();
+          await waitForRefreshCoordinatorIdle(context);
 
           const cloudAuth = readCloudAccount(
             mocked.config,

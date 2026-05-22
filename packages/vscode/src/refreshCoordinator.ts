@@ -130,8 +130,42 @@ export class RefreshCoordinator implements vscode.Disposable {
       clearTimeout(this.scheduledTimer);
       this.scheduledTimer = undefined;
     }
+    this.clearPendingQuotaRefresh();
     this.configListener?.dispose();
     this.configListener = undefined;
+  }
+
+  async flushScheduledRefresh(): Promise<void> {
+    while (this.scheduledTimer || this.runningRefresh || this.hasPendingQuotaRefresh()) {
+      if (this.scheduledTimer) {
+        clearTimeout(this.scheduledTimer);
+        this.scheduledTimer = undefined;
+      }
+
+      if (this.runningRefresh) {
+        await this.runningRefresh;
+        continue;
+      }
+
+      if (!this.hasPendingQuotaRefresh()) {
+        return;
+      }
+
+      const refreshPromise = this.flushQuotaRefresh();
+      this.runningRefresh = refreshPromise;
+      try {
+        await refreshPromise;
+      } finally {
+        this.runningRefresh = null;
+        if (this.hasPendingQuotaRefresh()) {
+          this.ensureScheduled();
+        }
+      }
+    }
+  }
+
+  async whenIdle(): Promise<void> {
+    await this.flushScheduledRefresh();
   }
 
   private restartAutoRefreshTimer(): void {
@@ -185,6 +219,16 @@ export class RefreshCoordinator implements vscode.Disposable {
     }
   }
 
+  private hasPendingQuotaRefresh(): boolean {
+    return this.pendingFullRefresh || this.pendingAutoRefresh || this.pendingTargetIds.size > 0;
+  }
+
+  private clearPendingQuotaRefresh(): void {
+    this.pendingFullRefresh = false;
+    this.pendingAutoRefresh = false;
+    this.pendingTargetIds.clear();
+  }
+
   private ensureScheduled(): void {
     if (this.scheduledTimer || this.runningRefresh) {
       return;
@@ -192,26 +236,17 @@ export class RefreshCoordinator implements vscode.Disposable {
 
     this.scheduledTimer = setTimeout(() => {
       this.scheduledTimer = undefined;
-      void this.flushQuotaRefresh();
+      void this.flushScheduledRefresh();
     }, 0);
   }
 
   private async flushQuotaRefresh(): Promise<void> {
     const perf = startPerformanceLog(LOG_PREFIX, "refreshCoordinator.flushQuotaRefresh");
-    if (this.runningRefresh) {
-      perf.finish({
-        result: "already-running",
-      });
-      return;
-    }
-
     const pendingReason = this.pendingReason;
     const pendingFullRefresh = this.pendingFullRefresh;
     const pendingAutoRefresh = this.pendingAutoRefresh;
     const explicitTargetIds = this.pendingTargetIds.size > 0 ? [...this.pendingTargetIds] : undefined;
-    this.pendingFullRefresh = false;
-    this.pendingAutoRefresh = false;
-    this.pendingTargetIds.clear();
+    this.clearPendingQuotaRefresh();
     perf.mark("drain-pending-queue", {
       targetCount: explicitTargetIds?.length ?? null,
       reason: pendingReason,
@@ -340,15 +375,8 @@ export class RefreshCoordinator implements vscode.Disposable {
           reason: pendingReason,
           refreshId,
         });
-      })
-      .finally(() => {
-        this.runningRefresh = null;
-        if (this.pendingFullRefresh || this.pendingAutoRefresh || this.pendingTargetIds.size > 0) {
-          this.ensureScheduled();
-        }
       });
 
-    this.runningRefresh = refreshPromise;
     await refreshPromise;
 
     if (!shouldEvaluateAutoSwitch || !currentSelectionAccount || !currentSelectionQuotaPromise) {

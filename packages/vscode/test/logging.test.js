@@ -272,14 +272,51 @@ function makeAuthFile(accountId, options = {}) {
 async function withDisabledIntervals(fn) {
   const originalSetInterval = global.setInterval;
   const originalClearInterval = global.clearInterval;
+  const originalSetTimeout = global.setTimeout;
+  const originalClearTimeout = global.clearTimeout;
+  const zeroTimeouts = [];
   global.setInterval = () => ({ __mockInterval: true });
   global.clearInterval = () => {};
+  global.setTimeout = (callback, delay, ...args) => {
+    if (delay === 0) {
+      const handle = {
+        __mockTimeout: true,
+        callback,
+        args,
+        cleared: false,
+      };
+      zeroTimeouts.push(handle);
+      return handle;
+    }
+    return originalSetTimeout(callback, delay, ...args);
+  };
+  global.clearTimeout = (handle) => {
+    if (handle?.__mockTimeout) {
+      handle.cleared = true;
+      return;
+    }
+    return originalClearTimeout(handle);
+  };
+
+  const flushTimers = async () => {
+    while (true) {
+      const handle = zeroTimeouts.find((timer) => !timer.cleared);
+      if (!handle) {
+        return;
+      }
+      handle.cleared = true;
+      handle.callback(...handle.args);
+      await Promise.resolve();
+    }
+  };
 
   try {
-    return await fn();
+    return await fn({ flushTimers });
   } finally {
     global.setInterval = originalSetInterval;
     global.clearInterval = originalClearInterval;
+    global.setTimeout = originalSetTimeout;
+    global.clearTimeout = originalClearTimeout;
   }
 }
 

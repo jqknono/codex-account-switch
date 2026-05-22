@@ -23,6 +23,8 @@ interface QuotaState {
   loading: boolean;
   error: boolean;
   updatedAt: number | null;
+  cached?: boolean;
+  cacheMessage?: string;
   reloginRequired?: boolean;
   reloginMessage?: string;
 }
@@ -30,6 +32,7 @@ interface QuotaState {
 interface QuotaResultFallbackMetadata {
   fallbackErrorMessage?: string;
   fallbackReloginRequired?: boolean;
+  usedCachedQuota?: boolean;
 }
 
 export type AccountTreeNode = AccountGroupItem | AccountTreeItem | AccountDetailItem;
@@ -83,6 +86,10 @@ function getQuotaStateReloginMessage(quotaState: QuotaState | undefined): string
 
 function isQuotaStateFailed(quotaState: QuotaState | undefined): boolean {
   return Boolean(quotaState && !quotaState.loading && (quotaState.error || quotaState.info?.unavailableReason));
+}
+
+function isQuotaStateCached(quotaState: QuotaState | undefined): boolean {
+  return Boolean(quotaState && !quotaState.loading && !isQuotaStateFailed(quotaState) && quotaState.cached);
 }
 
 function formatResetTime(resetsAt: Date | null): string | null {
@@ -261,9 +268,7 @@ export class AccountTreeItem extends vscode.TreeItem {
           ? "accountCloud"
           : "accountLocal";
 
-    if (account.isCurrent) {
-      this.iconPath = new vscode.ThemeIcon("pass-filled", new vscode.ThemeColor("charts.green"));
-    } else if (reloginMessage) {
+    if (reloginMessage) {
       this.iconPath = new vscode.ThemeIcon("sign-in", new vscode.ThemeColor("errorForeground"));
     } else if (account.storageState === "locked") {
       this.iconPath = new vscode.ThemeIcon("lock");
@@ -274,6 +279,13 @@ export class AccountTreeItem extends vscode.TreeItem {
         account.isCurrent ? "pass-filled" : "account",
         new vscode.ThemeColor("errorForeground"),
       );
+    } else if (isQuotaStateCached(quotaState)) {
+      this.iconPath = new vscode.ThemeIcon(
+        account.isCurrent ? "pass-filled" : "account",
+        new vscode.ThemeColor("editorWarning.foreground"),
+      );
+    } else if (account.isCurrent) {
+      this.iconPath = new vscode.ThemeIcon("pass-filled", new vscode.ThemeColor("charts.green"));
     } else {
       this.iconPath = new vscode.ThemeIcon("account");
     }
@@ -319,6 +331,8 @@ export class AccountTreeItem extends vscode.TreeItem {
       appendQuotaTooltip(tooltipLines, quotaState.info);
       if (quotaState.info.unavailableReason) {
         tooltipLines.push(`Quota: ${quotaState.info.unavailableReason.message}`);
+      } else if (quotaState.cached) {
+        tooltipLines.push(quotaState.cacheMessage ?? "Quota: Showing cached data");
       }
     } else if (quotaState?.error) {
       tooltipLines.push("Quota: Failed to load");
@@ -404,6 +418,8 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
           error: false,
           loading: true,
           updatedAt: previous?.updatedAt ?? null,
+          cached: false,
+          cacheMessage: undefined,
         });
       }
       perf.mark("set-loading-state");
@@ -468,6 +484,7 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
 
           const previous = this.quotaState.get(account.id);
           const fallback = result as QuotaResultFallbackMetadata;
+          const usedCachedQuota = result.kind === "ok" && fallback.usedCachedQuota === true;
           const reloginRequired =
             result.kind === "ok"
               ? isQuotaInfoReloginRequired(result.info) || fallback.fallbackReloginRequired === true
@@ -477,6 +494,12 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
             error: result.kind !== "ok",
             loading: false,
             updatedAt: result.kind === "ok" ? Date.now() : previous?.updatedAt ?? null,
+            cached: usedCachedQuota,
+            cacheMessage: usedCachedQuota
+              ? fallback.fallbackErrorMessage
+                ? `Quota: Showing cached data; latest refresh failed: ${fallback.fallbackErrorMessage}`
+                : "Quota: Showing cached data"
+              : undefined,
             reloginRequired,
             reloginMessage: reloginRequired ? RELOGIN_REQUIRED_MESSAGE : undefined,
           });
@@ -513,6 +536,8 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
             error: true,
             loading: false,
             updatedAt: previous?.updatedAt ?? null,
+            cached: false,
+            cacheMessage: undefined,
             reloginRequired,
             reloginMessage: reloginRequired ? RELOGIN_REQUIRED_MESSAGE : previous?.reloginMessage,
           });
@@ -624,6 +649,8 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
         error: previous?.error ?? false,
         loading: false,
         updatedAt: previous?.updatedAt ?? null,
+        cached: previous?.cached ?? false,
+        cacheMessage: previous?.cacheMessage,
         reloginRequired: true,
         reloginMessage: message,
       });
@@ -663,6 +690,8 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
         error: false,
         loading: false,
         updatedAt: cached.queriedAtMs,
+        cached: true,
+        cacheMessage: "Quota: Showing cached data",
         reloginRequired: false,
       });
     }
@@ -840,6 +869,17 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
       unavailableItem.iconPath = new vscode.ThemeIcon("warning", new vscode.ThemeColor("errorForeground"));
       items.push(unavailableItem);
       return items;
+    }
+
+    if (quotaState.cached) {
+      const cacheItem = new AccountDetailItem(
+        "Quota freshness",
+        "Cached",
+        quotaState.cacheMessage ?? "Quota data came from cache",
+        parent
+      );
+      cacheItem.iconPath = new vscode.ThemeIcon("warning", new vscode.ThemeColor("editorWarning.foreground"));
+      items.push(cacheItem);
     }
 
     if (info.primaryWindow) {

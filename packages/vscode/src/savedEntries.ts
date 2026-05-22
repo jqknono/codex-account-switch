@@ -49,6 +49,7 @@ export type StorageSource = "local" | "cloud";
 export type SaveTarget = StorageSource;
 const LOG_PREFIX = "[codex-account-switch:vscode:savedEntries]";
 const SYNCED_CLOUD_STATE_KEY = "codex-account-switch.syncedCloudState.v1";
+const SYNCED_CLOUD_ACCOUNT_KEY_PREFIX = "codex-account-switch.syncedCloudAccount.v1.";
 const SYNCED_CLOUD_MIGRATION_KEY = "codex-account-switch.syncedCloudStateMigration.v1";
 
 export interface SavedAccountInfo {
@@ -184,6 +185,7 @@ interface SavedAccountQuotaQueryOptions {
 interface SyncedStorageData {
   version: 1;
   accounts: Record<string, unknown>;
+  accountNames: string[];
   providers: Record<string, unknown>;
   devices: string[];
   autoRefreshDeviceName: string | null;
@@ -247,9 +249,15 @@ function normalizeSyncedStorage(raw: unknown): SyncedStorageData {
     return getDefaultSyncedStorage();
   }
 
+  const accounts = isRecord(raw.accounts) ? clone(raw.accounts) : {};
+  const accountNames = normalizeDeviceNames([
+    ...Object.keys(accounts),
+    ...(Array.isArray(raw.accountNames) ? raw.accountNames : []),
+  ]);
   return {
     version: 1,
-    accounts: isRecord(raw.accounts) ? clone(raw.accounts) : {},
+    accounts,
+    accountNames,
     providers: isRecord(raw.providers) ? clone(raw.providers) : {},
     devices: normalizeDeviceNames(raw.devices),
     autoRefreshDeviceName: getNormalizedAutoRefreshDeviceName(raw.autoRefreshDeviceName),
@@ -469,6 +477,7 @@ function getDefaultSyncedStorage(): SyncedStorageData {
   return {
     version: 1,
     accounts: {},
+    accountNames: [],
     providers: {},
     devices: [],
     autoRefreshDeviceName: null,
@@ -489,11 +498,95 @@ async function setSyncedCloudMigrationState(state: SyncedCloudMigrationState): P
 
 function readSyncedStorage(): SyncedStorageData {
   const raw = requireContext().globalState.get<unknown>(SYNCED_CLOUD_STATE_KEY);
-  return normalizeSyncedStorage(raw);
+  const storage = normalizeSyncedStorage(raw);
+  const accounts: Record<string, unknown> = {};
+  for (const name of storage.accountNames) {
+    const account = requireContext().globalState.get<unknown>(getSyncedCloudAccountKey(name));
+    if (account !== undefined) {
+      accounts[name] = clone(account);
+      continue;
+    }
+    if (name in storage.accounts) {
+      accounts[name] = storage.accounts[name];
+    }
+  }
+  for (const [name, account] of Object.entries(storage.accounts)) {
+    if (!(name in accounts)) {
+      accounts[name] = account;
+    }
+  }
+  return {
+    ...storage,
+    accounts,
+    accountNames: Object.keys(accounts).sort(),
+  };
 }
 
 async function writeSyncedStorage(data: SyncedStorageData): Promise<void> {
-  await requireContext().globalState.update(SYNCED_CLOUD_STATE_KEY, clone(data));
+  await writeSyncedCloudStateIndex(data);
+}
+
+function getSyncedCloudAccountKey(name: string): string {
+  return `${SYNCED_CLOUD_ACCOUNT_KEY_PREFIX}${encodeURIComponent(name)}`;
+}
+
+function getSyncedCloudSyncKeys(accountNames: string[]): string[] {
+  return [
+    SYNCED_CLOUD_STATE_KEY,
+    ...normalizeDeviceNames(accountNames).sort().map(getSyncedCloudAccountKey),
+  ];
+}
+
+function setSyncedCloudSyncKeys(accountNames: string[]): void {
+  requireContext().globalState.setKeysForSync(getSyncedCloudSyncKeys(accountNames));
+}
+
+function toSyncedCloudStateIndex(data: SyncedStorageData): SyncedStorageData {
+  const accountNames = Object.keys(data.accounts).sort();
+  return {
+    version: 1,
+    accounts: {},
+    accountNames,
+    providers: clone(data.providers),
+    devices: [...data.devices],
+    autoRefreshDeviceName: data.autoRefreshDeviceName,
+  };
+}
+
+async function writeSyncedCloudStateIndex(data: SyncedStorageData): Promise<void> {
+  const index = toSyncedCloudStateIndex(data);
+  await requireContext().globalState.update(SYNCED_CLOUD_STATE_KEY, index);
+  setSyncedCloudSyncKeys(index.accountNames);
+}
+
+async function writeFullSyncedStorage(data: SyncedStorageData): Promise<void> {
+  for (const [name, account] of Object.entries(data.accounts)) {
+    await requireContext().globalState.update(getSyncedCloudAccountKey(name), clone(account));
+  }
+  await writeSyncedCloudStateIndex(data);
+}
+
+async function writeSyncedCloudAccount(name: string, value: Record<string, unknown>): Promise<void> {
+  const storage = readSyncedStorage();
+  storage.accounts[name] = clone(value);
+  await requireContext().globalState.update(getSyncedCloudAccountKey(name), clone(value));
+  await writeSyncedCloudStateIndex(storage);
+}
+
+async function removeSyncedCloudAccount(name: string): Promise<void> {
+  const storage = readSyncedStorage();
+  delete storage.accounts[name];
+  await requireContext().globalState.update(getSyncedCloudAccountKey(name), undefined);
+  await writeSyncedCloudStateIndex(storage);
+}
+
+async function renameSyncedCloudAccount(oldName: string, newName: string, value: Record<string, unknown>): Promise<void> {
+  const storage = readSyncedStorage();
+  delete storage.accounts[oldName];
+  storage.accounts[newName] = clone(value);
+  await requireContext().globalState.update(getSyncedCloudAccountKey(oldName), undefined);
+  await requireContext().globalState.update(getSyncedCloudAccountKey(newName), clone(value));
+  await writeSyncedCloudStateIndex(storage);
 }
 
 async function clearLegacySyncedStorage(): Promise<void> {
@@ -502,7 +595,7 @@ async function clearLegacySyncedStorage(): Promise<void> {
 
 export async function initializeSavedEntries(context: vscode.ExtensionContext): Promise<void> {
   extensionContext = context;
-  context.globalState.setKeysForSync([SYNCED_CLOUD_STATE_KEY]);
+  setSyncedCloudSyncKeys(readSyncedStorage().accountNames);
 
   const existingGlobalState = context.globalState.get<unknown>(SYNCED_CLOUD_STATE_KEY);
   if (existingGlobalState !== undefined) {
@@ -530,7 +623,7 @@ export async function initializeSavedEntries(context: vscode.ExtensionContext): 
     return;
   }
 
-  await writeSyncedStorage(legacy);
+  await writeFullSyncedStorage(legacy);
 
   let legacyCleanupSucceeded = false;
   try {
@@ -1133,10 +1226,10 @@ async function writeCloudAccountWithExpectedVersion(
     );
   }
   const nextMetadata = nextSyncMetadata(currentMetadata);
-  storage.accounts[name] = applySyncMetadata(serializeSavedValue("saved_auth", auth as Record<string, unknown>, {
+  const nextAccount = applySyncMetadata(serializeSavedValue("saved_auth", auth as Record<string, unknown>, {
     requireEncryption: true,
   }), nextMetadata);
-  await writeSyncedStorage(storage);
+  await writeSyncedCloudAccount(name, nextAccount);
   return {
     success: true,
     message: `Account "${name}" was saved to cloud storage`,
@@ -1210,7 +1303,7 @@ async function renameCloudAccountEntry(
 
   const nextMetadata = nextSyncMetadata(currentMetadata);
   const currentRaw = storage.accounts[account.name];
-  storage.accounts[newName] = isRecord(currentRaw)
+  const nextAccount = isRecord(currentRaw)
     ? applySyncMetadata(clone(currentRaw), nextMetadata)
     : applySyncMetadata(
         serializeSavedValue("saved_auth", (account.auth ?? {}) as Record<string, unknown>, {
@@ -1218,8 +1311,7 @@ async function renameCloudAccountEntry(
         }),
         nextMetadata,
       );
-  delete storage.accounts[account.name];
-  await writeSyncedStorage(storage);
+  await renameSyncedCloudAccount(account.name, newName, nextAccount);
 
   const marker = getMarker();
   if (marker?.kind === "account" && marker.source === "cloud" && marker.name === account.name) {
@@ -1251,8 +1343,7 @@ async function removeCloudAccountEntry(
   if (hasSyncConflict(expected.entryVersion, currentMetadata)) {
     return formatConflictResult(buildConflict("account", name, expected, currentMetadata));
   }
-  delete storage.accounts[name];
-  await writeSyncedStorage(storage);
+  await removeSyncedCloudAccount(name);
   return { success: true, message: `Account "${name}" was removed` };
 }
 
@@ -1284,6 +1375,15 @@ export async function syncCurrentAuthToSavedSelection(): Promise<SyncCurrentSele
   if (marker.kind === "account") {
     const auth = readCurrentAuth();
     if (auth && hasAccountAuthTokens(auth)) {
+      const account = getSavedAccountEntry(marker.name, "cloud");
+      if (account?.autoRefreshAllowed === false) {
+        logInfo(LOG_PREFIX, "skip-current-cloud-account-sync-device-authority", {
+          account: marker.name,
+          effectiveAutoRefreshDeviceName: account.effectiveAutoRefreshDeviceName,
+          currentDeviceName: account.currentDeviceName,
+        });
+        return healedMarker ? { success: true, healedMarker } : { success: true };
+      }
       const result = await persistCloudAccountAuth(
         marker.name,
         auth,
