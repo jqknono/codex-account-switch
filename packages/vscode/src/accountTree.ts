@@ -81,6 +81,10 @@ function getQuotaStateReloginMessage(quotaState: QuotaState | undefined): string
   return null;
 }
 
+function isQuotaStateFailed(quotaState: QuotaState | undefined): boolean {
+  return Boolean(quotaState && !quotaState.loading && (quotaState.error || quotaState.info?.unavailableReason));
+}
+
 function formatResetTime(resetsAt: Date | null): string | null {
   if (!resetsAt) return null;
   const secs = Math.floor((resetsAt.getTime() - Date.now()) / 1000);
@@ -265,6 +269,11 @@ export class AccountTreeItem extends vscode.TreeItem {
       this.iconPath = new vscode.ThemeIcon("lock");
     } else if (account.storageState === "invalid") {
       this.iconPath = new vscode.ThemeIcon("warning", new vscode.ThemeColor("errorForeground"));
+    } else if (isQuotaStateFailed(quotaState)) {
+      this.iconPath = new vscode.ThemeIcon(
+        account.isCurrent ? "pass-filled" : "account",
+        new vscode.ThemeColor("errorForeground"),
+      );
     } else {
       this.iconPath = new vscode.ThemeIcon("account");
     }

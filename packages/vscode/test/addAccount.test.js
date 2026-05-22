@@ -2586,6 +2586,8 @@ test("account tree keeps quota failures inside their source group", async (t) =>
           provider.getChildren(groups[0]).map((item) => item.account.name).sort(),
           ["local-fail", "local-ok"]
         );
+        const failedLocalItem = provider.getChildren(groups[0]).find((item) => item.account.name === "local-fail");
+        assert.equal(failedLocalItem?.iconPath?.color?.id, "errorForeground");
         assert.deepEqual(provider.getChildren(groups[1]).map((item) => item.account.name), ["cloud-ok"]);
 
         for (const subscription of context.subscriptions.reverse()) {
