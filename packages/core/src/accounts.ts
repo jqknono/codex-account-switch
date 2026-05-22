@@ -67,9 +67,7 @@ export interface SavedAccountOperationOptions {
   persistUpdatedAuth?: (context: SavedAccountPersistContext) => void | Promise<void>;
 }
 
-export interface AccountQuotaQueryOptions extends QuotaPerformanceOptions {
-  syncCurrentAuthBeforeRead?: boolean;
-}
+export interface AccountQuotaQueryOptions extends QuotaPerformanceOptions, SavedAccountOperationOptions {}
 
 const ACCOUNT_LOCK_TIMEOUT_MS = 30 * 1000;
 const ACCOUNT_LOCK_RETRY_MS = 100;
@@ -760,11 +758,38 @@ export async function queryQuota(name?: string, options: AccountQuotaQueryOption
         return target;
       }
 
-      const { auth, displayName } = target;
-      const info = await getQuotaInfo(auth, options);
+      const { auth, authPath, displayName, shouldSyncCurrentAuth } = target;
+      const persistUpdatedAuth = async (): Promise<void> => {
+        if (options.persistUpdatedAuth) {
+          await options.persistUpdatedAuth({
+            auth,
+            authPath,
+            displayName,
+            shouldSyncCurrentAuth,
+          });
+        } else {
+          if (authPath) {
+            writeSavedAuthFile(authPath, auth);
+          }
+          if (!authPath || shouldSyncCurrentAuth) {
+            writeCurrentAuth(auth);
+          }
+        }
+        perf.mark("persist-updated-auth", {
+          authPath: authPath ?? null,
+          shouldSyncCurrentAuth,
+          customPersistence: Boolean(options.persistUpdatedAuth),
+        });
+      };
+
+      const authBefore = JSON.stringify(auth);
+      const info = await getQuotaInfo(auth, persistUpdatedAuth, options);
       perf.mark("get-quota-info", {
         unavailableReason: info.unavailableReason?.code ?? null,
       });
+      if (JSON.stringify(auth) !== authBefore) {
+        await persistUpdatedAuth();
+      }
       return { kind: "ok" as const, displayName, info };
     });
 

@@ -251,6 +251,8 @@ export class AccountTreeItem extends vscode.TreeItem {
     this.contextValue =
       account.source === "cloud" && account.storageState === "locked"
         ? "accountCloudLocked"
+        : account.source === "cloud" && account.autoRefreshAllowed === false
+          ? "accountCloudNoRefreshToken"
         : account.source === "cloud"
           ? "accountCloud"
           : "accountLocal";

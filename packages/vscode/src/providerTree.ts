@@ -84,6 +84,8 @@ export class ProviderTreeItem extends vscode.TreeItem {
     if (provider.source === "cloud" && (provider.syncVersion != null || provider.syncUpdatedAt)) {
       tooltipLines.push(`Sync version: ${provider.syncVersion ?? "legacy"}`);
       tooltipLines.push(`Updated: ${provider.syncUpdatedAt ?? "unknown"}`);
+      tooltipLines.push(`Last writer device: ${provider.lastWriterDeviceName ?? "unknown"}`);
+      tooltipLines.push(`Last writer action: ${provider.lastWriterAction ?? "unknown"}`);
     }
 
     const baseUrl =
@@ -193,6 +195,24 @@ export class ProviderTreeProvider implements vscode.TreeDataProvider<ProviderTre
       );
       updatedItem.iconPath = new vscode.ThemeIcon("history");
       items.push(updatedItem);
+
+      const lastWriterDeviceItem = new ProviderDetailItem(
+        "Last writer device",
+        provider.lastWriterDeviceName ?? "unknown",
+        provider.lastWriterDeviceName ?? "unknown",
+        parent,
+      );
+      lastWriterDeviceItem.iconPath = new vscode.ThemeIcon("device-desktop");
+      items.push(lastWriterDeviceItem);
+
+      const lastWriterActionItem = new ProviderDetailItem(
+        "Last writer action",
+        provider.lastWriterAction ?? "unknown",
+        provider.lastWriterAction ?? "unknown",
+        parent,
+      );
+      lastWriterActionItem.iconPath = new vscode.ThemeIcon("history");
+      items.push(lastWriterActionItem);
     }
 
     if (provider.locked) {

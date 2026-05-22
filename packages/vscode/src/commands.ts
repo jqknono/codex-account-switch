@@ -28,8 +28,11 @@ import {
   ensureCurrentDeviceRegistered,
   getCurrentDeviceName,
   getSavedAccountEntry,
+  getSavedAccountMoveToLocalBlockReason,
+  getSavedAccountTokenRefreshBlockReason,
   getSavedCurrentSelection,
   getSavedProviderEntry,
+  HealedCloudMarker,
   listSyncedDevices,
   listSavedAccounts,
   listSavedProviders,
@@ -404,6 +407,13 @@ function getSourceLabel(source: StorageSource): string {
   return source === "cloud" ? "cloud" : "local";
 }
 
+function formatHealedMarkerMessage(healedMarker: HealedCloudMarker): string {
+  const entryType = healedMarker.kind === "provider" ? "provider" : "account";
+  return `Detected newer synced cloud ${entryType} metadata for "${healedMarker.name}". `
+    + `Refreshed the local selection marker from version ${healedMarker.previousEntryVersion ?? "unknown"} `
+    + `to ${healedMarker.currentEntryVersion ?? "unknown"} and continued switching.`;
+}
+
 function formatAccountChoice(account: SavedAccountInfo): string {
   const parts = [account.meta?.email ?? "unknown"];
   if (account.meta?.plan) {
@@ -554,6 +564,11 @@ async function pickSavedAccountsForRefreshToken(
 ): Promise<RefreshTokenSelection | undefined> {
   const existing = resolveAccountFromItem(item);
   if (existing) {
+    const blockedReason = getSavedAccountTokenRefreshBlockReason(existing);
+    if (blockedReason) {
+      vscode.window.showWarningMessage(blockedReason);
+      return undefined;
+    }
     return {
       all: false,
       accounts: [existing],
@@ -566,16 +581,22 @@ async function pickSavedAccountsForRefreshToken(
     return undefined;
   }
 
+  const refreshableAccounts = accounts.filter((account) => getSavedAccountTokenRefreshBlockReason(account) == null);
+  if (refreshableAccounts.length === 0) {
+    vscode.window.showWarningMessage("No saved accounts on this device can refresh tokens.");
+    return undefined;
+  }
+
   const items: RefreshTokenQuickPickItem[] = [
     {
       label: "All",
-      description: "Refresh token and quota for all accounts",
+      description: "Refresh token and quota for all eligible accounts",
       selection: {
         all: true,
-        accounts,
+        accounts: refreshableAccounts,
       },
     },
-    ...accounts.map((account) => ({
+    ...refreshableAccounts.map((account) => ({
       label: account.isCurrent ? `$(pass-filled) ${account.name}` : account.name,
       description: formatAccountChoice(account),
       selection: {
@@ -661,6 +682,8 @@ async function restoreProviderModeAfterFailedLogin(previousSelection: ReturnType
             profile: null,
             syncVersion: null,
             syncUpdatedAt: null,
+            lastWriterDeviceName: null,
+            lastWriterAction: null,
           },
         );
   if (!restored.success) {
@@ -1458,6 +1481,9 @@ export function registerCommands(
               source: account.source,
               email: result.meta?.email ?? null,
             });
+            if (result.healedMarker) {
+              vscode.window.showInformationMessage(formatHealedMarkerMessage(result.healedMarker));
+            }
             vscode.window.showInformationMessage(
               `✓ ${result.message} (${result.meta?.email ?? "unknown"})`
             );
@@ -1552,6 +1578,9 @@ export function registerCommands(
           provider: targetName,
           source: picked.source,
         });
+        if (result.healedMarker) {
+          vscode.window.showInformationMessage(formatHealedMarkerMessage(result.healedMarker));
+        }
         vscode.window.showInformationMessage(`✓ ${result.message}`);
         refreshAll(refreshCoordinator, undefined, {
           reason: "provider-switch",
@@ -1634,6 +1663,9 @@ export function registerCommands(
         provider: provider.name,
         source: provider.source,
       });
+      if (result.healedMarker) {
+        vscode.window.showInformationMessage(formatHealedMarkerMessage(result.healedMarker));
+      }
       vscode.window.showInformationMessage(`✓ ${result.message}`);
       refreshAll(refreshCoordinator, undefined, {
         reason: "provider-switch",
@@ -2032,6 +2064,16 @@ export function registerCommands(
           return;
         }
         perf.mark("ensure-account-available");
+        const moveToLocalBlockReason = getSavedAccountMoveToLocalBlockReason(account);
+        if (moveToLocalBlockReason) {
+          logCommandWarn("move-account-to-local", "blocked-on-non-auto-refresh-device", {
+            account: account.name,
+            currentDeviceName: account.currentDeviceName,
+            effectiveAutoRefreshDeviceName: account.effectiveAutoRefreshDeviceName,
+          });
+          vscode.window.showWarningMessage(moveToLocalBlockReason);
+          return;
+        }
         logCommandInfo("move-account-to-local", "started", {
           account: account.name,
           source: account.source,

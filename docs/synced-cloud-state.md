@@ -5,7 +5,7 @@
 | Area | Storage | Notes |
 | --- | --- | --- |
 | Cloud accounts | VS Code `globalState` synced key | Payload stays encrypted with the saved-auth passphrase. |
-| Cloud providers | VS Code `globalState` synced key | Uses the same encrypted envelope format as accounts. |
+| Cloud providers | VS Code `globalState` synced key | Uses the same encrypted envelope format as accounts, plus sync revision metadata and provider audit metadata (`lastWriterDeviceName`, `lastWriterAction`). |
 | Device list | VS Code `globalState` synced key | Shared across machines through Settings Sync. |
 | Auto-refresh device | VS Code `globalState` synced key | Controls which synced device may perform automatic cloud token refresh. |
 | Saved-auth passphrase | VS Code `SecretStorage` | Local-only secret, never synced. |
@@ -50,3 +50,16 @@ flowchart LR
 | No `globalState` change event for remote sync | Reload/activation or explicit refresh is the supported pickup boundary. |
 | Passphrase is local-only | A second machine must enter the same password before synced cloud entries can be decrypted. |
 | Envelope format must stay unchanged | `@codex-account-switch/core` remains the canonical serializer/deserializer. |
+
+## Provider Audit Metadata
+
+| Field | Scope | Meaning |
+| --- | --- | --- |
+| `lastWriterDeviceName` | Cloud provider entry | Hostname of the device that last wrote the provider entry. |
+| `lastWriterAction` | Cloud provider entry | Action that last wrote the provider entry, such as `save_provider_profile`, `sync_current_provider_auth`, or `move_provider_to_cloud`. |
+
+| Write Path | Stored `lastWriterAction` |
+| --- | --- |
+| Manual create or edit of a cloud provider profile | `save_provider_profile` |
+| Switching away from the active cloud provider and syncing its auth | `sync_current_provider_auth` |
+| Moving a local provider into cloud storage | `move_provider_to_cloud` |

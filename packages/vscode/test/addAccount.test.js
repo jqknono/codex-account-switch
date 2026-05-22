@@ -1776,7 +1776,7 @@ test("refreshToken command offers All and refreshes every saved account", async 
         (items) => {
           const allItem = items.find((item) => item.label === "All");
           assert.ok(allItem);
-          assert.equal(allItem.description, "Refresh token and quota for all accounts");
+          assert.equal(allItem.description, "Refresh token and quota for all eligible accounts");
           return allItem;
         },
       ],
@@ -3049,6 +3049,8 @@ test("stale cloud provider mutations are blocked and keep the latest synced entr
         );
         bumpedEntry.entryVersion = 2;
         bumpedEntry.updatedAt = "2026-04-02T00:00:00.000Z";
+        bumpedEntry.lastWriterDeviceName = "Dev";
+        bumpedEntry.lastWriterAction = "save_provider_profile";
         core.setSavedAuthPassphrase(null);
         mocked.config.syncedStorage.providers.proxy = bumpedEntry;
 
@@ -3059,6 +3061,8 @@ test("stale cloud provider mutations are blocked and keep the latest synced entr
         assert.equal(mocked.errorMessages.length, 0);
         assert.match(mocked.warningMessages[0]?.message ?? "", /conflict/i);
         assert.match(mocked.warningMessages[0]?.message ?? "", /current version 2/i);
+        assert.match(mocked.warningMessages[0]?.message ?? "", /Last writer device Dev/i);
+        assert.match(mocked.warningMessages[0]?.message ?? "", /last writer action save_provider_profile/i);
         assert.ok(
           mocked.executedCommands.some((command) => command.name === "workbench.action.openSettingsJson")
         );
@@ -3097,6 +3101,7 @@ test("move account to local keeps an existing local account when cloud removal c
   const codexHome = path.join(tempRoot, ".codex");
   const authDir = path.join(tempRoot, "saved-auth");
   const localAuthPath = path.join(authDir, "auth_work.json");
+  const currentDeviceName = "device-current";
   fs.mkdirSync(codexHome, { recursive: true });
   fs.mkdirSync(authDir, { recursive: true });
 
@@ -3141,51 +3146,55 @@ test("move account to local keeps an existing local account when cloud removal c
           work: initialEntry,
         },
         providers: {},
+        devices: [currentDeviceName],
+        autoRefreshDeviceName: currentDeviceName,
       },
     });
 
-    await withDisabledIntervals(() =>
-      withSuccessfulHttps(async () => {
-        const extension = loadExtensionWithMockedVscode(mocked.vscode);
-        const context = createExtensionContext(mocked);
-        await extension.activate(context);
+    await withMockedHostname(currentDeviceName, async () => {
+      await withDisabledIntervals(() =>
+        withSuccessfulHttps(async () => {
+          const extension = loadExtensionWithMockedVscode(mocked.vscode);
+          const context = createExtensionContext(mocked);
+          await extension.activate(context);
 
-        const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
-        const [cloudItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
-          .filter((item) => item.account.name === "work" && item.account.source === "cloud");
+          const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
+          const [cloudItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
+            .filter((item) => item.account.name === "work" && item.account.source === "cloud");
 
-        core.setSavedAuthPassphrase("move-local-passphrase");
-        const bumpedEntry = core.serializeSavedValue(
-          "saved_auth",
-          makeAuthFile("acct-cloud", {
-            accessToken: "access-cloud-newer",
-            refreshToken: "refresh-cloud-newer",
-          }),
-          { requireEncryption: true }
-        );
-        bumpedEntry.entryVersion = 2;
-        bumpedEntry.updatedAt = "2026-04-02T00:00:00.000Z";
-        core.setSavedAuthPassphrase(null);
-        mocked.config.syncedStorage.accounts.work = bumpedEntry;
+          core.setSavedAuthPassphrase("move-local-passphrase");
+          const bumpedEntry = core.serializeSavedValue(
+            "saved_auth",
+            makeAuthFile("acct-cloud", {
+              accessToken: "access-cloud-newer",
+              refreshToken: "refresh-cloud-newer",
+            }),
+            { requireEncryption: true }
+          );
+          bumpedEntry.entryVersion = 2;
+          bumpedEntry.updatedAt = "2026-04-02T00:00:00.000Z";
+          core.setSavedAuthPassphrase(null);
+          mocked.config.syncedStorage.accounts.work = bumpedEntry;
 
-        await mocked.registeredCommands.get("codex-account-switch.moveAccountToLocal")(cloudItem);
+          await mocked.registeredCommands.get("codex-account-switch.moveAccountToLocal")(cloudItem);
 
-        core.setNamedAuthDir(authDir);
-        const localResult = core.readSavedAuthFileResult(localAuthPath);
-        core.setNamedAuthDir(undefined);
+          core.setNamedAuthDir(authDir);
+          const localResult = core.readSavedAuthFileResult(localAuthPath);
+          core.setNamedAuthDir(undefined);
 
-        assert.equal(localResult.status, "ok");
-        assert.equal(localResult.value.tokens.access_token, "access-local-original");
-        assert.equal(localResult.value.tokens.refresh_token, "refresh-local-original");
-        assert.equal(mocked.config.syncedStorage.accounts.work.entryVersion, 2);
-        assert.match(mocked.warningMessages[0]?.message ?? "", /conflict/i);
+          assert.equal(localResult.status, "ok");
+          assert.equal(localResult.value.tokens.access_token, "access-local-original");
+          assert.equal(localResult.value.tokens.refresh_token, "refresh-local-original");
+          assert.equal(mocked.config.syncedStorage.accounts.work.entryVersion, 2);
+          assert.match(mocked.warningMessages[0]?.message ?? "", /conflict/i);
 
-        for (const subscription of context.subscriptions.reverse()) {
-          subscription?.dispose?.();
-        }
-        await waitForBackgroundWork();
-      })
-    );
+          for (const subscription of context.subscriptions.reverse()) {
+            subscription?.dispose?.();
+          }
+          await waitForBackgroundWork();
+        })
+      );
+    });
   } finally {
     core.setSavedAuthPassphrase(null);
     core.setNamedAuthDir(undefined);
@@ -3360,6 +3369,8 @@ test("cloud provider tooltip shows visible sync revision metadata", async (t) =>
     );
     syncedEntry.entryVersion = 4;
     syncedEntry.updatedAt = "2026-04-06T07:08:09.000Z";
+    syncedEntry.lastWriterDeviceName = "Dev";
+    syncedEntry.lastWriterAction = "sync_current_provider_auth";
     core.setSavedAuthPassphrase(null);
 
     const mocked = createVscodeMock({
@@ -3383,9 +3394,17 @@ test("cloud provider tooltip shows visible sync revision metadata", async (t) =>
 
         const providerTreeView = mocked.treeViews.get("codexAccountSwitchProviders");
         const [providerItem] = providerTreeView.treeDataProvider.getChildren();
+        const details = providerTreeView.treeDataProvider.getChildren(providerItem);
 
         assert.match(String(providerItem.tooltip ?? ""), /Sync version: 4/);
         assert.match(String(providerItem.tooltip ?? ""), /Updated: 2026-04-06T07:08:09.000Z/);
+        assert.match(String(providerItem.tooltip ?? ""), /Last writer device: Dev/);
+        assert.match(String(providerItem.tooltip ?? ""), /Last writer action: sync_current_provider_auth/);
+        assert.equal(details.some((item) => item.label === "Last writer device" && item.description === "Dev"), true);
+        assert.equal(
+          details.some((item) => item.label === "Last writer action" && item.description === "sync_current_provider_auth"),
+          true,
+        );
 
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
@@ -3395,6 +3414,85 @@ test("cloud provider tooltip shows visible sync revision metadata", async (t) =>
     );
   } finally {
     core.setSavedAuthPassphrase(null);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
+test("moving a local provider to cloud records provider audit metadata", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-provider-audit-move-cloud-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  const authDir = path.join(tempRoot, "saved-auth");
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(authDir, { recursive: true });
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  try {
+    core.setNamedAuthDir(authDir);
+    core.writeProviderProfile({
+      kind: "provider",
+      name: "proxy",
+      auth: { OPENAI_API_KEY: "sk-local" },
+      config: {
+        name: "proxy",
+        base_url: "https://local.example.com/v1",
+        wire_api: "responses",
+      },
+    });
+    core.setNamedAuthDir(undefined);
+
+    const mocked = createVscodeMock({
+      authDirectory: authDir,
+      secretValues: {
+        [STORAGE_SECRET_KEY]: "provider-audit-passphrase",
+      },
+    });
+
+    await withMockedHostname("AuditDevice", async () =>
+      withDisabledIntervals(() =>
+        withSuccessfulHttps(async () => {
+          const extension = loadExtensionWithMockedVscode(mocked.vscode);
+          const context = createExtensionContext(mocked);
+          await extension.activate(context);
+
+          const providerTreeView = mocked.treeViews.get("codexAccountSwitchProviders");
+          const [providerItem] = providerTreeView.treeDataProvider
+            .getChildren()
+            .filter((item) => item.provider.name === "proxy" && item.provider.source === "local");
+
+          await mocked.registeredCommands.get("codex-account-switch.moveProviderToCloud")(providerItem);
+
+          const envelope = getCloudEnvelope(mocked.config, "provider", "proxy");
+          assert.equal(envelope.entryVersion, 1);
+          assert.equal(envelope.lastWriterDeviceName, "AuditDevice");
+          assert.equal(envelope.lastWriterAction, "move_provider_to_cloud");
+
+          for (const subscription of context.subscriptions.reverse()) {
+            subscription?.dispose?.();
+          }
+          await waitForBackgroundWork();
+        })
+      )
+    );
+  } finally {
+    core.setSavedAuthPassphrase(null);
+    core.setNamedAuthDir(undefined);
     if (previousCodexHome === undefined) {
       delete process.env.CODEX_HOME;
     } else {
@@ -3501,6 +3599,7 @@ test("account migration moves saved auth between local and cloud storage", async
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-account-migration-"));
   const codexHome = path.join(tempRoot, ".codex");
   const authDir = path.join(tempRoot, "saved-auth");
+  const currentDeviceName = "device-current";
   fs.mkdirSync(codexHome, { recursive: true });
   fs.mkdirSync(authDir, { recursive: true });
 
@@ -3519,37 +3618,46 @@ test("account migration moves saved auth between local and cloud storage", async
       secretValues: {
         [STORAGE_SECRET_KEY]: "move-passphrase",
       },
+      syncedStorage: {
+        version: 1,
+        accounts: {},
+        providers: {},
+        devices: [currentDeviceName],
+        autoRefreshDeviceName: currentDeviceName,
+      },
     });
 
-    await withDisabledIntervals(() =>
-      withSuccessfulHttps(async () => {
-        const extension = loadExtensionWithMockedVscode(mocked.vscode);
-        const context = createExtensionContext(mocked);
-        await extension.activate(context);
+    await withMockedHostname(currentDeviceName, async () => {
+      await withDisabledIntervals(() =>
+        withSuccessfulHttps(async () => {
+          const extension = loadExtensionWithMockedVscode(mocked.vscode);
+          const context = createExtensionContext(mocked);
+          await extension.activate(context);
 
-        const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
-        const [localItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
-          .filter((item) => item.account.name === "work" && item.account.source === "local");
+          const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
+          const [localItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
+            .filter((item) => item.account.name === "work" && item.account.source === "local");
 
-        await mocked.registeredCommands.get("codex-account-switch.moveAccountToCloud")(localItem);
+          await mocked.registeredCommands.get("codex-account-switch.moveAccountToCloud")(localItem);
 
-        assert.equal(fs.existsSync(path.join(authDir, "auth_work.json")), false);
-        assert.equal(typeof mocked.config.syncedStorage.accounts.work?.ciphertext, "string");
+          assert.equal(fs.existsSync(path.join(authDir, "auth_work.json")), false);
+          assert.equal(typeof mocked.config.syncedStorage.accounts.work?.ciphertext, "string");
 
-        const [cloudItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
-          .filter((item) => item.account.name === "work" && item.account.source === "cloud");
+          const [cloudItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
+            .filter((item) => item.account.name === "work" && item.account.source === "cloud");
 
-        await mocked.registeredCommands.get("codex-account-switch.moveAccountToLocal")(cloudItem);
+          await mocked.registeredCommands.get("codex-account-switch.moveAccountToLocal")(cloudItem);
 
-        assert.equal(fs.existsSync(path.join(authDir, "auth_work.json")), true);
-        assert.equal(mocked.config.syncedStorage.accounts.work, undefined);
+          assert.equal(fs.existsSync(path.join(authDir, "auth_work.json")), true);
+          assert.equal(mocked.config.syncedStorage.accounts.work, undefined);
 
-        for (const subscription of context.subscriptions.reverse()) {
-          subscription?.dispose?.();
-        }
-        await waitForBackgroundWork();
-      })
-    );
+          for (const subscription of context.subscriptions.reverse()) {
+            subscription?.dispose?.();
+          }
+          await waitForBackgroundWork();
+        })
+      );
+    });
   } finally {
     core.setSavedAuthPassphrase(null);
     core.setNamedAuthDir(undefined);
@@ -3792,6 +3900,7 @@ test("hidden status bar does not add extra quota requests on activate or switch"
 test("moveAccountToLocal refreshes only the affected account quota", async (t) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-move-account-local-targeted-"));
   const codexHome = path.join(tempRoot, ".codex");
+  const currentDeviceName = "device-current";
   fs.mkdirSync(codexHome, { recursive: true });
   fs.writeFileSync(
     path.join(codexHome, "auth.json"),
@@ -3822,33 +3931,37 @@ test("moveAccountToLocal refreshes only the affected account quota", async (t) =
         }),
       },
       providers: {},
+      devices: [currentDeviceName],
+      autoRefreshDeviceName: currentDeviceName,
     },
   });
 
   try {
-    await withDisabledIntervals(() =>
-      withSuccessfulHttps(async () => {
-        const extension = loadExtensionWithMockedVscode(mocked.vscode);
-        const context = createExtensionContext(mocked);
-        await extension.activate(context);
-        await waitForBackgroundWork();
-        requestLog.length = 0;
+    await withMockedHostname(currentDeviceName, async () => {
+      await withDisabledIntervals(() =>
+        withSuccessfulHttps(async () => {
+          const extension = loadExtensionWithMockedVscode(mocked.vscode);
+          const context = createExtensionContext(mocked);
+          await extension.activate(context);
+          await waitForBackgroundWork();
+          requestLog.length = 0;
 
-        const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
-        const [cloudItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
-          .filter((item) => item.account.name === "work" && item.account.source === "cloud");
+          const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
+          const [cloudItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
+            .filter((item) => item.account.name === "work" && item.account.source === "cloud");
 
-        await mocked.registeredCommands.get("codex-account-switch.moveAccountToLocal")(cloudItem);
-        await waitForBackgroundWork();
+          await mocked.registeredCommands.get("codex-account-switch.moveAccountToLocal")(cloudItem);
+          await waitForBackgroundWork();
 
-        assert.equal(countUsageRequests(requestLog), 1);
+          assert.equal(countUsageRequests(requestLog), 1);
 
-        for (const subscription of context.subscriptions.reverse()) {
-          subscription?.dispose?.();
-        }
-        await waitForBackgroundWork();
-      }, { requestLog })
-    );
+          for (const subscription of context.subscriptions.reverse()) {
+            subscription?.dispose?.();
+          }
+          await waitForBackgroundWork();
+        }, { requestLog })
+      );
+    });
   } finally {
     core.setSavedAuthPassphrase(null);
     if (previousCodexHome === undefined) {
@@ -3958,6 +4071,586 @@ test("switching away from a cloud account syncs the current auth back to cloud s
         );
         assert.equal(cloudAuth.tokens.access_token, "access-cloud-current");
         assert.equal(cloudAuth.tokens.refresh_token, "refresh-cloud-current");
+
+        for (const subscription of context.subscriptions.reverse()) {
+          subscription?.dispose?.();
+        }
+        await waitForBackgroundWork();
+      })
+    );
+  } finally {
+    core.setSavedAuthPassphrase(null);
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
+test("stale cloud provider marker self-heals before switching account", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-provider-marker-heal-account-switch-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  const authDir = path.join(tempRoot, "saved-auth");
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(authDir, { recursive: true });
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  try {
+    core.setSavedAuthPassphrase("provider-heal-passphrase");
+    core.setNamedAuthDir(authDir);
+    core.writeSavedAuthFile(path.join(authDir, "auth_local-user.json"), makeAuthFile("acct-local"));
+    const cloudProvider = {
+      kind: "provider",
+      name: "proxy",
+      auth: { OPENAI_API_KEY: "sk-cloud-old" },
+      config: {
+        name: "proxy",
+        base_url: "https://proxy.example.com/v1",
+        wire_api: "responses",
+      },
+    };
+    const cloudEntry = core.serializeSavedValue("saved_provider", cloudProvider, {
+      requireEncryption: true,
+    });
+    cloudEntry.entryVersion = 2;
+    cloudEntry.updatedAt = "2026-04-02T00:00:00.000Z";
+    core.setSavedAuthPassphrase(null);
+    core.setNamedAuthDir(undefined);
+
+    fs.writeFileSync(
+      path.join(codexHome, "auth.json"),
+      JSON.stringify({ OPENAI_API_KEY: "sk-current-provider" }, null, 2),
+      "utf-8",
+    );
+    core.activateProviderConfig("proxy", cloudProvider.config);
+
+    const mocked = createVscodeMock({
+      authDirectory: authDir,
+      secretValues: {
+        [STORAGE_SECRET_KEY]: "provider-heal-passphrase",
+      },
+      syncedStorage: {
+        version: 1,
+        accounts: {},
+        providers: {
+          proxy: cloudEntry,
+        },
+      },
+      globalStateValues: {
+        "codex-account-switch.currentSavedSelection": {
+          kind: "provider",
+          name: "proxy",
+          source: "cloud",
+          entryVersion: 1,
+          updatedAt: "2026-04-01T00:00:00.000Z",
+        },
+      },
+    });
+
+    await withDisabledIntervals(() =>
+      withSuccessfulHttps(async () => {
+        const extension = loadExtensionWithMockedVscode(mocked.vscode);
+        const context = createExtensionContext(mocked);
+        await extension.activate(context);
+
+        const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
+        const [localItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
+          .filter((item) => item.account.name === "local-user" && item.account.source === "local");
+
+        await mocked.registeredCommands.get("codex-account-switch.useAccount")(localItem);
+
+        const savedProvider = readCloudProvider(mocked.config, "proxy", "provider-heal-passphrase");
+        assert.equal(savedProvider.auth.OPENAI_API_KEY, "sk-current-provider");
+        assert.equal(getCloudEnvelope(mocked.config, "provider", "proxy").entryVersion, 3);
+        assert.equal(mocked.warningMessages.length, 0);
+        assert.equal(mocked.errorMessages.length, 0);
+        assert.equal(
+          mocked.informationMessages.some((entry) =>
+            entry.message.includes('Detected newer synced cloud provider metadata for "proxy"')
+            && entry.message.includes("from version 1 to 2")
+          ),
+          true,
+        );
+        const lines = mocked.createdChannels.flatMap((channel) => channel.entries.map((entry) => entry.line));
+        assert.equal(
+          lines.some((line) =>
+            line.includes("reconcile-current-cloud-marker")
+            && line.includes("\"kind\":\"provider\"")
+            && line.includes("\"name\":\"proxy\"")
+            && line.includes("\"previousEntryVersion\":1")
+            && line.includes("\"currentEntryVersion\":2")
+          ),
+          true,
+        );
+
+        for (const subscription of context.subscriptions.reverse()) {
+          subscription?.dispose?.();
+        }
+        await waitForBackgroundWork();
+      })
+    );
+  } finally {
+    core.setSavedAuthPassphrase(null);
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
+test("stale cloud provider marker self-heals before switching to another provider", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-provider-marker-heal-provider-switch-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  const authDir = path.join(tempRoot, "saved-auth");
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(authDir, { recursive: true });
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  try {
+    core.setSavedAuthPassphrase("provider-heal-switch-passphrase");
+    core.setNamedAuthDir(authDir);
+    core.writeProviderProfile({
+      kind: "provider",
+      name: "local-proxy",
+      auth: { OPENAI_API_KEY: "sk-local" },
+      config: {
+        name: "local-proxy",
+        base_url: "https://local.example.com/v1",
+        wire_api: "responses",
+      },
+    });
+    const cloudProvider = {
+      kind: "provider",
+      name: "proxy",
+      auth: { OPENAI_API_KEY: "sk-cloud-old" },
+      config: {
+        name: "proxy",
+        base_url: "https://proxy.example.com/v1",
+        wire_api: "responses",
+      },
+    };
+    const cloudEntry = core.serializeSavedValue("saved_provider", cloudProvider, {
+      requireEncryption: true,
+    });
+    cloudEntry.entryVersion = 2;
+    cloudEntry.updatedAt = "2026-04-02T00:00:00.000Z";
+    core.setSavedAuthPassphrase(null);
+    core.setNamedAuthDir(undefined);
+
+    fs.writeFileSync(
+      path.join(codexHome, "auth.json"),
+      JSON.stringify({ OPENAI_API_KEY: "sk-current-provider" }, null, 2),
+      "utf-8",
+    );
+    core.activateProviderConfig("proxy", cloudProvider.config);
+
+    const mocked = createVscodeMock({
+      authDirectory: authDir,
+      secretValues: {
+        [STORAGE_SECRET_KEY]: "provider-heal-switch-passphrase",
+      },
+      syncedStorage: {
+        version: 1,
+        accounts: {},
+        providers: {
+          proxy: cloudEntry,
+        },
+      },
+      globalStateValues: {
+        "codex-account-switch.currentSavedSelection": {
+          kind: "provider",
+          name: "proxy",
+          source: "cloud",
+          entryVersion: 1,
+          updatedAt: "2026-04-01T00:00:00.000Z",
+        },
+      },
+      quickPickResponses: [
+        (items) => items.find((item) => item.provider?.name === "local-proxy"),
+      ],
+    });
+
+    await withDisabledIntervals(() =>
+      withSuccessfulHttps(async () => {
+        const extension = loadExtensionWithMockedVscode(mocked.vscode);
+        const context = createExtensionContext(mocked);
+        await extension.activate(context);
+
+        await mocked.registeredCommands.get("codex-account-switch.switchMode")();
+
+        const savedProvider = readCloudProvider(mocked.config, "proxy", "provider-heal-switch-passphrase");
+        assert.equal(savedProvider.auth.OPENAI_API_KEY, "sk-current-provider");
+        assert.equal(getCloudEnvelope(mocked.config, "provider", "proxy").entryVersion, 3);
+        assert.equal(mocked.warningMessages.length, 0);
+        assert.equal(mocked.errorMessages.length, 0);
+        assert.equal(
+          mocked.informationMessages.some((entry) =>
+            entry.message.includes('Detected newer synced cloud provider metadata for "proxy"')
+            && entry.message.includes("from version 1 to 2")
+          ),
+          true,
+        );
+
+        for (const subscription of context.subscriptions.reverse()) {
+          subscription?.dispose?.();
+        }
+        await waitForBackgroundWork();
+      })
+    );
+  } finally {
+    core.setSavedAuthPassphrase(null);
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
+test("stale cloud account marker self-heals before switching account", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-account-marker-heal-account-switch-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  const authDir = path.join(tempRoot, "saved-auth");
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(authDir, { recursive: true });
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  try {
+    core.setSavedAuthPassphrase("account-heal-passphrase");
+    core.setNamedAuthDir(authDir);
+    core.writeSavedAuthFile(path.join(authDir, "auth_local-user.json"), makeAuthFile("acct-local"));
+    const cloudEntry = core.serializeSavedValue(
+      "saved_auth",
+      makeAuthFile("acct-cloud", {
+        accessToken: "access-cloud-old",
+        refreshToken: "refresh-cloud-old",
+      }),
+      {
+        requireEncryption: true,
+      },
+    );
+    cloudEntry.entryVersion = 2;
+    cloudEntry.updatedAt = "2026-04-02T00:00:00.000Z";
+    core.setSavedAuthPassphrase(null);
+    core.setNamedAuthDir(undefined);
+
+    fs.writeFileSync(
+      path.join(codexHome, "auth.json"),
+      JSON.stringify(
+        makeAuthFile("acct-cloud", {
+          accessToken: "access-cloud-current",
+          refreshToken: "refresh-cloud-current",
+          lastRefresh: new Date().toISOString(),
+        }),
+        null,
+        2,
+      ),
+      "utf-8",
+    );
+
+    const mocked = createVscodeMock({
+      authDirectory: authDir,
+      secretValues: {
+        [STORAGE_SECRET_KEY]: "account-heal-passphrase",
+      },
+      syncedStorage: {
+        version: 1,
+        accounts: {
+          "sync-user": cloudEntry,
+        },
+        providers: {},
+      },
+      globalStateValues: {
+        "codex-account-switch.currentSavedSelection": {
+          kind: "account",
+          name: "sync-user",
+          source: "cloud",
+          entryVersion: 1,
+          updatedAt: "2026-04-01T00:00:00.000Z",
+        },
+      },
+    });
+
+    await withDisabledIntervals(() =>
+      withSuccessfulHttps(async () => {
+        const extension = loadExtensionWithMockedVscode(mocked.vscode);
+        const context = createExtensionContext(mocked);
+        await extension.activate(context);
+
+        const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
+        const [localItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
+          .filter((item) => item.account.name === "local-user" && item.account.source === "local");
+
+        await mocked.registeredCommands.get("codex-account-switch.useAccount")(localItem);
+
+        const cloudAuth = readCloudAccount(mocked.config, "sync-user", "account-heal-passphrase");
+        assert.equal(cloudAuth.tokens.access_token, "access-cloud-current");
+        assert.equal(cloudAuth.tokens.refresh_token, "refresh-cloud-current");
+        assert.equal(getCloudEnvelope(mocked.config, "account", "sync-user").entryVersion, 3);
+        assert.equal(mocked.warningMessages.length, 0);
+        assert.equal(mocked.errorMessages.length, 0);
+        assert.equal(
+          mocked.informationMessages.some((entry) =>
+            entry.message.includes('Detected newer synced cloud account metadata for "sync-user"')
+            && entry.message.includes("from version 1 to 2")
+          ),
+          true,
+        );
+
+        for (const subscription of context.subscriptions.reverse()) {
+          subscription?.dispose?.();
+        }
+        await waitForBackgroundWork();
+      })
+    );
+  } finally {
+    core.setSavedAuthPassphrase(null);
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
+test("deleted cloud account marker is not auto-healed before switching account", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-account-marker-no-heal-deleted-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  const authDir = path.join(tempRoot, "saved-auth");
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(authDir, { recursive: true });
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  try {
+    core.setNamedAuthDir(authDir);
+    core.writeSavedAuthFile(path.join(authDir, "auth_local-user.json"), makeAuthFile("acct-local"));
+    core.setNamedAuthDir(undefined);
+
+    fs.writeFileSync(
+      path.join(codexHome, "auth.json"),
+      JSON.stringify(
+        makeAuthFile("acct-cloud", {
+          accessToken: "access-cloud-current",
+          refreshToken: "refresh-cloud-current",
+          lastRefresh: new Date().toISOString(),
+        }),
+        null,
+        2,
+      ),
+      "utf-8",
+    );
+
+    const mocked = createVscodeMock({
+      authDirectory: authDir,
+      secretValues: {
+        [STORAGE_SECRET_KEY]: "deleted-account-heal-passphrase",
+      },
+      syncedStorage: {
+        version: 1,
+        accounts: {},
+        providers: {},
+      },
+      globalStateValues: {
+        "codex-account-switch.currentSavedSelection": {
+          kind: "account",
+          name: "sync-user",
+          source: "cloud",
+          entryVersion: 1,
+          updatedAt: "2026-04-01T00:00:00.000Z",
+        },
+      },
+    });
+
+    await withDisabledIntervals(() =>
+      withSuccessfulHttps(async () => {
+        const extension = loadExtensionWithMockedVscode(mocked.vscode);
+        const context = createExtensionContext(mocked);
+        await extension.activate(context);
+
+        const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
+        const [localItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
+          .filter((item) => item.account.name === "local-user" && item.account.source === "local");
+
+        await mocked.registeredCommands.get("codex-account-switch.useAccount")(localItem);
+
+        assert.equal(mocked.errorMessages.length, 0);
+        assert.match(mocked.warningMessages[0]?.message ?? "", /expected version 1/i);
+        assert.match(mocked.warningMessages[0]?.message ?? "", /current version unknown/i);
+        assert.equal(
+          mocked.informationMessages.some((entry) => entry.message.includes("Detected newer synced cloud account metadata")),
+          false,
+        );
+
+        for (const subscription of context.subscriptions.reverse()) {
+          subscription?.dispose?.();
+        }
+        await waitForBackgroundWork();
+      })
+    );
+  } finally {
+    core.setSavedAuthPassphrase(null);
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
+test("current cloud marker does not prompt when already up to date", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-account-marker-no-heal-current-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  const authDir = path.join(tempRoot, "saved-auth");
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(authDir, { recursive: true });
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  try {
+    core.setSavedAuthPassphrase("account-current-passphrase");
+    core.setNamedAuthDir(authDir);
+    core.writeSavedAuthFile(path.join(authDir, "auth_local-user.json"), makeAuthFile("acct-local"));
+    const cloudEntry = core.serializeSavedValue(
+      "saved_auth",
+      makeAuthFile("acct-cloud", {
+        accessToken: "access-cloud-old",
+        refreshToken: "refresh-cloud-old",
+      }),
+      {
+        requireEncryption: true,
+      },
+    );
+    cloudEntry.entryVersion = 2;
+    cloudEntry.updatedAt = "2026-04-02T00:00:00.000Z";
+    core.setSavedAuthPassphrase(null);
+    core.setNamedAuthDir(undefined);
+
+    fs.writeFileSync(
+      path.join(codexHome, "auth.json"),
+      JSON.stringify(
+        makeAuthFile("acct-cloud", {
+          accessToken: "access-cloud-current",
+          refreshToken: "refresh-cloud-current",
+          lastRefresh: new Date().toISOString(),
+        }),
+        null,
+        2,
+      ),
+      "utf-8",
+    );
+
+    const mocked = createVscodeMock({
+      authDirectory: authDir,
+      secretValues: {
+        [STORAGE_SECRET_KEY]: "account-current-passphrase",
+      },
+      syncedStorage: {
+        version: 1,
+        accounts: {
+          "sync-user": cloudEntry,
+        },
+        providers: {},
+      },
+      globalStateValues: {
+        "codex-account-switch.currentSavedSelection": {
+          kind: "account",
+          name: "sync-user",
+          source: "cloud",
+          entryVersion: 2,
+          updatedAt: "2026-04-02T00:00:00.000Z",
+        },
+      },
+    });
+
+    await withDisabledIntervals(() =>
+      withSuccessfulHttps(async () => {
+        const extension = loadExtensionWithMockedVscode(mocked.vscode);
+        const context = createExtensionContext(mocked);
+        await extension.activate(context);
+
+        const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
+        const [localItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
+          .filter((item) => item.account.name === "local-user" && item.account.source === "local");
+
+        await mocked.registeredCommands.get("codex-account-switch.useAccount")(localItem);
+
+        assert.equal(mocked.warningMessages.length, 0);
+        assert.equal(mocked.errorMessages.length, 0);
+        assert.equal(
+          mocked.informationMessages.some((entry) => entry.message.includes("Detected newer synced cloud account metadata")),
+          false,
+        );
 
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
@@ -5518,7 +6211,7 @@ test("quota refresh preserves cloud auth when a synced device is explicitly sele
   });
 });
 
-test("manual cloud token refresh still works when this device is not selected for automatic refresh", async (t) => {
+test("manual cloud token refresh is blocked when this device is not selected for automatic refresh", async (t) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-device-manual-override-"));
   const codexHome = path.join(tempRoot, ".codex");
   const authDir = path.join(tempRoot, "saved-auth");
@@ -5587,6 +6280,8 @@ test("manual cloud token refresh still works when this device is not selected fo
           const [cloudItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
             .filter((item) => item.account.name === "sync-user" && item.account.source === "cloud");
 
+          assert.equal(cloudItem.contextValue, "accountCloudNoRefreshToken");
+
           await mocked.registeredCommands.get("codex-account-switch.refreshToken")(cloudItem);
 
           cloudAuth = readCloudAccount(
@@ -5594,8 +6289,14 @@ test("manual cloud token refresh still works when this device is not selected fo
             "sync-user",
             "manual-override-passphrase"
           );
-          assert.equal(cloudAuth.tokens.access_token, "access-rotated");
-          assert.equal(cloudAuth.tokens.refresh_token, "refresh-rotated");
+          assert.equal(cloudAuth.tokens.access_token, savedCloudAccessToken);
+          assert.equal(cloudAuth.tokens.refresh_token, "refresh-cloud-old");
+          assert.equal(mocked.warningMessages.length > 0, true);
+          assert.match(
+            mocked.warningMessages.at(-1)?.message ?? "",
+            /selected auto-refresh device "device-other"/i,
+          );
+          assert.equal(mocked.errorMessages.length, 0);
 
           for (const subscription of context.subscriptions.reverse()) {
             subscription?.dispose?.();

@@ -9,3 +9,5 @@
 | 激活自动登记设备 | synced cloud state 中已有 cloud accounts/providers/devices 任一项，当前主机名尚未出现在 `devices` | 激活时自动把当前设备追加到 `devices`；重复激活不会重复追加。 |
 | 空云状态不制造设备记录 | synced cloud state 为空，当前机器首次激活扩展 | 不为了“仅本机启动过一次”而创建新的 synced device 记录。 |
 | 设备授权同步 | synced cloud state 中已有 `devices` 与 `autoRefreshDeviceName` | 激活后自动登记当前设备；自动 cloud token 刷新仍只在被授权设备上执行。 |
+| Cloud provider 写入审计 | 创建/编辑 cloud provider、从当前 cloud provider 切走、或把 local provider 移动到 cloud | 云端 provider 条目写入 `lastWriterDeviceName` 和 `lastWriterAction`，Provider 树详情可见。 |
+| Cloud provider 冲突提示 | 本机缓存的 cloud provider 版本落后于同步后的真实版本 | 冲突提示显示当前版本、更新时间、`lastWriterDeviceName`、`lastWriterAction`，便于定位是谁改写了条目。 |

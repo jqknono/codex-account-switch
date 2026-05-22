@@ -1,7 +1,12 @@
 import * as https from "https";
 import { AuthFile, IdTokenPayload, WindowInfo, QuotaInfo, QuotaUnavailableReason } from "./types";
 import { jwtDecode } from "jwt-decode";
-import { RELOGIN_REQUIRED_MESSAGE, isReloginRequiredRefreshError } from "./refresh";
+import {
+  applyRefreshResponse,
+  RELOGIN_REQUIRED_MESSAGE,
+  isReloginRequiredRefreshError,
+  refreshAccessToken,
+} from "./refresh";
 import { createDiagnosticPerformanceTimer } from "./log";
 
 const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
@@ -222,10 +227,14 @@ export async function getQuotaInfo(
   onAuthUpdatedOrOptions?: AuthUpdateHook | QuotaPerformanceOptions,
   maybeOptions: QuotaPerformanceOptions = {},
 ): Promise<QuotaInfo> {
-  const options =
+  const onAuthUpdated: AuthUpdateHook | null =
     typeof onAuthUpdatedOrOptions === "function"
+      ? onAuthUpdatedOrOptions
+      : null;
+  const options: QuotaPerformanceOptions =
+    onAuthUpdated
       ? maybeOptions
-      : onAuthUpdatedOrOptions ?? {};
+      : ((onAuthUpdatedOrOptions as QuotaPerformanceOptions | undefined) ?? {});
   const perf = createDiagnosticPerformanceTimer(
     LOG_PREFIX,
     "getQuotaInfo",
@@ -270,21 +279,54 @@ export async function getQuotaInfo(
     apiData = await fetchUsageApi(auth, options);
     perf.mark("fetch-usage-api");
   } catch (err: unknown) {
-    const unavailable = {
-      plan: getPlanFromToken(auth),
-      primaryWindow: null,
-      secondaryWindow: null,
-      additional: [],
-      codeReview: null,
-      credits: null,
-      email,
-      tokenExpired,
-      unavailableReason: parseUnavailableReason(auth, err),
-    };
-    perf.finish({
-      unavailableReason: unavailable.unavailableReason?.code ?? null,
-    });
-    return unavailable;
+    const httpErr = err as HttpErrorLike;
+    if (
+      onAuthUpdated
+      && (httpErr.statusCode === 401 || httpErr.statusCode === 403)
+    ) {
+      try {
+        const refreshed = await refreshAccessToken(auth);
+        perf.mark("refresh-access-token");
+        applyRefreshResponse(auth, refreshed);
+        perf.mark("apply-refresh-response");
+        await onAuthUpdated(auth);
+        perf.mark("persist-auth-update");
+        apiData = await fetchUsageApi(auth, options);
+        perf.mark("fetch-usage-api-retry");
+      } catch (retryError: unknown) {
+        const unavailable = {
+          plan: getPlanFromToken(auth),
+          primaryWindow: null,
+          secondaryWindow: null,
+          additional: [],
+          codeReview: null,
+          credits: null,
+          email,
+          tokenExpired,
+          unavailableReason: parseUnavailableReason(auth, retryError),
+        };
+        perf.finish({
+          unavailableReason: unavailable.unavailableReason?.code ?? null,
+        });
+        return unavailable;
+      }
+    } else {
+      const unavailable = {
+        plan: getPlanFromToken(auth),
+        primaryWindow: null,
+        secondaryWindow: null,
+        additional: [],
+        codeReview: null,
+        credits: null,
+        email,
+        tokenExpired,
+        unavailableReason: parseUnavailableReason(auth, err),
+      };
+      perf.finish({
+        unavailableReason: unavailable.unavailableReason?.code ?? null,
+      });
+      return unavailable;
+    }
   }
 
   const rl = apiData.rate_limit ?? {};

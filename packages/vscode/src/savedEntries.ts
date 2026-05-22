@@ -42,7 +42,7 @@ import {
   writeProviderProfile,
   writeSavedAuthFile,
 } from "@codex-account-switch/core";
-import { logWarn, startPerformanceLog } from "./log";
+import { logInfo, logWarn, startPerformanceLog } from "./log";
 import { queryQuotaWithCache } from "./quotaCache";
 
 export type StorageSource = "local" | "cloud";
@@ -68,6 +68,32 @@ export interface SavedAccountInfo {
   autoRefreshAllowed: boolean | null;
 }
 
+export function getSavedAccountTokenRefreshBlockReason(account: SavedAccountInfo): string | null {
+  if (account.source !== "cloud" || account.autoRefreshAllowed !== false) {
+    return null;
+  }
+
+  if (!account.effectiveAutoRefreshDeviceName) {
+    return `Cloud account "${account.name}" cannot refresh tokens on this device because no auto-refresh device is selected.`;
+  }
+
+  return `Cloud account "${account.name}" can only refresh tokens on the selected auto-refresh device `
+    + `"${account.effectiveAutoRefreshDeviceName}". Current device: "${account.currentDeviceName ?? "unknown"}".`;
+}
+
+export function getSavedAccountMoveToLocalBlockReason(account: SavedAccountInfo): string | null {
+  if (account.source !== "cloud" || account.autoRefreshAllowed !== false) {
+    return null;
+  }
+
+  if (!account.effectiveAutoRefreshDeviceName) {
+    return `Cloud account "${account.name}" cannot be moved to local storage on this device because no auto-refresh device is selected.`;
+  }
+
+  return `Cloud account "${account.name}" can only be moved to local storage on the selected auto-refresh device `
+    + `"${account.effectiveAutoRefreshDeviceName}". Current device: "${account.currentDeviceName ?? "unknown"}".`;
+}
+
 export interface SavedProviderInfo {
   id: string;
   name: string;
@@ -82,6 +108,8 @@ export interface SavedProviderInfo {
   profile: ProviderProfile | null;
   syncVersion: number | null;
   syncUpdatedAt: string | null;
+  lastWriterDeviceName: string | null;
+  lastWriterAction: string | null;
 }
 
 export interface CloudSyncConflict {
@@ -91,12 +119,18 @@ export interface CloudSyncConflict {
   expectedUpdatedAt: string | null;
   currentEntryVersion: number | null;
   currentUpdatedAt: string | null;
+  currentLastWriterDeviceName: string | null;
+  currentLastWriterAction: string | null;
 }
 
 interface SavedStorageSyncMetadata {
   entryVersion: number | null;
   updatedAt: string | null;
+  lastWriterDeviceName?: string | null;
+  lastWriterAction?: string | null;
 }
+
+type ProviderAuditAction = "save_provider_profile" | "sync_current_provider_auth" | "move_provider_to_cloud";
 
 interface CloudMutationResult {
   success: boolean;
@@ -104,6 +138,23 @@ interface CloudMutationResult {
   conflict?: CloudSyncConflict;
   syncVersion?: number | null;
   syncUpdatedAt?: string | null;
+}
+
+export interface HealedCloudMarker {
+  kind: "account" | "provider";
+  name: string;
+  source: "cloud";
+  previousEntryVersion: number | null;
+  previousUpdatedAt: string | null;
+  currentEntryVersion: number | null;
+  currentUpdatedAt: string | null;
+}
+
+interface SyncCurrentSelectionResult {
+  success: boolean;
+  message?: string;
+  conflict?: CloudSyncConflict;
+  healedMarker?: HealedCloudMarker;
 }
 
 export type SavedSelection =
@@ -161,6 +212,8 @@ let inflightAutoRefreshDevicePrompt: Promise<string | null> | null = null;
 const EMPTY_SYNC_METADATA: SavedStorageSyncMetadata = {
   entryVersion: null,
   updatedAt: null,
+  lastWriterDeviceName: null,
+  lastWriterAction: null,
 };
 
 let extensionContext: vscode.ExtensionContext | null = null;
@@ -208,6 +261,8 @@ function getSyncMetadata(value: unknown): SavedStorageSyncMetadata {
     return {
       entryVersion: null,
       updatedAt: null,
+      lastWriterDeviceName: null,
+      lastWriterAction: null,
     };
   }
 
@@ -217,13 +272,26 @@ function getSyncMetadata(value: unknown): SavedStorageSyncMetadata {
         ? (value.entryVersion as number)
         : null,
     updatedAt: typeof value.updatedAt === "string" && value.updatedAt.length > 0 ? value.updatedAt : null,
+    lastWriterDeviceName:
+      typeof value.lastWriterDeviceName === "string" && value.lastWriterDeviceName.trim().length > 0
+        ? value.lastWriterDeviceName.trim()
+        : null,
+    lastWriterAction:
+      typeof value.lastWriterAction === "string" && value.lastWriterAction.trim().length > 0
+        ? value.lastWriterAction.trim()
+        : null,
   };
 }
 
-function nextSyncMetadata(current: SavedStorageSyncMetadata): SavedStorageSyncMetadata {
+function nextSyncMetadata(
+  current: SavedStorageSyncMetadata,
+  options: { lastWriterDeviceName?: string | null; lastWriterAction?: string | null } = {},
+): SavedStorageSyncMetadata {
   return {
     entryVersion: current.entryVersion == null ? 1 : current.entryVersion + 1,
     updatedAt: new Date().toISOString(),
+    lastWriterDeviceName: options.lastWriterDeviceName ?? null,
+    lastWriterAction: options.lastWriterAction ?? null,
   };
 }
 
@@ -257,6 +325,8 @@ function getNormalizedAutoRefreshDeviceName(value: unknown): string | null {
 function applySyncMetadata(value: Record<string, unknown>, metadata: SavedStorageSyncMetadata): Record<string, unknown> {
   value.entryVersion = metadata.entryVersion;
   value.updatedAt = metadata.updatedAt;
+  value.lastWriterDeviceName = metadata.lastWriterDeviceName;
+  value.lastWriterAction = metadata.lastWriterAction;
   return value;
 }
 
@@ -291,6 +361,8 @@ function buildConflict(
     expectedUpdatedAt: expected.updatedAt,
     currentEntryVersion: current.entryVersion,
     currentUpdatedAt: current.updatedAt,
+    currentLastWriterDeviceName: current.lastWriterDeviceName ?? null,
+    currentLastWriterAction: current.lastWriterAction ?? null,
   };
 }
 
@@ -300,12 +372,15 @@ function formatConflictResult(conflict: CloudSyncConflict): CloudMutationResult 
   const currentVersion = conflict.currentEntryVersion ?? "unknown";
   const expectedUpdatedAt = conflict.expectedUpdatedAt ?? "unknown";
   const currentUpdatedAt = conflict.currentUpdatedAt ?? "unknown";
+  const currentWriterDevice = conflict.currentLastWriterDeviceName ?? "unknown";
+  const currentWriterAction = conflict.currentLastWriterAction ?? "unknown";
   return {
     success: false,
     message:
       `${label} "${conflict.name}" has a sync conflict: `
       + `expected version ${expectedVersion} (${expectedUpdatedAt}), `
       + `current version ${currentVersion} (${currentUpdatedAt}). `
+      + `Last writer device ${currentWriterDevice}, last writer action ${currentWriterAction}. `
       + "Refresh the list before retrying.",
     conflict,
   };
@@ -340,6 +415,54 @@ async function updateMarkerSyncMetadata(
     entryVersion: metadata.entryVersion,
     updatedAt: metadata.updatedAt,
   });
+}
+
+async function reconcileCurrentCloudMarker(): Promise<HealedCloudMarker | null> {
+  const marker = getMarker();
+  if (!marker || marker.source !== "cloud") {
+    return null;
+  }
+
+  const currentValue =
+    marker.kind === "account"
+      ? readSyncedStorage().accounts[marker.name]
+      : readSyncedStorage().providers[marker.name];
+  const currentMetadata = getSyncMetadata(currentValue);
+  if (currentMetadata.entryVersion == null) {
+    return null;
+  }
+
+  const markerEntryVersion = marker.entryVersion ?? null;
+  const markerUpdatedAt = marker.updatedAt ?? null;
+  const sameVersion = markerEntryVersion === currentMetadata.entryVersion;
+  const sameUpdatedAt = markerUpdatedAt === currentMetadata.updatedAt;
+  if (sameVersion && sameUpdatedAt) {
+    return null;
+  }
+
+  await setMarker({
+    ...marker,
+    entryVersion: currentMetadata.entryVersion,
+    updatedAt: currentMetadata.updatedAt,
+  });
+  logInfo(LOG_PREFIX, "reconcile-current-cloud-marker", {
+    kind: marker.kind,
+    name: marker.name,
+    source: marker.source,
+    previousEntryVersion: markerEntryVersion,
+    currentEntryVersion: currentMetadata.entryVersion,
+    previousUpdatedAt: markerUpdatedAt,
+    currentUpdatedAt: currentMetadata.updatedAt,
+  });
+  return {
+    kind: marker.kind,
+    name: marker.name,
+    source: "cloud",
+    previousEntryVersion: markerEntryVersion,
+    previousUpdatedAt: markerUpdatedAt,
+    currentEntryVersion: currentMetadata.entryVersion,
+    currentUpdatedAt: currentMetadata.updatedAt,
+  };
 }
 
 function getDefaultSyncedStorage(): SyncedStorageData {
@@ -446,6 +569,16 @@ export function hasEncryptedSyncedEntries(): boolean {
 export function getCurrentDeviceName(): string {
   const hostname = os.hostname().trim();
   return hostname.length > 0 ? hostname : "unknown-device";
+}
+
+function getCurrentWriterMetadata(action?: ProviderAuditAction): {
+  lastWriterDeviceName: string | null;
+  lastWriterAction: string | null;
+} {
+  return {
+    lastWriterDeviceName: getCurrentDeviceName(),
+    lastWriterAction: action ?? null,
+  };
 }
 
 export function getEffectiveAutoRefreshDeviceName(storage = readSyncedStorage()): string | null {
@@ -734,6 +867,8 @@ function getLocalProviders(): SavedProviderInfo[] {
       profile,
       syncVersion: null,
       syncUpdatedAt: null,
+      lastWriterDeviceName: null,
+      lastWriterAction: null,
     };
   });
 }
@@ -763,6 +898,8 @@ function getCloudProviders(): SavedProviderInfo[] {
       profile,
       syncVersion: syncMetadata.entryVersion,
       syncUpdatedAt: syncMetadata.updatedAt,
+      lastWriterDeviceName: syncMetadata.lastWriterDeviceName ?? null,
+      lastWriterAction: syncMetadata.lastWriterAction ?? null,
     };
   });
 }
@@ -1012,6 +1149,7 @@ async function writeCloudProviderWithExpectedVersion(
   profile: ProviderProfile,
   expectedEntryVersion?: number | null,
   expectedUpdatedAt?: string | null,
+  auditAction?: ProviderAuditAction,
 ): Promise<CloudMutationResult> {
   requireCloudPassphrase();
   await ensureCurrentDeviceRegistered();
@@ -1030,7 +1168,7 @@ async function writeCloudProviderWithExpectedVersion(
       ),
     );
   }
-  const nextMetadata = nextSyncMetadata(currentMetadata);
+  const nextMetadata = nextSyncMetadata(currentMetadata, getCurrentWriterMetadata(auditAction));
   storage.providers[profile.name] = applySyncMetadata(serializeSavedValue("saved_provider", profile as unknown as Record<string, unknown>, {
     requireEncryption: true,
   }), nextMetadata);
@@ -1135,11 +1273,12 @@ async function removeCloudProviderEntry(
   return { success: true, message: `Removed provider "${name}"` };
 }
 
-export async function syncCurrentAuthToSavedSelection(): Promise<CloudMutationResult | null> {
+export async function syncCurrentAuthToSavedSelection(): Promise<SyncCurrentSelectionResult> {
+  const healedMarker = await reconcileCurrentCloudMarker();
   const marker = getMarker();
   if (!marker || marker.source === "local") {
     syncCurrentAuthToSavedAccount();
-    return null;
+    return healedMarker ? { success: true, healedMarker } : { success: true };
   }
 
   if (marker.kind === "account") {
@@ -1152,14 +1291,19 @@ export async function syncCurrentAuthToSavedSelection(): Promise<CloudMutationRe
         marker.updatedAt,
       );
       if (!result.success) {
-        return result;
+        return {
+          success: false,
+          message: result.message,
+          conflict: result.conflict,
+          healedMarker: healedMarker ?? undefined,
+        };
       }
       await updateMarkerSyncMetadata("account", marker.name, {
         entryVersion: result.syncVersion ?? null,
         updatedAt: result.syncUpdatedAt ?? null,
       });
     }
-    return null;
+    return healedMarker ? { success: true, healedMarker } : { success: true };
   }
 
   const activeProvider = getActiveModelProvider();
@@ -1170,9 +1314,14 @@ export async function syncCurrentAuthToSavedSelection(): Promise<CloudMutationRe
       const result = await writeCloudProviderWithExpectedVersion({
         ...provider.profile,
         auth: currentAuth,
-      }, marker.entryVersion, marker.updatedAt);
+      }, marker.entryVersion, marker.updatedAt, "sync_current_provider_auth");
       if (!result.success) {
-        return result;
+        return {
+          success: false,
+          message: result.message,
+          conflict: result.conflict,
+          healedMarker: healedMarker ?? undefined,
+        };
       }
       await updateMarkerSyncMetadata("provider", marker.name, {
         entryVersion: result.syncVersion ?? null,
@@ -1180,7 +1329,7 @@ export async function syncCurrentAuthToSavedSelection(): Promise<CloudMutationRe
       });
     }
   }
-  return null;
+  return healedMarker ? { success: true, healedMarker } : { success: true };
 }
 
 function getSourceLabel(source: StorageSource): string {
@@ -1257,10 +1406,15 @@ export async function saveCurrentAuthAsAccount(
 
 export async function useSavedAccountEntry(
   account: SavedAccountInfo,
-): Promise<{ success: boolean; message: string; meta?: AccountMeta; conflict?: CloudSyncConflict }> {
+): Promise<{ success: boolean; message: string; meta?: AccountMeta; conflict?: CloudSyncConflict; healedMarker?: HealedCloudMarker }> {
   const syncResult = await syncCurrentAuthToSavedSelection();
-  if (syncResult && !syncResult.success) {
-    return { success: false, message: syncResult.message, conflict: syncResult.conflict };
+  if (!syncResult.success) {
+    return {
+      success: false,
+      message: syncResult.message ?? "Failed to sync the current selection before switching accounts.",
+      conflict: syncResult.conflict,
+      healedMarker: syncResult.healedMarker,
+    };
   }
 
   if (account.source === "local") {
@@ -1268,11 +1422,17 @@ export async function useSavedAccountEntry(
     if (result.success) {
       await setMarker({ kind: "account", name: account.name, source: "local" });
     }
-    return result;
+    return result.success && syncResult.healedMarker
+      ? { ...result, healedMarker: syncResult.healedMarker }
+      : result;
   }
 
   if (account.storageState !== "ready" || !account.auth) {
-    return { success: false, message: account.storageMessage ?? `Saved cloud account "${account.name}" is unavailable.` };
+    return {
+      success: false,
+      message: account.storageMessage ?? `Saved cloud account "${account.name}" is unavailable.`,
+      healedMarker: syncResult.healedMarker,
+    };
   }
 
   writeCurrentAuth(account.auth);
@@ -1288,6 +1448,7 @@ export async function useSavedAccountEntry(
     success: true,
     message: `Switched to account "${account.name}"`,
     meta: account.meta ?? extractMeta(account.auth),
+    healedMarker: syncResult.healedMarker,
   };
 }
 
@@ -1312,6 +1473,9 @@ export async function querySavedAccountQuota(
     const sharedQuery = context?.sharedQueries?.get(account.id);
     if (sharedQuery) {
       try {
+        perf.mark("await-shared-query", {
+          source: "shared",
+        });
         const result = await sharedQuery;
         perf.finish({
           resultKind: result.kind,
@@ -1340,10 +1504,10 @@ export async function querySavedAccountQuota(
         }),
       });
       context?.sharedQueries?.set(account.id, resultPromise);
-      const result = await resultPromise;
-      perf.mark("query-local-quota", {
-        resultKind: result.kind,
+      perf.mark("await-local-quota-query", {
+        forceFetch: shouldForceQuotaFetch(options.reason),
       });
+      const result = await resultPromise;
       perf.finish({
         resultKind: result.kind,
         source: "direct",
@@ -1354,6 +1518,9 @@ export async function querySavedAccountQuota(
     const existingQuery = inflightCloudQuotaQueries.get(account.id);
     if (existingQuery) {
       context?.sharedQueries?.set(account.id, existingQuery);
+      perf.mark("await-inflight-cloud-query", {
+        source: "cloud",
+      });
       const result = await existingQuery;
       perf.finish({
         resultKind: result.kind,
@@ -1368,6 +1535,9 @@ export async function querySavedAccountQuota(
         kind: "not_found" as const,
         message: account.storageMessage ?? `Saved cloud account "${account.name}" is unavailable.`,
       };
+      perf.mark("cloud-account-unavailable", {
+        resultKind: result.kind,
+      });
       perf.finish({
         resultKind: result.kind,
       });
@@ -1398,6 +1568,10 @@ export async function querySavedAccountQuota(
 
     inflightCloudQuotaQueries.set(account.id, queryPromise);
     context?.sharedQueries?.set(account.id, queryPromise);
+    perf.mark("await-cloud-quota-query", {
+      source: "cloud",
+      forceFetch: shouldForceQuotaFetch(options.reason),
+    });
     queryPromise
       .then((result) => {
         perf.finish({
@@ -1437,6 +1611,15 @@ export async function refreshSavedAccountEntry(account: SavedAccountInfo): Promi
         });
       },
     });
+  }
+
+  const tokenRefreshBlockReason = getSavedAccountTokenRefreshBlockReason(account);
+  if (tokenRefreshBlockReason) {
+    return {
+      success: false,
+      message: tokenRefreshBlockReason,
+      unsupported: true,
+    };
   }
 
   if (account.storageState !== "ready" || !account.auth) {
@@ -1533,6 +1716,12 @@ export async function moveSavedAccountEntry(
   if (account.storageState !== "ready" || !account.auth) {
     return { success: false, message: account.storageMessage ?? `Saved account "${account.name}" is unavailable.` };
   }
+  if (target === "local") {
+    const moveToLocalBlockReason = getSavedAccountMoveToLocalBlockReason(account);
+    if (moveToLocalBlockReason) {
+      return { success: false, message: moveToLocalBlockReason };
+    }
+  }
 
   let nextCloudMetadata: SavedStorageSyncMetadata = EMPTY_SYNC_METADATA;
 
@@ -1587,7 +1776,12 @@ export async function saveProviderProfileToSource(
   }
 
   requireCloudPassphrase();
-  const result = await writeCloudProviderWithExpectedVersion(profile, options?.expectedEntryVersion, options?.expectedUpdatedAt);
+  const result = await writeCloudProviderWithExpectedVersion(
+    profile,
+    options?.expectedEntryVersion,
+    options?.expectedUpdatedAt,
+    "save_provider_profile",
+  );
   if (result.success) {
     await updateMarkerSyncMetadata("provider", profile.name, {
       entryVersion: result.syncVersion ?? null,
@@ -1621,10 +1815,15 @@ export async function buildProviderProfileForSource(
 
 export async function switchToSavedProviderEntry(
   provider: SavedProviderInfo,
-): Promise<{ success: boolean; message: string; conflict?: CloudSyncConflict }> {
+): Promise<{ success: boolean; message: string; conflict?: CloudSyncConflict; healedMarker?: HealedCloudMarker }> {
   const syncResult = await syncCurrentAuthToSavedSelection();
-  if (syncResult && !syncResult.success) {
-    return { success: false, message: syncResult.message, conflict: syncResult.conflict };
+  if (!syncResult.success) {
+    return {
+      success: false,
+      message: syncResult.message ?? "Failed to sync the current selection before switching modes.",
+      conflict: syncResult.conflict,
+      healedMarker: syncResult.healedMarker,
+    };
   }
 
   if (provider.source === "local") {
@@ -1632,11 +1831,17 @@ export async function switchToSavedProviderEntry(
     if (result.success) {
       await setMarker({ kind: "provider", name: provider.name, source: "local" });
     }
-    return result;
+    return result.success && syncResult.healedMarker
+      ? { ...result, healedMarker: syncResult.healedMarker }
+      : result;
   }
 
   if (!provider.profile || provider.locked || provider.invalid) {
-    return { success: false, message: provider.storageMessage ?? `Provider "${provider.name}" is unavailable.` };
+    return {
+      success: false,
+      message: provider.storageMessage ?? `Provider "${provider.name}" is unavailable.`,
+      healedMarker: syncResult.healedMarker,
+    };
   }
 
   writeCurrentAuth(provider.profile.auth);
@@ -1653,7 +1858,11 @@ export async function switchToSavedProviderEntry(
     entryVersion: provider.syncVersion,
     updatedAt: provider.syncUpdatedAt,
   });
-  return { success: true, message: `Switched to mode "${getModeDisplayName(provider.name)}"` };
+  return {
+    success: true,
+    message: `Switched to mode "${getModeDisplayName(provider.name)}"`,
+    healedMarker: syncResult.healedMarker,
+  };
 }
 
 async function removeLocalProviderFile(name: string): Promise<void> {
@@ -1700,7 +1909,7 @@ export async function moveSavedProviderEntry(
   let nextCloudMetadata: SavedStorageSyncMetadata = EMPTY_SYNC_METADATA;
 
   if (target === "cloud") {
-    const writeResult = await writeCloudProviderWithExpectedVersion(provider.profile);
+    const writeResult = await writeCloudProviderWithExpectedVersion(provider.profile, undefined, undefined, "move_provider_to_cloud");
     if (!writeResult.success) {
       return { success: false, message: writeResult.message, conflict: writeResult.conflict };
     }
