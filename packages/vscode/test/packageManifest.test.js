@@ -161,6 +161,10 @@ test("storage migration commands are contributed", () => {
     "Move Provider To Local"
   );
   assert.equal(
+    byId.get("codex-account-switch.removeProvider")?.title,
+    "Remove Provider"
+  );
+  assert.equal(
     byId.get("codex-account-switch.selectAutoRefreshDevice")?.title,
     "Select Auto-Refresh Device"
   );
@@ -273,6 +277,18 @@ test("account group context menu exposes refresh quota for local and cloud group
 
   assert.equal(localGroupRefresh?.group, "refresh@1");
   assert.equal(cloudGroupRefresh?.group, "refresh@1");
+});
+
+test("provider context menu exposes remove for local and cloud providers", () => {
+  const contextMenus = manifest.contributes.menus["view/item/context"] ?? [];
+  const removeProvider = contextMenus.find(
+    (item) =>
+      item.command === "codex-account-switch.removeProvider" &&
+      item.when ===
+        "view == codexAccountSwitchProviders && (viewItem == providerLocal || viewItem == providerCloud)"
+  );
+
+  assert.equal(removeProvider?.group, "context@3");
 });
 
 test("accounts view title menu exposes a single refresh entrypoint", () => {

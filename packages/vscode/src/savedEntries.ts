@@ -500,6 +500,8 @@ function readSyncedStorage(): SyncedStorageData {
   const raw = requireContext().globalState.get<unknown>(SYNCED_CLOUD_STATE_KEY);
   const storage = normalizeSyncedStorage(raw);
   const accounts: Record<string, unknown> = {};
+  const missingAccountNames: string[] = [];
+
   for (const name of storage.accountNames) {
     const account = requireContext().globalState.get<unknown>(getSyncedCloudAccountKey(name));
     if (account !== undefined) {
@@ -508,8 +510,20 @@ function readSyncedStorage(): SyncedStorageData {
     }
     if (name in storage.accounts) {
       accounts[name] = storage.accounts[name];
+      continue;
+    }
+    missingAccountNames.push(name);
+  }
+
+  if (missingAccountNames.length > 0) {
+    const legacy = readLegacySyncedStorage();
+    for (const name of missingAccountNames) {
+      if (name in legacy.accounts && !(name in accounts)) {
+        accounts[name] = legacy.accounts[name];
+      }
     }
   }
+
   for (const [name, account] of Object.entries(storage.accounts)) {
     if (!(name in accounts)) {
       accounts[name] = account;
@@ -553,7 +567,21 @@ function toSyncedCloudStateIndex(data: SyncedStorageData): SyncedStorageData {
   };
 }
 
+async function materializeSyncedCloudAccounts(data: SyncedStorageData): Promise<void> {
+  for (const [name, account] of Object.entries(data.accounts)) {
+    if (account === undefined) {
+      continue;
+    }
+    const key = getSyncedCloudAccountKey(name);
+    if (requireContext().globalState.get<unknown>(key) !== undefined) {
+      continue;
+    }
+    await requireContext().globalState.update(key, clone(account));
+  }
+}
+
 async function writeSyncedCloudStateIndex(data: SyncedStorageData): Promise<void> {
+  await materializeSyncedCloudAccounts(data);
   const index = toSyncedCloudStateIndex(data);
   await requireContext().globalState.update(SYNCED_CLOUD_STATE_KEY, index);
   setSyncedCloudSyncKeys(index.accountNames);

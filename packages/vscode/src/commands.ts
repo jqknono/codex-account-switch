@@ -36,6 +36,7 @@ import {
   listSyncedDevices,
   listSavedAccounts,
   listSavedProviders,
+  deleteSavedProviderEntry,
   moveSavedAccountEntry,
   moveSavedProviderEntry,
   refreshSavedAccountEntry,
@@ -2173,6 +2174,39 @@ export function registerCommands(
       });
       vscode.window.showInformationMessage(`✓ ${result.message}`);
       refreshViews(refreshCoordinator);
+    }),
+
+    vscode.commands.registerCommand("codex-account-switch.removeProvider", async (item?: ProviderTreeItem) => {
+      await runTimedCommand("removeProvider", async (perf) => {
+        const provider = await pickSavedProvider(item, "Select a provider to remove");
+        if (!provider) return;
+        perf.mark("pick-saved-provider", {
+          provider: provider.name,
+          source: provider.source,
+        });
+
+        const confirm = await vscode.window.showWarningMessage(
+          `Remove provider "${provider.name}" from ${getSourceLabel(provider.source)} storage?`,
+          "Remove",
+          "Cancel",
+        );
+        if (confirm !== "Remove") return;
+        perf.mark("confirm-remove");
+
+        const result = await deleteSavedProviderEntry(provider);
+        perf.mark("delete-saved-provider-entry", {
+          success: result.success,
+          conflict: result.conflict ?? false,
+        });
+        if (result.success) {
+          vscode.window.showInformationMessage(`✓ ${result.message}`);
+          refreshViews(refreshCoordinator);
+        } else if (result.conflict) {
+          await showSyncConflictWarning(result.message);
+        } else {
+          vscode.window.showErrorMessage(result.message);
+        }
+      });
     }),
 
     vscode.commands.registerCommand("codex-account-switch.refreshQuota", async (item?: AccountTreeItem | AccountGroupItem) => {

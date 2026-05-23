@@ -240,6 +240,12 @@
         "icon": "$(cloud-download)"
       },
       {
+        "command": "codex-account-switch.removeProvider",
+        "title": "Remove Provider",
+        "category": "Codex Account Switch",
+        "icon": "$(trash)"
+      },
+      {
         "command": "codex-account-switch.expandAllAccounts",
         "title": "Expand All Accounts",
         "category": "Codex Account Switch",
@@ -389,6 +395,11 @@
           "command": "codex-account-switch.moveProviderToLocal",
           "when": "view == codexAccountSwitchProviders && viewItem == providerCloud",
           "group": "context@2"
+        },
+        {
+          "command": "codex-account-switch.removeProvider",
+          "when": "view == codexAccountSwitchProviders && (viewItem == providerLocal || viewItem == providerCloud)",
+          "group": "context@3"
         },
         {
           "command": "codex-account-switch.copyProviderField",

@@ -1572,6 +1572,122 @@ test("manual cloud refresh increments visible sync version metadata", async (t) 
   });
 });
 
+
+test("aggregate globalState cloud accounts materialize before single-account refresh", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-cloud-aggregate-materialize-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  const authDir = path.join(tempRoot, "saved-auth");
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(authDir, { recursive: true });
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  try {
+    core.setSavedAuthPassphrase("aggregate-passphrase");
+    const syncedEntry = core.serializeSavedValue(
+      "saved_auth",
+      makeAuthFile("acct-cloud", {
+        accessToken: "access-cloud-old",
+        refreshToken: "refresh-cloud-old",
+        lastRefresh: new Date().toISOString(),
+      }),
+      {
+        requireEncryption: true,
+      }
+    );
+    syncedEntry.entryVersion = 1;
+    syncedEntry.updatedAt = "2026-04-01T00:00:00.000Z";
+    const siblingEntry = core.serializeSavedValue(
+      "saved_auth",
+      makeAuthFile("acct-sibling", {
+        accessToken: "access-sibling-old",
+        refreshToken: "refresh-sibling-old",
+      }),
+      {
+        requireEncryption: true,
+      }
+    );
+    siblingEntry.entryVersion = 5;
+    siblingEntry.updatedAt = "2026-04-02T00:00:00.000Z";
+    core.setSavedAuthPassphrase(null);
+
+    const mocked = createVscodeMock({
+      authDirectory: authDir,
+      globalStateValues: {
+        [SYNCED_CLOUD_STATE_KEY]: {
+          version: 1,
+          accounts: {
+            "sync-user": syncedEntry,
+            sibling: siblingEntry,
+          },
+          accountNames: ["sibling", "sync-user"],
+          providers: {},
+          devices: [],
+          autoRefreshDeviceName: null,
+        },
+      },
+      secretValues: {
+        [STORAGE_SECRET_KEY]: "aggregate-passphrase",
+      },
+    });
+
+    await withDisabledIntervals(() =>
+      withSuccessfulHttps(async () => {
+        const extension = loadExtensionWithMockedVscode(mocked.vscode);
+        const context = createExtensionContext(mocked);
+        await extension.activate(context);
+
+        const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
+        const [cloudItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
+          .filter((item) => item.account.name === "sync-user" && item.account.source === "cloud");
+
+        await mocked.registeredCommands.get("codex-account-switch.refreshToken")(cloudItem);
+
+        const nextEntry = getCloudEnvelope(mocked.config, "account", "sync-user");
+        assert.equal(nextEntry.entryVersion, 2);
+        assert.notEqual(nextEntry.updatedAt, "2026-04-01T00:00:00.000Z");
+
+        const nextSibling = getCloudEnvelope(mocked.config, "account", "sibling");
+        assert.equal(nextSibling.entryVersion, 5);
+        assert.equal(nextSibling.updatedAt, "2026-04-02T00:00:00.000Z");
+
+        const siblingAuth = readCloudAccount(mocked.config, "sibling", "aggregate-passphrase");
+        assert.equal(siblingAuth.tokens.access_token, "access-sibling-old");
+        assert.equal(siblingAuth.tokens.refresh_token, "refresh-sibling-old");
+
+        assert.deepEqual(mocked.globalStateValues.get(SYNCED_CLOUD_STATE_KEY).accounts, {});
+        assert.equal(typeof mocked.globalStateValues.get(getSyncedCloudAccountKey("sync-user"))?.ciphertext, "string");
+        assert.equal(typeof mocked.globalStateValues.get(getSyncedCloudAccountKey("sibling"))?.ciphertext, "string");
+
+        for (const subscription of context.subscriptions.reverse()) {
+          subscription?.dispose?.();
+        }
+        await waitForRefreshCoordinatorIdle(context);
+      })
+    );
+  } finally {
+    core.setSavedAuthPassphrase(null);
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
 test("cloud account tooltip keeps sync metadata while hiding redundant detail fields", async (t) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-cloud-account-tooltip-"));
   const codexHome = path.join(tempRoot, ".codex");
@@ -3592,6 +3708,86 @@ test("move provider to local keeps an existing local provider when cloud removal
     );
   } finally {
     core.setSavedAuthPassphrase(null);
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
+test("remove provider asks for confirmation before deleting a local provider", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-provider-remove-local-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  const authDir = path.join(tempRoot, "saved-auth");
+  const providerPath = path.join(authDir, "provider_proxy.json");
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(authDir, { recursive: true });
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  try {
+    core.setNamedAuthDir(authDir);
+    core.writeProviderProfile({
+      kind: "provider",
+      name: "proxy",
+      auth: { OPENAI_API_KEY: "sk-local" },
+      config: {
+        name: "proxy",
+        base_url: "https://local.example.com/v1",
+        wire_api: "responses",
+      },
+    });
+    core.setNamedAuthDir(undefined);
+
+    const mocked = createVscodeMock({
+      authDirectory: authDir,
+      warningResponses: ["Remove"],
+    });
+
+    await withDisabledIntervals(() =>
+      withSuccessfulHttps(async () => {
+        const extension = loadExtensionWithMockedVscode(mocked.vscode);
+        const context = createExtensionContext(mocked);
+        await extension.activate(context);
+
+        const providerTreeView = mocked.treeViews.get("codexAccountSwitchProviders");
+        const [providerItem] = providerTreeView.treeDataProvider
+          .getChildren()
+          .filter((item) => item.provider.name === "proxy" && item.provider.source === "local");
+
+        await mocked.registeredCommands.get("codex-account-switch.removeProvider")(providerItem);
+
+        assert.equal(fs.existsSync(providerPath), false);
+        assert.equal(mocked.warningMessages.length, 1);
+        assert.equal(
+          mocked.warningMessages[0].message,
+          'Remove provider "proxy" from local storage?'
+        );
+        assert.deepEqual(mocked.warningMessages[0].actions, ["Remove", "Cancel"]);
+        assert.equal(mocked.errorMessages.length, 0);
+        assert.equal(mocked.informationMessages[0]?.message, '✓ Removed provider "proxy"');
+
+        for (const subscription of context.subscriptions.reverse()) {
+          subscription?.dispose?.();
+        }
+        await waitForRefreshCoordinatorIdle(context);
+      })
+    );
+  } finally {
     core.setNamedAuthDir(undefined);
     if (previousCodexHome === undefined) {
       delete process.env.CODEX_HOME;
