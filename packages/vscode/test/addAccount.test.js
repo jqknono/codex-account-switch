@@ -260,7 +260,7 @@ function createVscodeMock(options) {
     authDirectory: options.authDirectory,
     reloadWindowAfterSwitch: "never",
     useDeviceAuthForLogin: options.useDeviceAuthForLogin ?? false,
-    quotaRefreshInterval: 30,
+    quotaRefreshInterval: 5,
     tokenAutoUpdate: options.tokenAutoUpdate ?? options.cloudTokenAutoUpdate ?? false,
     tokenAutoUpdateIntervalHours:
       options.tokenAutoUpdateIntervalHours ?? options.cloudTokenAutoUpdateIntervalHours ?? 24,
@@ -2770,7 +2770,7 @@ test("background quota refresh rotates one saved account per interval without ex
 
       const usageRequests = requestLog.filter((request) => request.hostname === "chatgpt.com");
       assert.equal(intervalHandles.length, 1);
-      assert.equal(intervalHandles[0].ms, 30000);
+      assert.equal(intervalHandles[0].ms, 5000);
       assert.equal(usageRequests.length, 1);
       assert.equal(usageRequests[0].authorization, `Bearer ${stableAccessBeta}`);
 

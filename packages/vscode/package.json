@@ -2,7 +2,7 @@
   "name": "codex-account-switch-vscode",
   "displayName": "Codex Account Switch",
   "description": "Codex Account Switch - VS Code extension",
-  "version": "1.8.3",
+  "version": "1.8.4",
   "publisher": "techfetch-dev",
   "repository": {
     "type": "git",
@@ -414,7 +414,7 @@
       "properties": {
         "codex-account-switch.quotaRefreshInterval": {
           "type": "number",
-          "default": 30,
+          "default": 5,
           "minimum": 5,
           "description": "Background maintenance interval, in seconds. Each interval checks one saved account for token refresh and refreshes one saved account quota in rotation."
         },

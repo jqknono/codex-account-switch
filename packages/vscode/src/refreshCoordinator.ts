@@ -174,7 +174,7 @@ export class RefreshCoordinator implements vscode.Disposable {
       this.autoRefreshTimer = undefined;
     }
 
-    const intervalSec = vscode.workspace.getConfiguration("codex-account-switch").get<number>("quotaRefreshInterval", 30);
+    const intervalSec = vscode.workspace.getConfiguration("codex-account-switch").get<number>("quotaRefreshInterval", 5);
     if (!Number.isFinite(intervalSec)) {
       return;
     }

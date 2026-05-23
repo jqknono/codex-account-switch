@@ -35,7 +35,7 @@ flowchart LR
 
 | Rule | Behavior |
 | --- | --- |
-| Default interval | `30` seconds. |
+| Default interval | `5` seconds. |
 | Minimum interval | `5` seconds; lower finite values are clamped to `5` seconds at runtime. |
 | Config update | `quotaRefreshInterval` 变更后立即重建后台 timer。 |
 | One account per tick | 每个 timer 周期只刷新 1 个 saved account 的 quota。 |

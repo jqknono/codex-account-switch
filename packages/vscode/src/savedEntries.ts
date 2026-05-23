@@ -211,7 +211,7 @@ interface SyncedCloudMigrationState {
 const SYNCED_STORAGE_SETTING = "syncedStorage";
 const DEFAULT_TARGET_SETTING = "defaultSaveTarget";
 const CURRENT_SELECTION_KEY = "codex-account-switch.currentSavedSelection";
-const DEFAULT_QUOTA_CACHE_INTERVAL_MS = 30 * 1000;
+const DEFAULT_QUOTA_CACHE_INTERVAL_MS = 5 * 1000;
 const inflightCloudQuotaQueries = new Map<string, Promise<QuotaQueryResult>>();
 let inflightAutoRefreshDevicePrompt: Promise<string | null> | null = null;
 const EMPTY_SYNC_METADATA: SavedStorageSyncMetadata = {
@@ -228,7 +228,7 @@ function getConfiguration() {
 }
 
 function getQuotaCacheIntervalMs(): number {
-  const intervalSec = getConfiguration().get<number>("quotaRefreshInterval", 30);
+  const intervalSec = getConfiguration().get<number>("quotaRefreshInterval", 5);
   if (!Number.isFinite(intervalSec)) {
     return DEFAULT_QUOTA_CACHE_INTERVAL_MS;
   }
