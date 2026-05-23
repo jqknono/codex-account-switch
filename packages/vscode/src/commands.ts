@@ -765,6 +765,78 @@ async function pickModeAction(): Promise<
   return { action: "switch", provider: picked.provider };
 }
 
+async function switchSavedProviderForCommand(
+  context: vscode.ExtensionContext,
+  refreshCoordinator: RefreshCoordinator,
+  provider: SavedProviderInfo,
+  logScope: string,
+): Promise<boolean> {
+  if (provider.locked) {
+    const availableProvider = await ensureProviderAvailable(context, refreshCoordinator, provider);
+    if (!availableProvider) {
+      return false;
+    }
+    provider = availableProvider;
+  }
+
+  if (provider.locked) {
+    return false;
+  }
+
+  if (provider.invalid || !provider.profile) {
+    const created = await ensureProviderProfileWithExpectedVersion(
+      provider.name,
+      provider.source,
+      provider.syncVersion,
+      provider.syncUpdatedAt,
+    );
+    if (!created) {
+      return false;
+    }
+  }
+
+  const savedProvider = getSavedProviderEntry(provider.name, provider.source);
+  if (!savedProvider) {
+    logCommandError(logScope, "provider-unavailable", {
+      provider: provider.name,
+      source: provider.source,
+    });
+    vscode.window.showErrorMessage(`Provider "${provider.name}" is unavailable.`);
+    return false;
+  }
+
+  const result = await switchToSavedProviderEntry(savedProvider);
+  if (!result.success) {
+    logCommandWarn(logScope, "provider-switch-failed", {
+      provider: savedProvider.name,
+      source: savedProvider.source,
+      conflict: result.conflict ?? false,
+      message: result.message,
+    });
+    if (result.conflict) {
+      await showSyncConflictWarning(result.message);
+    } else {
+      vscode.window.showErrorMessage(result.message);
+    }
+    return false;
+  }
+
+  logCommandInfo(logScope, "provider-switched", {
+    provider: savedProvider.name,
+    source: savedProvider.source,
+  });
+  if (result.healedMarker) {
+    vscode.window.showInformationMessage(formatHealedMarkerMessage(result.healedMarker));
+  }
+  vscode.window.showInformationMessage(`✓ ${result.message}`);
+  refreshAll(refreshCoordinator, undefined, {
+    reason: "provider-switch",
+    fullRefresh: false,
+  });
+  await maybeReloadWindowAfterSwitch(savedProvider.name, "mode");
+  return true;
+}
+
 async function restoreSelectionAfterLogin(
   previousSelection: ReturnType<typeof getSavedCurrentSelection>,
   targetAccount: SavedAccountInfo,
@@ -1513,6 +1585,21 @@ export function registerCommands(
       }
     ),
 
+    vscode.commands.registerCommand(
+      "codex-account-switch.switchProvider",
+      async (item?: ProviderTreeItem) => {
+        await runTimedCommand("switchProvider", async (perf) => {
+          const provider = await pickSavedProvider(item, "Select a provider to switch to");
+          if (!provider) return;
+          perf.mark("pick-saved-provider", {
+            provider: provider.name,
+            source: provider.source,
+          });
+          await switchSavedProviderForCommand(context, refreshCoordinator, provider, "switch-provider");
+        });
+      }
+    ),
+
     vscode.commands.registerCommand("codex-account-switch.switchMode", async () => {
       const picked = await pickModeAction();
       if (!picked) {
@@ -1610,69 +1697,7 @@ export function registerCommands(
         return;
       }
 
-      if (picked.provider.locked) {
-        const provider = await ensureProviderAvailable(context, refreshCoordinator, picked.provider);
-        if (!provider) {
-          return;
-        }
-        picked.provider = provider;
-      }
-
-      if (picked.provider.locked) {
-        return;
-      }
-
-      if (picked.provider.invalid || !picked.provider.profile) {
-        const created = await ensureProviderProfileWithExpectedVersion(
-          picked.provider.name,
-          picked.provider.source,
-          picked.provider.syncVersion,
-          picked.provider.syncUpdatedAt,
-        );
-        if (!created) {
-          return;
-        }
-      }
-
-      const provider = getSavedProviderEntry(picked.provider.name, picked.provider.source);
-      if (!provider) {
-        logCommandError("switch-mode", "provider-unavailable", {
-          provider: picked.provider.name,
-          source: picked.provider.source,
-        });
-        vscode.window.showErrorMessage(`Provider "${picked.provider.name}" is unavailable.`);
-        return;
-      }
-
-      const result = await switchToSavedProviderEntry(provider);
-      if (!result.success) {
-        logCommandWarn("switch-mode", "provider-switch-failed", {
-          provider: provider.name,
-          source: provider.source,
-          conflict: result.conflict ?? false,
-          message: result.message,
-        });
-        if (result.conflict) {
-          await showSyncConflictWarning(result.message);
-        } else {
-          vscode.window.showErrorMessage(result.message);
-        }
-        return;
-      }
-
-      logCommandInfo("switch-mode", "provider-switched", {
-        provider: provider.name,
-        source: provider.source,
-      });
-      if (result.healedMarker) {
-        vscode.window.showInformationMessage(formatHealedMarkerMessage(result.healedMarker));
-      }
-      vscode.window.showInformationMessage(`✓ ${result.message}`);
-      refreshAll(refreshCoordinator, undefined, {
-        reason: "provider-switch",
-        fullRefresh: false,
-      });
-      await maybeReloadWindowAfterSwitch(provider.name, "mode");
+      await switchSavedProviderForCommand(context, refreshCoordinator, picked.provider, "switch-mode");
     }),
 
     vscode.commands.registerCommand(

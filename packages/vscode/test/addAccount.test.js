@@ -3156,7 +3156,7 @@ test("provider switch refreshes views without triggering quota requests", async 
         await waitForRefreshCoordinatorIdle(context);
 
         requestLog.length = 0;
-        await mocked.registeredCommands.get("codex-account-switch.switchMode")();
+        await mocked.registeredCommands.get("codex-account-switch.switchProvider")();
         await waitForRefreshCoordinatorIdle(context);
 
         assert.equal(requestLog.length, 0);

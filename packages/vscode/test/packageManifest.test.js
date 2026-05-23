@@ -291,6 +291,23 @@ test("provider context menu exposes remove for local and cloud providers", () =>
   assert.equal(removeProvider?.group, "context@3");
 });
 
+test("provider context menu exposes switch provider inline action", () => {
+  const byId = new Map(commands.map((command) => [command.command, command]));
+  const contextMenus = manifest.contributes.menus["view/item/context"] ?? [];
+  const switchProvider = contextMenus.find(
+    (item) =>
+      item.command === "codex-account-switch.switchProvider" &&
+      item.when ===
+        "view == codexAccountSwitchProviders && (viewItem == providerLocal || viewItem == providerCloud)"
+  );
+
+  assert.equal(
+    byId.get("codex-account-switch.switchProvider")?.title,
+    "Switch Provider"
+  );
+  assert.equal(switchProvider?.group, "inline@1");
+});
+
 test("accounts view title menu exposes a single refresh entrypoint", () => {
   const titleMenus = manifest.contributes.menus["view/title"] ?? [];
   const accountViewCommands = titleMenus
@@ -310,7 +327,46 @@ test("accounts view title menu exposes a single refresh entrypoint", () => {
   assert.deepEqual(present, ["codex-account-switch.refresh"]);
 });
 
-test("accounts view title menu exposes auto-switch settings", () => {
+test("accounts view title menu is ordered by semantic groups", () => {
+  const titleMenus = manifest.contributes.menus["view/title"] ?? [];
+  const accountTitleItems = titleMenus
+    .filter((item) => item.when?.startsWith("view == codexAccountSwitchAccounts"))
+    .sort((left, right) => {
+      const leftOrder = Number(left.group?.match(/@(\d+)$/)?.[1] ?? 0);
+      const rightOrder = Number(right.group?.match(/@(\d+)$/)?.[1] ?? 0);
+
+      return leftOrder - rightOrder;
+    });
+
+  assert.deepEqual(
+    accountTitleItems.map((item) => item.command),
+    [
+      "codex-account-switch.refresh",
+      "codex-account-switch.expandAllAccounts",
+      "codex-account-switch.addAccount",
+      "codex-account-switch.importAccounts",
+      "codex-account-switch.reloadWindow",
+      "codex-account-switch.selectAutoRefreshDevice",
+      "codex-account-switch.enableAutoSwitch",
+      "codex-account-switch.disableAutoSwitch",
+    ]
+  );
+  assert.deepEqual(
+    accountTitleItems.map((item) => item.group),
+    [
+      "navigation@1",
+      "navigation@2",
+      "navigation@3",
+      "navigation@4",
+      "navigation@6",
+      "navigation@7",
+      "navigation@8",
+      "navigation@8",
+    ]
+  );
+});
+
+test("accounts view title menu hides switch mode and auto-switch settings", () => {
   const titleMenus = manifest.contributes.menus["view/title"] ?? [];
   const enabledItem = titleMenus.find(
     (item) =>
@@ -329,10 +385,31 @@ test("accounts view title menu exposes auto-switch settings", () => {
       item.command === "codex-account-switch.configureAutoSwitch" &&
       item.when === "view == codexAccountSwitchAccounts"
   );
+  const switchModeItem = titleMenus.find(
+    (item) =>
+      item.command === "codex-account-switch.switchMode" &&
+      item.when === "view == codexAccountSwitchAccounts"
+  );
 
   assert.equal(enabledItem?.group, "navigation@8");
   assert.equal(disabledItem?.group, "navigation@8");
-  assert.equal(settingsItem?.group, "navigation@9");
+  assert.equal(settingsItem, undefined);
+  assert.equal(switchModeItem, undefined);
+});
+
+test("providers view hides switch mode title and welcome entrypoints", () => {
+  const titleMenus = manifest.contributes.menus["view/title"] ?? [];
+  const providerSwitchModeItem = titleMenus.find(
+    (item) =>
+      item.command === "codex-account-switch.switchMode" &&
+      item.when === "view == codexAccountSwitchProviders"
+  );
+  const providerWelcome = manifest.contributes.viewsWelcome.find(
+    (item) => item.view === "codexAccountSwitchProviders"
+  );
+
+  assert.equal(providerSwitchModeItem, undefined);
+  assert.equal(providerWelcome?.contents.includes("Switch mode"), false);
 });
 
 test("locked cloud accounts expose unlock in the context menu", () => {

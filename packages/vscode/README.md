@@ -23,10 +23,10 @@ Codex Account Switch gives you a dedicated Activity Bar view for saved accounts,
 Open the **Codex Account Switch** view from the Activity Bar to:
 
 - See all saved accounts
+- See saved providers
 - Identify the currently active account
 - Inspect account email, plan, and quota usage
 - Run inline actions such as switch and refresh
-- Toggle auto-switch behavior from the view toolbar through **Auto-Switch Settings**
 
 ## Commands
 
@@ -34,6 +34,7 @@ Available commands:
 
 - `Codex Account Switch: Add Account`
 - `Codex Account Switch: Switch Account`
+- `Codex Account Switch: Switch Provider`
 - `Codex Account Switch: Refresh Token`
 - `Codex Account Switch: Refresh Quota`
 - `Codex Account Switch: Import Accounts`

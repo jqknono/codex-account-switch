@@ -67,7 +67,7 @@
       },
       {
         "view": "codexAccountSwitchProviders",
-        "contents": "No provider profiles to display yet.\n[Switch mode](command:codex-account-switch.switchMode)"
+        "contents": "No provider profiles to display yet."
       }
     ],
     "commands": [
@@ -112,6 +112,12 @@
         "title": "Switch Mode",
         "category": "Codex Account Switch",
         "icon": "$(plug)"
+      },
+      {
+        "command": "codex-account-switch.switchProvider",
+        "title": "Switch Provider",
+        "category": "Codex Account Switch",
+        "icon": "$(arrow-swap)"
       },
       {
         "command": "codex-account-switch.refreshToken",
@@ -255,32 +261,27 @@
     "menus": {
       "view/title": [
         {
-          "command": "codex-account-switch.switchMode",
+          "command": "codex-account-switch.refresh",
           "when": "view == codexAccountSwitchAccounts",
           "group": "navigation@1"
         },
         {
-          "command": "codex-account-switch.reloadWindow",
+          "command": "codex-account-switch.expandAllAccounts",
           "when": "view == codexAccountSwitchAccounts",
           "group": "navigation@2"
         },
         {
-          "command": "codex-account-switch.importAccounts",
+          "command": "codex-account-switch.addAccount",
           "when": "view == codexAccountSwitchAccounts",
           "group": "navigation@3"
         },
         {
-          "command": "codex-account-switch.addAccount",
+          "command": "codex-account-switch.importAccounts",
           "when": "view == codexAccountSwitchAccounts",
           "group": "navigation@4"
         },
         {
-          "command": "codex-account-switch.refresh",
-          "when": "view == codexAccountSwitchAccounts",
-          "group": "navigation@5"
-        },
-        {
-          "command": "codex-account-switch.expandAllAccounts",
+          "command": "codex-account-switch.reloadWindow",
           "when": "view == codexAccountSwitchAccounts",
           "group": "navigation@6"
         },
@@ -298,16 +299,6 @@
           "command": "codex-account-switch.disableAutoSwitch",
           "when": "view == codexAccountSwitchAccounts && codexAccountSwitch.autoSwitchEnabled",
           "group": "navigation@8"
-        },
-        {
-          "command": "codex-account-switch.configureAutoSwitch",
-          "when": "view == codexAccountSwitchAccounts",
-          "group": "navigation@9"
-        },
-        {
-          "command": "codex-account-switch.switchMode",
-          "when": "view == codexAccountSwitchProviders",
-          "group": "navigation@1"
         },
         {
           "command": "codex-account-switch.reloadWindow",
@@ -385,6 +376,11 @@
           "command": "codex-account-switch.refreshQuota",
           "when": "view == codexAccountSwitchAccounts && viewItem == accountGroupCloud",
           "group": "refresh@1"
+        },
+        {
+          "command": "codex-account-switch.switchProvider",
+          "when": "view == codexAccountSwitchProviders && (viewItem == providerLocal || viewItem == providerCloud)",
+          "group": "inline@1"
         },
         {
           "command": "codex-account-switch.moveProviderToCloud",
