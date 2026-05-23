@@ -416,7 +416,7 @@ function formatHealedMarkerMessage(healedMarker: HealedCloudMarker): string {
 }
 
 function formatAccountChoice(account: SavedAccountInfo): string {
-  const parts = [account.meta?.email ?? "unknown"];
+  const parts = [account.meta?.email ?? account.publicEmail ?? "unknown"];
   if (account.meta?.plan) {
     parts.push(account.meta.plan);
   }
@@ -2523,4 +2523,3 @@ export function registerCommands(
     })
   );
 }
-

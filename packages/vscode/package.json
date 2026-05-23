@@ -486,7 +486,9 @@
           "default": {
             "version": 1,
             "accounts": {},
+            "accountNames": [],
             "providers": {},
+            "providerNames": [],
             "devices": [],
             "autoRefreshDeviceName": null
           },

@@ -50,6 +50,7 @@ export type SaveTarget = StorageSource;
 const LOG_PREFIX = "[codex-account-switch:vscode:savedEntries]";
 const SYNCED_CLOUD_STATE_KEY = "codex-account-switch.syncedCloudState.v1";
 const SYNCED_CLOUD_ACCOUNT_KEY_PREFIX = "codex-account-switch.syncedCloudAccount.v1.";
+const SYNCED_CLOUD_PROVIDER_KEY_PREFIX = "codex-account-switch.syncedCloudProvider.v1.";
 const SYNCED_CLOUD_MIGRATION_KEY = "codex-account-switch.syncedCloudStateMigration.v1";
 
 export interface SavedAccountInfo {
@@ -57,6 +58,7 @@ export interface SavedAccountInfo {
   name: string;
   source: StorageSource;
   meta: AccountMeta | null;
+  publicEmail: string | null;
   auth: AuthFile | null;
   isCurrent: boolean;
   storageState: "ready" | "locked" | "invalid";
@@ -187,6 +189,7 @@ interface SyncedStorageData {
   accounts: Record<string, unknown>;
   accountNames: string[];
   providers: Record<string, unknown>;
+  providerNames: string[];
   devices: string[];
   autoRefreshDeviceName: string | null;
 }
@@ -244,6 +247,24 @@ function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
+function getPublicEmail(value: unknown): string | null {
+  if (!isRecord(value) || typeof value.email !== "string") {
+    return null;
+  }
+  const email = value.email.trim();
+  return email.length > 0 ? email : null;
+}
+
+function withPublicEmail(value: Record<string, unknown>, email: string | null): Record<string, unknown> {
+  const next = clone(value);
+  if (email) {
+    next.email = email;
+  } else {
+    delete next.email;
+  }
+  return next;
+}
+
 function normalizeSyncedStorage(raw: unknown): SyncedStorageData {
   if (!isRecord(raw) || raw.version !== 1) {
     return getDefaultSyncedStorage();
@@ -254,11 +275,17 @@ function normalizeSyncedStorage(raw: unknown): SyncedStorageData {
     ...Object.keys(accounts),
     ...(Array.isArray(raw.accountNames) ? raw.accountNames : []),
   ]);
+  const providers = isRecord(raw.providers) ? clone(raw.providers) : {};
+  const providerNames = normalizeDeviceNames([
+    ...Object.keys(providers),
+    ...(Array.isArray(raw.providerNames) ? raw.providerNames : []),
+  ]);
   return {
     version: 1,
     accounts,
     accountNames,
-    providers: isRecord(raw.providers) ? clone(raw.providers) : {},
+    providers,
+    providerNames,
     devices: normalizeDeviceNames(raw.devices),
     autoRefreshDeviceName: getNormalizedAutoRefreshDeviceName(raw.autoRefreshDeviceName),
   };
@@ -340,6 +367,66 @@ function applySyncMetadata(value: Record<string, unknown>, metadata: SavedStorag
 
 function hasSyncConflict(expectedEntryVersion: number | null | undefined, current: SavedStorageSyncMetadata): boolean {
   return expectedEntryVersion != null && current.entryVersion !== expectedEntryVersion;
+}
+
+function shouldPreferCandidatePayload(current: unknown, candidate: unknown): boolean {
+  if (candidate === undefined) {
+    return false;
+  }
+  if (current === undefined) {
+    return true;
+  }
+  const currentVersion = getSyncMetadata(current).entryVersion;
+  const candidateVersion = getSyncMetadata(candidate).entryVersion;
+  if (candidateVersion == null) {
+    return currentVersion == null;
+  }
+  return currentVersion == null || candidateVersion >= currentVersion;
+}
+
+function mergeSyncedPayload(target: Record<string, unknown>, name: string, candidate: unknown): void {
+  if (shouldPreferCandidatePayload(target[name], candidate)) {
+    target[name] = clone(candidate);
+  }
+}
+
+function getExpectedSyncMetadata(
+  expectedEntryVersion?: number | null,
+  expectedUpdatedAt?: string | null,
+): SavedStorageSyncMetadata {
+  return {
+    entryVersion: expectedEntryVersion ?? null,
+    updatedAt: expectedUpdatedAt ?? null,
+    lastWriterDeviceName: null,
+    lastWriterAction: null,
+  };
+}
+
+function shouldUseExpectedSnapshotAsCurrent(
+  expected: SavedStorageSyncMetadata,
+  current: SavedStorageSyncMetadata,
+): boolean {
+  return (
+    expected.entryVersion != null
+    && (current.entryVersion == null || expected.entryVersion > current.entryVersion)
+  );
+}
+
+function formatMissingSyncedPayloadResult(
+  entryType: "account" | "provider",
+  name: string,
+  expected: SavedStorageSyncMetadata,
+): CloudMutationResult {
+  const label = entryType === "account" ? "Cloud account" : "Cloud provider";
+  const expectedVersion = expected.entryVersion ?? "unknown";
+  const expectedUpdatedAt = expected.updatedAt ?? "unknown";
+  return {
+    success: false,
+    message:
+      `${label} "${name}" no longer has a synced payload. `
+      + `The stale local snapshot expected version ${expectedVersion} (${expectedUpdatedAt}). `
+      + "Refresh the list before retrying.",
+  };
 }
 
 function readLocalFileSnapshot(filePath: string): Buffer | null {
@@ -479,6 +566,7 @@ function getDefaultSyncedStorage(): SyncedStorageData {
     accounts: {},
     accountNames: [],
     providers: {},
+    providerNames: [],
     devices: [],
     autoRefreshDeviceName: null,
   };
@@ -500,39 +588,35 @@ function readSyncedStorage(): SyncedStorageData {
   const raw = requireContext().globalState.get<unknown>(SYNCED_CLOUD_STATE_KEY);
   const storage = normalizeSyncedStorage(raw);
   const accounts: Record<string, unknown> = {};
-  const missingAccountNames: string[] = [];
+  const providers: Record<string, unknown> = {};
+  const legacy = readLegacySyncedStorage();
+  const accountNames = normalizeDeviceNames([
+    ...storage.accountNames,
+    ...Object.keys(storage.accounts),
+  ]);
+  const providerNames = normalizeDeviceNames([
+    ...storage.providerNames,
+    ...Object.keys(storage.providers),
+  ]);
 
-  for (const name of storage.accountNames) {
-    const account = requireContext().globalState.get<unknown>(getSyncedCloudAccountKey(name));
-    if (account !== undefined) {
-      accounts[name] = clone(account);
-      continue;
-    }
-    if (name in storage.accounts) {
-      accounts[name] = storage.accounts[name];
-      continue;
-    }
-    missingAccountNames.push(name);
+  for (const name of accountNames) {
+    mergeSyncedPayload(accounts, name, legacy.accounts[name]);
+    mergeSyncedPayload(accounts, name, storage.accounts[name]);
+    mergeSyncedPayload(accounts, name, requireContext().globalState.get<unknown>(getSyncedCloudAccountKey(name)));
   }
 
-  if (missingAccountNames.length > 0) {
-    const legacy = readLegacySyncedStorage();
-    for (const name of missingAccountNames) {
-      if (name in legacy.accounts && !(name in accounts)) {
-        accounts[name] = legacy.accounts[name];
-      }
-    }
+  for (const name of providerNames) {
+    mergeSyncedPayload(providers, name, legacy.providers[name]);
+    mergeSyncedPayload(providers, name, storage.providers[name]);
+    mergeSyncedPayload(providers, name, requireContext().globalState.get<unknown>(getSyncedCloudProviderKey(name)));
   }
 
-  for (const [name, account] of Object.entries(storage.accounts)) {
-    if (!(name in accounts)) {
-      accounts[name] = account;
-    }
-  }
   return {
     ...storage,
     accounts,
     accountNames: Object.keys(accounts).sort(),
+    providers,
+    providerNames: Object.keys(providers).sort(),
   };
 }
 
@@ -544,52 +628,73 @@ function getSyncedCloudAccountKey(name: string): string {
   return `${SYNCED_CLOUD_ACCOUNT_KEY_PREFIX}${encodeURIComponent(name)}`;
 }
 
-function getSyncedCloudSyncKeys(accountNames: string[]): string[] {
+function getSyncedCloudProviderKey(name: string): string {
+  return `${SYNCED_CLOUD_PROVIDER_KEY_PREFIX}${encodeURIComponent(name)}`;
+}
+
+function getSyncedCloudSyncKeys(accountNames: string[], providerNames: string[]): string[] {
   return [
     SYNCED_CLOUD_STATE_KEY,
     ...normalizeDeviceNames(accountNames).sort().map(getSyncedCloudAccountKey),
+    ...normalizeDeviceNames(providerNames).sort().map(getSyncedCloudProviderKey),
   ];
 }
 
-function setSyncedCloudSyncKeys(accountNames: string[]): void {
-  requireContext().globalState.setKeysForSync(getSyncedCloudSyncKeys(accountNames));
+function setSyncedCloudSyncKeys(accountNames: string[], providerNames: string[]): void {
+  requireContext().globalState.setKeysForSync(getSyncedCloudSyncKeys(accountNames, providerNames));
 }
 
 function toSyncedCloudStateIndex(data: SyncedStorageData): SyncedStorageData {
   const accountNames = Object.keys(data.accounts).sort();
+  const providerNames = Object.keys(data.providers).sort();
   return {
     version: 1,
     accounts: {},
     accountNames,
-    providers: clone(data.providers),
+    providers: {},
+    providerNames,
     devices: [...data.devices],
     autoRefreshDeviceName: data.autoRefreshDeviceName,
   };
 }
 
-async function materializeSyncedCloudAccounts(data: SyncedStorageData): Promise<void> {
+async function materializeSyncedCloudEntries(data: SyncedStorageData): Promise<void> {
   for (const [name, account] of Object.entries(data.accounts)) {
     if (account === undefined) {
       continue;
     }
     const key = getSyncedCloudAccountKey(name);
-    if (requireContext().globalState.get<unknown>(key) !== undefined) {
+    const current = requireContext().globalState.get<unknown>(key);
+    if (!shouldPreferCandidatePayload(current, account)) {
       continue;
     }
     await requireContext().globalState.update(key, clone(account));
   }
+  for (const [name, provider] of Object.entries(data.providers)) {
+    if (provider === undefined) {
+      continue;
+    }
+    const key = getSyncedCloudProviderKey(name);
+    const current = requireContext().globalState.get<unknown>(key);
+    if (!shouldPreferCandidatePayload(current, provider)) {
+      continue;
+    }
+    await requireContext().globalState.update(key, clone(provider));
+  }
 }
 
 async function writeSyncedCloudStateIndex(data: SyncedStorageData): Promise<void> {
-  await materializeSyncedCloudAccounts(data);
   const index = toSyncedCloudStateIndex(data);
   await requireContext().globalState.update(SYNCED_CLOUD_STATE_KEY, index);
-  setSyncedCloudSyncKeys(index.accountNames);
+  setSyncedCloudSyncKeys(index.accountNames, index.providerNames);
 }
 
 async function writeFullSyncedStorage(data: SyncedStorageData): Promise<void> {
   for (const [name, account] of Object.entries(data.accounts)) {
     await requireContext().globalState.update(getSyncedCloudAccountKey(name), clone(account));
+  }
+  for (const [name, provider] of Object.entries(data.providers)) {
+    await requireContext().globalState.update(getSyncedCloudProviderKey(name), clone(provider));
   }
   await writeSyncedCloudStateIndex(data);
 }
@@ -601,10 +706,24 @@ async function writeSyncedCloudAccount(name: string, value: Record<string, unkno
   await writeSyncedCloudStateIndex(storage);
 }
 
+async function writeSyncedCloudProvider(name: string, value: Record<string, unknown>): Promise<void> {
+  const storage = readSyncedStorage();
+  storage.providers[name] = clone(value);
+  await requireContext().globalState.update(getSyncedCloudProviderKey(name), clone(value));
+  await writeSyncedCloudStateIndex(storage);
+}
+
 async function removeSyncedCloudAccount(name: string): Promise<void> {
   const storage = readSyncedStorage();
   delete storage.accounts[name];
   await requireContext().globalState.update(getSyncedCloudAccountKey(name), undefined);
+  await writeSyncedCloudStateIndex(storage);
+}
+
+async function removeSyncedCloudProvider(name: string): Promise<void> {
+  const storage = readSyncedStorage();
+  delete storage.providers[name];
+  await requireContext().globalState.update(getSyncedCloudProviderKey(name), undefined);
   await writeSyncedCloudStateIndex(storage);
 }
 
@@ -623,10 +742,13 @@ async function clearLegacySyncedStorage(): Promise<void> {
 
 export async function initializeSavedEntries(context: vscode.ExtensionContext): Promise<void> {
   extensionContext = context;
-  setSyncedCloudSyncKeys(readSyncedStorage().accountNames);
+  const currentStorage = readSyncedStorage();
+  setSyncedCloudSyncKeys(currentStorage.accountNames, currentStorage.providerNames);
 
   const existingGlobalState = context.globalState.get<unknown>(SYNCED_CLOUD_STATE_KEY);
   if (existingGlobalState !== undefined) {
+    await materializeSyncedCloudEntries(currentStorage);
+    await writeSyncedCloudStateIndex(currentStorage);
     if (!getSyncedCloudMigrationState()) {
       await setSyncedCloudMigrationState({
         completedAt: new Date().toISOString(),
@@ -868,6 +990,13 @@ function readCloudProvider(name: string) {
   return deserializeSavedValue<ProviderProfile>(getStoredCloudProviderRaw(name), "saved_provider");
 }
 
+async function updateCloudAccountPublicEmail(name: string, raw: unknown, email: string): Promise<void> {
+  if (!isRecord(raw) || getPublicEmail(raw)) {
+    return;
+  }
+  await requireContext().globalState.update(getSyncedCloudAccountKey(name), withPublicEmail(raw, email));
+}
+
 function getLocalAccounts(perf?: ReturnType<typeof startPerformanceLog>): SavedAccountInfo[] {
   const names = listNamedAuthFiles();
   perf?.mark("list-local-auth-files", {
@@ -881,6 +1010,7 @@ function getLocalAccounts(perf?: ReturnType<typeof startPerformanceLog>): SavedA
         name,
         source: "local" as const,
         meta: extractMeta(result.value),
+        publicEmail: null,
         auth: result.value,
         isCurrent: false,
         storageState: "ready" as const,
@@ -899,6 +1029,7 @@ function getLocalAccounts(perf?: ReturnType<typeof startPerformanceLog>): SavedA
       name,
       source: "local" as const,
       meta: null,
+      publicEmail: null,
       auth: null,
       isCurrent: false,
       storageState: result.status === "locked" ? "locked" as const : "invalid" as const,
@@ -928,13 +1059,24 @@ function getCloudAccounts(perf?: ReturnType<typeof startPerformanceLog>): SavedA
   const accounts = Object.keys(storage.accounts).sort().map((name) => {
     const raw = storage.accounts[name];
     const syncMetadata = getSyncMetadata(raw);
+    const publicEmail = getPublicEmail(raw);
     const result = readCloudAccount(name);
     if (result.status === "ok") {
+      const meta = extractMeta(result.value);
+      if (!publicEmail && meta.email) {
+        void updateCloudAccountPublicEmail(name, raw, meta.email).catch((error) => {
+          logWarn(LOG_PREFIX, "cloud-account-public-email-backfill-failed", {
+            account: name,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+      }
       return {
         id: toId("cloud", name),
         name,
         source: "cloud" as const,
-        meta: extractMeta(result.value),
+        meta,
+        publicEmail: publicEmail ?? meta.email,
         auth: result.value,
         isCurrent: false,
         storageState: "ready" as const,
@@ -952,6 +1094,7 @@ function getCloudAccounts(perf?: ReturnType<typeof startPerformanceLog>): SavedA
       name,
       source: "cloud" as const,
       meta: null,
+      publicEmail,
       auth: null,
       isCurrent: false,
       storageState: result.status === "locked" ? "locked" as const : "invalid" as const,
@@ -1240,23 +1383,25 @@ async function writeCloudAccountWithExpectedVersion(
   await ensureCurrentDeviceRegistered();
   const storage = readSyncedStorage();
   const currentMetadata = getSyncMetadata(storage.accounts[name]);
-  if (hasSyncConflict(expectedEntryVersion, currentMetadata)) {
+  const expectedMetadata = getExpectedSyncMetadata(expectedEntryVersion, expectedUpdatedAt);
+  const effectiveCurrentMetadata = shouldUseExpectedSnapshotAsCurrent(expectedMetadata, currentMetadata)
+    ? expectedMetadata
+    : currentMetadata;
+  if (hasSyncConflict(expectedEntryVersion, currentMetadata) && effectiveCurrentMetadata !== expectedMetadata) {
     return formatConflictResult(
       buildConflict(
         "account",
         name,
-        {
-          entryVersion: expectedEntryVersion ?? null,
-          updatedAt: expectedUpdatedAt ?? null,
-        },
+        expectedMetadata,
         currentMetadata,
       ),
     );
   }
-  const nextMetadata = nextSyncMetadata(currentMetadata);
-  const nextAccount = applySyncMetadata(serializeSavedValue("saved_auth", auth as Record<string, unknown>, {
+  const nextMetadata = nextSyncMetadata(effectiveCurrentMetadata);
+  const serialized = serializeSavedValue("saved_auth", auth as Record<string, unknown>, {
     requireEncryption: true,
-  }), nextMetadata);
+  });
+  const nextAccount = applySyncMetadata(withPublicEmail(serialized, extractMeta(auth).email), nextMetadata);
   await writeSyncedCloudAccount(name, nextAccount);
   return {
     success: true,
@@ -1276,24 +1421,25 @@ async function writeCloudProviderWithExpectedVersion(
   await ensureCurrentDeviceRegistered();
   const storage = readSyncedStorage();
   const currentMetadata = getSyncMetadata(storage.providers[profile.name]);
-  if (hasSyncConflict(expectedEntryVersion, currentMetadata)) {
+  const expectedMetadata = getExpectedSyncMetadata(expectedEntryVersion, expectedUpdatedAt);
+  const effectiveCurrentMetadata = shouldUseExpectedSnapshotAsCurrent(expectedMetadata, currentMetadata)
+    ? expectedMetadata
+    : currentMetadata;
+  if (hasSyncConflict(expectedEntryVersion, currentMetadata) && effectiveCurrentMetadata !== expectedMetadata) {
     return formatConflictResult(
       buildConflict(
         "provider",
         profile.name,
-        {
-          entryVersion: expectedEntryVersion ?? null,
-          updatedAt: expectedUpdatedAt ?? null,
-        },
+        expectedMetadata,
         currentMetadata,
       ),
     );
   }
-  const nextMetadata = nextSyncMetadata(currentMetadata, getCurrentWriterMetadata(auditAction));
-  storage.providers[profile.name] = applySyncMetadata(serializeSavedValue("saved_provider", profile as unknown as Record<string, unknown>, {
+  const nextMetadata = nextSyncMetadata(effectiveCurrentMetadata, getCurrentWriterMetadata(auditAction));
+  const nextProvider = applySyncMetadata(serializeSavedValue("saved_provider", profile as unknown as Record<string, unknown>, {
     requireEncryption: true,
   }), nextMetadata);
-  await writeSyncedStorage(storage);
+  await writeSyncedCloudProvider(profile.name, nextProvider);
   return {
     success: true,
     message: `Provider "${profile.name}" was saved to cloud storage`,
@@ -1334,9 +1480,12 @@ async function renameCloudAccountEntry(
   const nextAccount = isRecord(currentRaw)
     ? applySyncMetadata(clone(currentRaw), nextMetadata)
     : applySyncMetadata(
-        serializeSavedValue("saved_auth", (account.auth ?? {}) as Record<string, unknown>, {
-          requireEncryption: true,
-        }),
+        withPublicEmail(
+          serializeSavedValue("saved_auth", (account.auth ?? {}) as Record<string, unknown>, {
+            requireEncryption: true,
+          }),
+          account.meta?.email ?? account.publicEmail,
+        ),
         nextMetadata,
       );
   await renameSyncedCloudAccount(account.name, newName, nextAccount);
@@ -1365,6 +1514,9 @@ async function removeCloudAccountEntry(
 ): Promise<CloudMutationResult> {
   const storage = readSyncedStorage();
   if (!(name in storage.accounts)) {
+    if (expected.entryVersion != null) {
+      return formatMissingSyncedPayloadResult("account", name, expected);
+    }
     return { success: false, message: `Account "${name}" does not exist.` };
   }
   const currentMetadata = getSyncMetadata(storage.accounts[name]);
@@ -1381,14 +1533,16 @@ async function removeCloudProviderEntry(
 ): Promise<CloudMutationResult> {
   const storage = readSyncedStorage();
   if (!(name in storage.providers)) {
+    if (expected.entryVersion != null) {
+      return formatMissingSyncedPayloadResult("provider", name, expected);
+    }
     return { success: false, message: `Provider "${name}" does not exist.` };
   }
   const currentMetadata = getSyncMetadata(storage.providers[name]);
   if (hasSyncConflict(expected.entryVersion, currentMetadata)) {
     return formatConflictResult(buildConflict("provider", name, expected, currentMetadata));
   }
-  delete storage.providers[name];
-  await writeSyncedStorage(storage);
+  await removeSyncedCloudProvider(name);
   return { success: true, message: `Removed provider "${name}"` };
 }
 

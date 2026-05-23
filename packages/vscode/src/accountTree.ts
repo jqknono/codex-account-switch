@@ -234,7 +234,7 @@ export class AccountTreeItem extends vscode.TreeItem {
     super(account.name, vscode.TreeItemCollapsibleState.Expanded);
     this.id = `account:${account.id}`;
 
-    const email = account.meta?.email ?? "unknown";
+    const email = account.meta?.email ?? account.publicEmail ?? "unknown";
     const plan = account.meta?.plan ?? "unknown";
     const parts: string[] = [account.source];
     const quotaSummary = formatQuotaSummary(quotaState?.info ?? null);
@@ -753,7 +753,7 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
 
   private getAccountDetails(parent: AccountTreeItem): AccountDetailItem[] {
     const { account, quotaState } = parent;
-    const email = account.meta?.email ?? "unknown";
+    const email = account.meta?.email ?? account.publicEmail ?? "unknown";
     const plan = account.meta?.plan ?? "unknown";
     const items: AccountDetailItem[] = [];
 

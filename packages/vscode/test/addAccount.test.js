@@ -10,6 +10,7 @@ const core = require("@codex-account-switch/core");
 const STORAGE_SECRET_KEY = "codex-account-switch.savedAuthPassphrase";
 const SYNCED_CLOUD_STATE_KEY = "codex-account-switch.syncedCloudState.v1";
 const SYNCED_CLOUD_ACCOUNT_KEY_PREFIX = "codex-account-switch.syncedCloudAccount.v1.";
+const SYNCED_CLOUD_PROVIDER_KEY_PREFIX = "codex-account-switch.syncedCloudProvider.v1.";
 
 function makeJwt(payload) {
   const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url");
@@ -78,14 +79,27 @@ function getSyncedCloudAccountKey(name) {
   return `${SYNCED_CLOUD_ACCOUNT_KEY_PREFIX}${encodeURIComponent(name)}`;
 }
 
+function getSyncedCloudProviderKey(name) {
+  return `${SYNCED_CLOUD_PROVIDER_KEY_PREFIX}${encodeURIComponent(name)}`;
+}
+
 function readMockSyncedStorage(globalStateValues, legacySyncedStorage) {
   const raw = globalStateValues.get(SYNCED_CLOUD_STATE_KEY) ?? legacySyncedStorage;
   const accounts = { ...(raw?.accounts ?? {}) };
+  const providers = { ...(raw?.providers ?? {}) };
   const accountNames = new Set([
     ...Object.keys(accounts),
     ...(
       Array.isArray(raw?.accountNames)
         ? raw.accountNames.filter((name) => typeof name === "string")
+        : []
+    ),
+  ]);
+  const providerNames = new Set([
+    ...Object.keys(providers),
+    ...(
+      Array.isArray(raw?.providerNames)
+        ? raw.providerNames.filter((name) => typeof name === "string")
         : []
     ),
   ]);
@@ -95,11 +109,19 @@ function readMockSyncedStorage(globalStateValues, legacySyncedStorage) {
       accounts[name] = value;
     }
   }
-  const syncAccountNames = () => {
+  for (const name of providerNames) {
+    const value = globalStateValues.get(getSyncedCloudProviderKey(name));
+    if (value !== undefined) {
+      providers[name] = value;
+    }
+  }
+  const syncEntryNames = () => {
     const state = globalStateValues.get(SYNCED_CLOUD_STATE_KEY);
     if (state) {
       state.accountNames = Object.keys(accounts).sort();
       state.accounts = {};
+      state.providerNames = Object.keys(providers).sort();
+      state.providers = {};
     }
   };
   return {
@@ -111,7 +133,7 @@ function readMockSyncedStorage(globalStateValues, legacySyncedStorage) {
         }
         target[property] = value;
         globalStateValues.set(getSyncedCloudAccountKey(property), value);
-        syncAccountNames();
+        syncEntryNames();
         return true;
       },
       deleteProperty(target, property) {
@@ -120,12 +142,32 @@ function readMockSyncedStorage(globalStateValues, legacySyncedStorage) {
         }
         delete target[property];
         globalStateValues.delete(getSyncedCloudAccountKey(property));
-        syncAccountNames();
+        syncEntryNames();
         return true;
       },
     }),
     accountNames: [...accountNames].sort(),
-    providers: raw?.providers ?? {},
+    providers: new Proxy(providers, {
+      set(target, property, value) {
+        if (typeof property !== "string") {
+          return false;
+        }
+        target[property] = value;
+        globalStateValues.set(getSyncedCloudProviderKey(property), value);
+        syncEntryNames();
+        return true;
+      },
+      deleteProperty(target, property) {
+        if (typeof property !== "string") {
+          return false;
+        }
+        delete target[property];
+        globalStateValues.delete(getSyncedCloudProviderKey(property));
+        syncEntryNames();
+        return true;
+      },
+    }),
+    providerNames: [...providerNames].sort(),
     devices: raw?.devices ?? [],
     autoRefreshDeviceName: raw?.autoRefreshDeviceName ?? null,
   };
@@ -198,13 +240,17 @@ function createVscodeMock(options) {
         version: options.syncedStorage.version ?? 1,
         accounts: options.syncedStorage.accounts ?? {},
         providers: options.syncedStorage.providers ?? {},
+        accountNames: options.syncedStorage.accountNames ?? Object.keys(options.syncedStorage.accounts ?? {}),
+        providerNames: options.syncedStorage.providerNames ?? Object.keys(options.syncedStorage.providers ?? {}),
         devices: options.syncedStorage.devices ?? [],
         autoRefreshDeviceName: options.syncedStorage.autoRefreshDeviceName ?? null,
       }
     : {
         version: 1,
         accounts: {},
+        accountNames: [],
         providers: {},
+        providerNames: [],
         devices: [],
         autoRefreshDeviceName: null,
       };
@@ -236,11 +282,15 @@ function createVscodeMock(options) {
     for (const [name, account] of Object.entries(syncedStorage.accounts)) {
       globalStateValues.set(getSyncedCloudAccountKey(name), JSON.parse(JSON.stringify(account)));
     }
+    for (const [name, provider] of Object.entries(syncedStorage.providers)) {
+      globalStateValues.set(getSyncedCloudProviderKey(name), JSON.parse(JSON.stringify(provider)));
+    }
     globalStateValues.set(SYNCED_CLOUD_STATE_KEY, {
       version: 1,
       accounts: {},
-      accountNames: Object.keys(syncedStorage.accounts).sort(),
-      providers: JSON.parse(JSON.stringify(syncedStorage.providers)),
+      accountNames: syncedStorage.accountNames.sort(),
+      providers: {},
+      providerNames: syncedStorage.providerNames.sort(),
       devices: [...syncedStorage.devices],
       autoRefreshDeviceName: syncedStorage.autoRefreshDeviceName,
     });
@@ -393,6 +443,9 @@ function createVscodeMock(options) {
         assert.equal(section, "codex-account-switch");
         return {
           get(key, defaultValue) {
+            if (key === "syncedStorage" && options.legacyConfigurationSyncedStorage) {
+              return legacySyncedStorage;
+            }
             return config[key] ?? defaultValue;
           },
           async update(key, value) {
@@ -935,7 +988,9 @@ test("activation keeps migrated globalState data active when clearing legacy syn
         requireEncryption: true,
       }),
     },
+    accountNames: ["blocked"],
     providers: {},
+    providerNames: [],
     devices: ["device-a"],
     autoRefreshDeviceName: "device-a",
   };
@@ -958,12 +1013,294 @@ test("activation keeps migrated globalState data active when clearing legacy syn
       const context = createExtensionContext(mocked);
       await extension.activate(context);
 
-      assert.deepEqual(mocked.config.syncedStorage.accounts, syncedStorage.accounts);
+      assert.equal(mocked.config.syncedStorage.accounts.blocked.email, "acct-blocked@example.com");
+      assert.equal(mocked.config.syncedStorage.accounts.blocked.entryVersion, syncedStorage.accounts.blocked.entryVersion);
+      assert.equal(mocked.config.syncedStorage.accounts.blocked.updatedAt, syncedStorage.accounts.blocked.updatedAt);
       assert.deepEqual(mocked.legacySyncedStorage(), syncedStorage);
       assert.equal(
         mocked.warningMessages.some((entry) => /migrated to extension state/i.test(entry.message)),
         true
       );
+
+      for (const subscription of context.subscriptions.reverse()) {
+        subscription?.dispose?.();
+      }
+      await waitForRefreshCoordinatorIdle(context);
+    })
+  );
+});
+
+test("activate materializes aggregate cloud accounts and providers into per-entry synced keys", async () => {
+  const accountEntry = makeAuthFile("acct-aggregate", { email: "aggregate@example.com" });
+  const providerEntry = {
+    kind: "provider",
+    name: "proxy",
+    auth: { OPENAI_API_KEY: "sk-proxy" },
+    config: {
+      name: "proxy",
+      base_url: "https://proxy.example.com/v1",
+      wire_api: "responses",
+    },
+  };
+  const mocked = createVscodeMock({
+    globalStateValues: {
+      [SYNCED_CLOUD_STATE_KEY]: {
+        version: 1,
+        accounts: {
+          aggregate: accountEntry,
+        },
+        accountNames: ["aggregate"],
+        providers: {
+          proxy: providerEntry,
+        },
+        providerNames: ["proxy"],
+        devices: ["device-a"],
+        autoRefreshDeviceName: "device-a",
+      },
+    },
+  });
+
+  await withDisabledIntervals(() =>
+    withSuccessfulHttps(async () => {
+      const extension = loadExtensionWithMockedVscode(mocked.vscode);
+      const context = createExtensionContext(mocked);
+      await extension.activate(context);
+
+      assert.deepEqual(mocked.globalStateValues.get(SYNCED_CLOUD_STATE_KEY).accounts, {});
+      assert.deepEqual(mocked.globalStateValues.get(SYNCED_CLOUD_STATE_KEY).providers, {});
+      assert.deepEqual(mocked.globalStateValues.get(SYNCED_CLOUD_STATE_KEY).accountNames, ["aggregate"]);
+      assert.deepEqual(mocked.globalStateValues.get(SYNCED_CLOUD_STATE_KEY).providerNames, ["proxy"]);
+      assert.deepEqual(mocked.globalStateValues.get(getSyncedCloudAccountKey("aggregate")), {
+        ...accountEntry,
+        email: "aggregate@example.com",
+      });
+      assert.deepEqual(mocked.globalStateValues.get(getSyncedCloudProviderKey("proxy")), providerEntry);
+      assert.deepEqual(mocked.globalState.syncedKeys, [
+        SYNCED_CLOUD_STATE_KEY,
+        getSyncedCloudAccountKey("aggregate"),
+        getSyncedCloudProviderKey("proxy"),
+      ]);
+
+      for (const subscription of context.subscriptions.reverse()) {
+        subscription?.dispose?.();
+      }
+      await waitForRefreshCoordinatorIdle(context);
+    })
+  );
+});
+
+test("activate removes names-only cloud account and provider index entries", async () => {
+  const accountEntry = makeAuthFile("acct-present", { email: "present@example.com" });
+  const providerEntry = {
+    kind: "provider",
+    name: "present-proxy",
+    auth: { OPENAI_API_KEY: "sk-present" },
+    config: {
+      name: "present-proxy",
+      base_url: "https://present.example.com/v1",
+      wire_api: "responses",
+    },
+  };
+  const mocked = createVscodeMock({
+    globalStateValues: {
+      [SYNCED_CLOUD_STATE_KEY]: {
+        version: 1,
+        accounts: {
+          present: accountEntry,
+        },
+        accountNames: ["missing", "present"],
+        providers: {
+          "present-proxy": providerEntry,
+        },
+        providerNames: ["missing-proxy", "present-proxy"],
+        devices: ["device-a"],
+        autoRefreshDeviceName: "device-a",
+      },
+    },
+  });
+
+  await withDisabledIntervals(() =>
+    withSuccessfulHttps(async () => {
+      const extension = loadExtensionWithMockedVscode(mocked.vscode);
+      const context = createExtensionContext(mocked);
+      await extension.activate(context);
+
+      assert.deepEqual(mocked.globalStateValues.get(SYNCED_CLOUD_STATE_KEY).accountNames, ["present"]);
+      assert.deepEqual(mocked.globalStateValues.get(SYNCED_CLOUD_STATE_KEY).providerNames, ["present-proxy"]);
+      assert.equal(mocked.globalStateValues.has(getSyncedCloudAccountKey("missing")), false);
+      assert.equal(mocked.globalStateValues.has(getSyncedCloudProviderKey("missing-proxy")), false);
+      assert.deepEqual(mocked.globalState.syncedKeys, [
+        SYNCED_CLOUD_STATE_KEY,
+        getSyncedCloudAccountKey("present"),
+        getSyncedCloudProviderKey("present-proxy"),
+      ]);
+
+      for (const subscription of context.subscriptions.reverse()) {
+        subscription?.dispose?.();
+      }
+      await waitForRefreshCoordinatorIdle(context);
+    })
+  );
+});
+
+test("activate keeps the highest-version payload when materializing cloud entries", async () => {
+  const staleAccount = makeAuthFile("acct-stale", { email: "stale@example.com" });
+  staleAccount.entryVersion = 3;
+  staleAccount.updatedAt = "2026-05-01T00:00:00.000Z";
+  const freshAccount = makeAuthFile("acct-fresh", { email: "fresh@example.com" });
+  freshAccount.entryVersion = 7;
+  freshAccount.updatedAt = "2026-05-02T00:00:00.000Z";
+  const mocked = createVscodeMock({
+    globalStateValues: {
+      [SYNCED_CLOUD_STATE_KEY]: {
+        version: 1,
+        accounts: {
+          sync: freshAccount,
+        },
+        accountNames: ["sync"],
+        providers: {},
+        providerNames: [],
+        devices: [],
+        autoRefreshDeviceName: null,
+      },
+      [getSyncedCloudAccountKey("sync")]: staleAccount,
+    },
+  });
+
+  await withDisabledIntervals(() =>
+    withSuccessfulHttps(async () => {
+      const extension = loadExtensionWithMockedVscode(mocked.vscode);
+      const context = createExtensionContext(mocked);
+      await extension.activate(context);
+
+      assert.equal(mocked.globalStateValues.get(getSyncedCloudAccountKey("sync")).entryVersion, 7);
+      assert.equal(mocked.globalStateValues.get(getSyncedCloudAccountKey("sync")).email, "fresh@example.com");
+      assert.deepEqual(mocked.globalStateValues.get(SYNCED_CLOUD_STATE_KEY).accountNames, ["sync"]);
+
+      for (const subscription of context.subscriptions.reverse()) {
+        subscription?.dispose?.();
+      }
+      await waitForRefreshCoordinatorIdle(context);
+    })
+  );
+});
+
+test("activate restores names-only cloud entries from legacy payloads when available", async () => {
+  const legacyAccount = makeAuthFile("acct-legacy", { email: "legacy@example.com" });
+  legacyAccount.entryVersion = 4;
+  legacyAccount.updatedAt = "2026-05-01T00:00:00.000Z";
+  const legacyProvider = {
+    kind: "provider",
+    name: "legacy-proxy",
+    auth: { OPENAI_API_KEY: "sk-legacy" },
+    config: {
+      name: "legacy-proxy",
+      base_url: "https://legacy.example.com/v1",
+      wire_api: "responses",
+    },
+    entryVersion: 5,
+    updatedAt: "2026-05-02T00:00:00.000Z",
+  };
+  const mocked = createVscodeMock({
+    legacyConfigurationSyncedStorage: true,
+    syncedStorage: {
+      version: 1,
+      accounts: {
+        legacy: legacyAccount,
+      },
+      providers: {
+        "legacy-proxy": legacyProvider,
+      },
+      devices: [],
+      autoRefreshDeviceName: null,
+    },
+    globalStateValues: {
+      [SYNCED_CLOUD_STATE_KEY]: {
+        version: 1,
+        accounts: {},
+        accountNames: ["legacy"],
+        providers: {},
+        providerNames: ["legacy-proxy"],
+        devices: [],
+        autoRefreshDeviceName: null,
+      },
+    },
+  });
+
+  await withDisabledIntervals(() =>
+    withSuccessfulHttps(async () => {
+      const extension = loadExtensionWithMockedVscode(mocked.vscode);
+      const context = createExtensionContext(mocked);
+      await extension.activate(context);
+
+      assert.equal(mocked.globalStateValues.get(getSyncedCloudAccountKey("legacy")).entryVersion, 4);
+      assert.equal(mocked.globalStateValues.get(getSyncedCloudAccountKey("legacy")).email, "legacy@example.com");
+      assert.equal(mocked.globalStateValues.get(getSyncedCloudProviderKey("legacy-proxy")).entryVersion, 5);
+      assert.deepEqual(mocked.globalStateValues.get(SYNCED_CLOUD_STATE_KEY).accountNames, ["legacy"]);
+      assert.deepEqual(mocked.globalStateValues.get(SYNCED_CLOUD_STATE_KEY).providerNames, ["legacy-proxy"]);
+
+      for (const subscription of context.subscriptions.reverse()) {
+        subscription?.dispose?.();
+      }
+      await waitForRefreshCoordinatorIdle(context);
+    })
+  );
+});
+
+test("activate does not overwrite existing per-entry keys with aggregate legacy payloads", async () => {
+  const staleAccount = makeAuthFile("acct-stale", { email: "stale@example.com" });
+  const freshAccount = makeAuthFile("acct-fresh", { email: "fresh@example.com" });
+  const staleProvider = {
+    kind: "provider",
+    name: "proxy",
+    auth: { OPENAI_API_KEY: "sk-stale" },
+    config: {
+      name: "proxy",
+      base_url: "https://stale.example.com/v1",
+      wire_api: "responses",
+    },
+  };
+  const freshProvider = {
+    ...staleProvider,
+    auth: { OPENAI_API_KEY: "sk-fresh" },
+    config: {
+      ...staleProvider.config,
+      base_url: "https://fresh.example.com/v1",
+    },
+  };
+  const mocked = createVscodeMock({
+    globalStateValues: {
+      [SYNCED_CLOUD_STATE_KEY]: {
+        version: 1,
+        accounts: {
+          sync: staleAccount,
+        },
+        accountNames: ["sync"],
+        providers: {
+          proxy: staleProvider,
+        },
+        providerNames: ["proxy"],
+        devices: [],
+        autoRefreshDeviceName: null,
+      },
+      [getSyncedCloudAccountKey("sync")]: freshAccount,
+      [getSyncedCloudProviderKey("proxy")]: freshProvider,
+    },
+  });
+
+  await withDisabledIntervals(() =>
+    withSuccessfulHttps(async () => {
+      const extension = loadExtensionWithMockedVscode(mocked.vscode);
+      const context = createExtensionContext(mocked);
+      await extension.activate(context);
+
+      assert.deepEqual(mocked.globalStateValues.get(getSyncedCloudAccountKey("sync")), {
+        ...freshAccount,
+        email: "fresh@example.com",
+      });
+      assert.deepEqual(mocked.globalStateValues.get(getSyncedCloudProviderKey("proxy")), freshProvider);
+      assert.deepEqual(mocked.globalStateValues.get(SYNCED_CLOUD_STATE_KEY).accounts, {});
+      assert.deepEqual(mocked.globalStateValues.get(SYNCED_CLOUD_STATE_KEY).providers, {});
 
       for (const subscription of context.subscriptions.reverse()) {
         subscription?.dispose?.();
@@ -1034,6 +1371,102 @@ test("forget storage password removes the local secret and locks encrypted saved
     } else {
       process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
     }
+  }
+});
+
+test("locked cloud account uses public email from the account entry", async () => {
+  try {
+    core.setSavedAuthPassphrase("public-email-passphrase");
+    const cloudEntry = core.serializeSavedValue("saved_auth", makeAuthFile("acct-public", {
+      email: "public@example.com",
+    }), {
+      requireEncryption: true,
+    });
+    cloudEntry.email = "public@example.com";
+    core.setSavedAuthPassphrase(null);
+
+    const mocked = createVscodeMock({
+      syncedStorage: {
+        version: 1,
+        accounts: {
+          "sync-user": cloudEntry,
+        },
+        providers: {},
+      },
+    });
+
+    await withDisabledIntervals(() =>
+      withSuccessfulHttps(async () => {
+        const extension = loadExtensionWithMockedVscode(mocked.vscode);
+        const context = createExtensionContext(mocked);
+        await extension.activate(context);
+
+        const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
+        const [cloudItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
+          .filter((item) => item.account.name === "sync-user" && item.account.source === "cloud");
+        const emailItem = getAccountDetailItems(accountTreeView.treeDataProvider, cloudItem)
+          .find((item) => item.label === "Email");
+
+        assert.equal(cloudItem.account.storageState, "locked");
+        assert.equal(cloudItem.account.publicEmail, "public@example.com");
+        assert.equal(emailItem?.description, "public@example.com");
+        assert.match(cloudItem.tooltip, /Email: public@example\.com/);
+
+        for (const subscription of context.subscriptions.reverse()) {
+          subscription?.dispose?.();
+        }
+        await waitForRefreshCoordinatorIdle(context);
+      })
+    );
+  } finally {
+    core.setSavedAuthPassphrase(null);
+  }
+});
+
+test("unlocked legacy cloud account backfills public email without changing sync metadata", async () => {
+  try {
+    core.setSavedAuthPassphrase("backfill-email-passphrase");
+    const cloudEntry = core.serializeSavedValue("saved_auth", makeAuthFile("acct-backfill", {
+      email: "backfill@example.com",
+    }), {
+      requireEncryption: true,
+    });
+    cloudEntry.entryVersion = 7;
+    cloudEntry.updatedAt = "2026-05-01T00:00:00.000Z";
+    core.setSavedAuthPassphrase(null);
+
+    const mocked = createVscodeMock({
+      syncedStorage: {
+        version: 1,
+        accounts: {
+          "sync-user": cloudEntry,
+        },
+        providers: {},
+      },
+      secretValues: {
+        [STORAGE_SECRET_KEY]: "backfill-email-passphrase",
+      },
+    });
+
+    await withDisabledIntervals(() =>
+      withSuccessfulHttps(async () => {
+        const extension = loadExtensionWithMockedVscode(mocked.vscode);
+        const context = createExtensionContext(mocked);
+        await extension.activate(context);
+
+        const storedEntry = mocked.globalStateValues.get(getSyncedCloudAccountKey("sync-user"));
+        assert.equal(storedEntry.email, "backfill@example.com");
+        assert.equal(storedEntry.entryVersion, 7);
+        assert.equal(storedEntry.updatedAt, "2026-05-01T00:00:00.000Z");
+
+        for (const subscription of context.subscriptions.reverse()) {
+          subscription?.dispose?.();
+        }
+        await waitForRefreshCoordinatorIdle(context);
+      })
+    );
+  } finally {
+    core.setSavedAuthPassphrase(null);
   }
 });
 
@@ -3286,8 +3719,8 @@ test("stale cloud account mutations are blocked and can open settings json", asy
   });
 });
 
-test("remotely deleted cloud accounts are treated as conflicts instead of being recreated", async (t) => {
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-cloud-account-deleted-conflict-"));
+test("versioned cloud account snapshots recreate missing synced payloads on refresh", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-cloud-account-missing-recreate-"));
   const codexHome = path.join(tempRoot, ".codex");
   fs.mkdirSync(codexHome, { recursive: true });
 
@@ -3333,13 +3766,13 @@ test("remotely deleted cloud accounts are treated as conflicts instead of being 
 
         await mocked.registeredCommands.get("codex-account-switch.refreshToken")(cloudItem);
 
-        assert.equal(mocked.config.syncedStorage.accounts.stale, undefined);
+        assert.equal(mocked.config.syncedStorage.accounts.stale.entryVersion, 2);
+        assert.equal(mocked.config.syncedStorage.accounts.stale.email, "restored@example.com");
         assert.equal(mocked.errorMessages.length, 0);
-        assert.match(mocked.warningMessages[0]?.message ?? "", /conflict/i);
-        assert.match(mocked.warningMessages[0]?.message ?? "", /expected version 1/i);
-        assert.match(mocked.warningMessages[0]?.message ?? "", /current version unknown/i);
-        assert.ok(
-          mocked.executedCommands.some((command) => command.name === "workbench.action.openSettingsJson")
+        assert.equal(mocked.warningMessages.length, 0);
+        assert.equal(
+          mocked.executedCommands.some((command) => command.name === "workbench.action.openSettingsJson"),
+          false
         );
 
         for (const subscription of context.subscriptions.reverse()) {
@@ -3699,6 +4132,111 @@ test("move provider to local keeps an existing local provider when cloud removal
         assert.equal(localResult.value.auth.OPENAI_API_KEY, "sk-local-original");
         assert.equal(mocked.config.syncedStorage.providers[localProviderName].entryVersion, 2);
         assert.match(mocked.warningMessages[0]?.message ?? "", /conflict/i);
+
+        for (const subscription of context.subscriptions.reverse()) {
+          subscription?.dispose?.();
+        }
+        await waitForRefreshCoordinatorIdle(context);
+      })
+    );
+  } finally {
+    core.setSavedAuthPassphrase(null);
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
+test("moving one local provider to cloud does not rewrite sibling cloud provider key", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-provider-per-entry-write-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  const authDir = path.join(tempRoot, "saved-auth");
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(authDir, { recursive: true });
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  try {
+    const localProfile = {
+      kind: "provider",
+      name: "local-proxy",
+      auth: { OPENAI_API_KEY: "sk-local" },
+      config: {
+        name: "local-proxy",
+        base_url: "https://local.example.com/v1",
+        wire_api: "responses",
+      },
+    };
+    const siblingProfile = {
+      kind: "provider",
+      name: "sibling",
+      auth: { OPENAI_API_KEY: "sk-sibling" },
+      config: {
+        name: "sibling",
+        base_url: "https://sibling.example.com/v1",
+        wire_api: "responses",
+      },
+    };
+
+    core.setNamedAuthDir(authDir);
+    core.writeProviderProfile(localProfile);
+    core.setNamedAuthDir(undefined);
+
+    core.setSavedAuthPassphrase("provider-entry-passphrase");
+    const siblingEntry = core.serializeSavedValue("saved_provider", siblingProfile, {
+      requireEncryption: true,
+    });
+    siblingEntry.entryVersion = 3;
+    siblingEntry.updatedAt = "2026-04-03T00:00:00.000Z";
+    core.setSavedAuthPassphrase(null);
+
+    const mocked = createVscodeMock({
+      authDirectory: authDir,
+      syncedStorage: {
+        version: 1,
+        accounts: {},
+        providers: {
+          sibling: siblingEntry,
+        },
+      },
+      secretValues: {
+        [STORAGE_SECRET_KEY]: "provider-entry-passphrase",
+      },
+    });
+
+    await withDisabledIntervals(() =>
+      withSuccessfulHttps(async () => {
+        const extension = loadExtensionWithMockedVscode(mocked.vscode);
+        const context = createExtensionContext(mocked);
+        await extension.activate(context);
+
+        const providerTreeView = mocked.treeViews.get("codexAccountSwitchProviders");
+        const [localItem] = providerTreeView.treeDataProvider
+          .getChildren()
+          .filter((item) => item.provider.name === "local-proxy" && item.provider.source === "local");
+        const siblingBefore = JSON.parse(JSON.stringify(mocked.globalStateValues.get(getSyncedCloudProviderKey("sibling"))));
+
+        await mocked.registeredCommands.get("codex-account-switch.moveProviderToCloud")(localItem);
+
+        assert.deepEqual(mocked.globalStateValues.get(getSyncedCloudProviderKey("sibling")), siblingBefore);
+        assert.equal(typeof mocked.globalStateValues.get(getSyncedCloudProviderKey("local-proxy"))?.ciphertext, "string");
+        assert.deepEqual(mocked.globalStateValues.get(SYNCED_CLOUD_STATE_KEY).providers, {});
+        assert.deepEqual(mocked.globalStateValues.get(SYNCED_CLOUD_STATE_KEY).providerNames, ["local-proxy", "sibling"]);
 
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
@@ -5057,8 +5595,8 @@ test("stale cloud account marker self-heals before switching account", async (t)
   });
 });
 
-test("deleted cloud account marker is not auto-healed before switching account", async (t) => {
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-account-marker-no-heal-deleted-"));
+test("versioned cloud account marker recreates missing synced payload before switching account", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-account-marker-recreate-missing-"));
   const codexHome = path.join(tempRoot, ".codex");
   const authDir = path.join(tempRoot, "saved-auth");
   fs.mkdirSync(codexHome, { recursive: true });
@@ -5122,8 +5660,8 @@ test("deleted cloud account marker is not auto-healed before switching account",
         await mocked.registeredCommands.get("codex-account-switch.useAccount")(localItem);
 
         assert.equal(mocked.errorMessages.length, 0);
-        assert.match(mocked.warningMessages[0]?.message ?? "", /expected version 1/i);
-        assert.match(mocked.warningMessages[0]?.message ?? "", /current version unknown/i);
+        assert.equal(mocked.warningMessages.length, 0);
+        assert.equal(mocked.config.syncedStorage.accounts["sync-user"].entryVersion, 2);
         assert.equal(
           mocked.informationMessages.some((entry) => entry.message.includes("Detected newer synced cloud account metadata")),
           false,

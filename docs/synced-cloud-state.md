@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | Cloud account index | VS Code `globalState` synced key `codex-account-switch.syncedCloudState.v1` | Stores account names plus shared cloud metadata; account payloads are not stored in this aggregate key. |
 | Cloud accounts | Per-account VS Code `globalState` synced keys `codex-account-switch.syncedCloudAccount.v1.{name}` | Payload stays encrypted with the saved-auth passphrase; updating one account does not rewrite sibling accounts. |
-| Cloud providers | VS Code `globalState` synced key | Uses the same encrypted envelope format as accounts, plus sync revision metadata and provider audit metadata (`lastWriterDeviceName`, `lastWriterAction`). |
+| Cloud providers | Per-provider VS Code `globalState` synced keys `codex-account-switch.syncedCloudProvider.v1.{name}` | Uses the same encrypted envelope format as accounts, plus sync revision metadata and provider audit metadata (`lastWriterDeviceName`, `lastWriterAction`). |
 | Device list | VS Code `globalState` synced key | Shared across machines through Settings Sync. |
 | Auto-refresh device | VS Code `globalState` synced key | Controls which synced device may perform automatic cloud token refresh. |
 | Saved-auth passphrase | VS Code `SecretStorage` | Local-only secret, never synced. |
@@ -19,6 +19,7 @@ flowchart LR
   A[Legacy syncedStorage setting] -->|first activation migration| B[globalState synced cloud state]
   B -->|activation appends current hostname when cloud state exists| C[Device list]
   B -->|accountNames index| I[Per-account synced keys]
+  B -->|providerNames index| J[Per-provider synced keys]
   B --> D[Settings Sync]
   E[Selected auto-refresh device] --> F[Only this device may automatically refresh cloud tokens]
   D --> F
@@ -31,7 +32,11 @@ flowchart LR
 | Rule | Behavior |
 | --- | --- |
 | New synced key already exists | Use it as the only source of truth. |
-| New synced key missing and legacy setting has data | Copy the full legacy object into synced `globalState`. |
+| New synced key missing and legacy setting has data | Copy legacy entries into per-account/per-provider synced `globalState` keys and keep only index metadata in the aggregate key. |
+| Aggregate key contains legacy payloads | Materialize missing per-entry keys, prefer already-existing per-entry keys, then clear aggregate `accounts` and `providers`. |
+| Multiple sources contain the same entry | Prefer payloads with `entryVersion`; when more than one source has a version, keep the highest version and materialize it into the per-entry key. |
+| Local operation snapshot has a newer version | Use the versioned local snapshot as the write baseline when current synced storage is missing or older, then write the next version. |
+| Index name has no payload | Remove names that have no per-entry key, aggregate payload, or legacy setting payload; do not create empty entries. |
 | Legacy cleanup succeeds | Remove the old `codex-account-switch.syncedStorage` setting. |
 | Legacy cleanup fails | Keep the migrated `globalState` data active, log a warning, and show a non-fatal notice. |
 
@@ -52,7 +57,9 @@ flowchart LR
 | No `globalState` change event for remote sync | Reload/activation or explicit refresh is the supported pickup boundary. |
 | Passphrase is local-only | A second machine must enter the same password before synced cloud entries can be decrypted. |
 | Envelope format must stay unchanged | `@codex-account-switch/core` remains the canonical serializer/deserializer. |
-| Account writes are per-entry | Updating one cloud account must not rewrite other cloud account payload keys. |
+| Account/provider writes are per-entry | Updating one cloud account or provider must not rewrite sibling payload keys. |
+| Public account email | Stored unencrypted on each cloud account entry so locked entries can still show the email; tokens remain encrypted. |
+| VS Code internal caches stay private | The extension does not read `state.vscdb` or other VS Code internal storage; if data is only present there, automatic migration is abandoned. |
 
 ## Provider Audit Metadata
 
