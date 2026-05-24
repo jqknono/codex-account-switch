@@ -25,15 +25,10 @@ import {
 import {
   buildProviderProfileForSource,
   createSavedEntriesSnapshot,
-  ensureCurrentDeviceRegistered,
-  getCurrentDeviceName,
   getSavedAccountEntry,
-  getSavedAccountMoveToLocalBlockReason,
-  getSavedAccountTokenRefreshBlockReason,
   getSavedCurrentSelection,
   getSavedProviderEntry,
   HealedCloudMarker,
-  listSyncedDevices,
   listSavedAccounts,
   listSavedProviders,
   deleteSavedProviderEntry,
@@ -47,7 +42,6 @@ import {
   SavedAccountInfo,
   querySavedAccountQuota,
   SavedProviderInfo,
-  setAutoRefreshDeviceName,
   StorageSource,
   switchToSavedProviderEntry,
   useSavedAccountEntry,
@@ -565,11 +559,6 @@ async function pickSavedAccountsForRefreshToken(
 ): Promise<RefreshTokenSelection | undefined> {
   const existing = resolveAccountFromItem(item);
   if (existing) {
-    const blockedReason = getSavedAccountTokenRefreshBlockReason(existing);
-    if (blockedReason) {
-      vscode.window.showWarningMessage(blockedReason);
-      return undefined;
-    }
     return {
       all: false,
       accounts: [existing],
@@ -582,22 +571,16 @@ async function pickSavedAccountsForRefreshToken(
     return undefined;
   }
 
-  const refreshableAccounts = accounts.filter((account) => getSavedAccountTokenRefreshBlockReason(account) == null);
-  if (refreshableAccounts.length === 0) {
-    vscode.window.showWarningMessage("No saved accounts on this device can refresh tokens.");
-    return undefined;
-  }
-
   const items: RefreshTokenQuickPickItem[] = [
     {
       label: "All",
-      description: "Refresh token and quota for all eligible accounts",
+      description: "Refresh token and quota for all accounts",
       selection: {
         all: true,
-        accounts: refreshableAccounts,
+        accounts,
       },
     },
-    ...refreshableAccounts.map((account) => ({
+    ...accounts.map((account) => ({
       label: account.isCurrent ? `$(pass-filled) ${account.name}` : account.name,
       description: formatAccountChoice(account),
       selection: {
@@ -683,7 +666,6 @@ async function restoreProviderModeAfterFailedLogin(previousSelection: ReturnType
             profile: null,
             syncVersion: null,
             syncUpdatedAt: null,
-            lastWriterDeviceName: null,
             lastWriterAction: null,
           },
         );
@@ -2090,16 +2072,6 @@ export function registerCommands(
           return;
         }
         perf.mark("ensure-account-available");
-        const moveToLocalBlockReason = getSavedAccountMoveToLocalBlockReason(account);
-        if (moveToLocalBlockReason) {
-          logCommandWarn("move-account-to-local", "blocked-on-non-auto-refresh-device", {
-            account: account.name,
-            currentDeviceName: account.currentDeviceName,
-            effectiveAutoRefreshDeviceName: account.effectiveAutoRefreshDeviceName,
-          });
-          vscode.window.showWarningMessage(moveToLocalBlockReason);
-          return;
-        }
         logCommandInfo("move-account-to-local", "started", {
           account: account.name,
           source: account.source,
@@ -2407,41 +2379,6 @@ export function registerCommands(
           fullRefresh: !item?.account?.id,
         });
       });
-    }),
-
-    vscode.commands.registerCommand("codex-account-switch.selectAutoRefreshDevice", async () => {
-      await ensureCurrentDeviceRegistered();
-      const devices = listSyncedDevices();
-      if (devices.length === 0) {
-        logCommandWarn("select-auto-refresh-device", "no-devices");
-        vscode.window.showWarningMessage("No synced devices are available yet.");
-        return;
-      }
-
-      const currentDeviceName = getCurrentDeviceName();
-      const picked = await vscode.window.showQuickPick(
-        devices.map((deviceName) => ({
-          label: deviceName,
-          description: deviceName === currentDeviceName ? "Current device" : undefined,
-          deviceName,
-        })),
-        {
-          placeHolder: "Select the synced device that can automatically refresh synced account tokens",
-        },
-      );
-      if (!picked) {
-        logCommandInfo("select-auto-refresh-device", "cancelled");
-        return;
-      }
-
-      await setAutoRefreshDeviceName(picked.deviceName);
-      logCommandInfo("select-auto-refresh-device", "succeeded", {
-        deviceName: picked.deviceName,
-      });
-      vscode.window.showInformationMessage(
-        `Automatic token refresh is now assigned to "${picked.deviceName}".`
-      );
-      refreshAll(refreshCoordinator);
     }),
 
     vscode.commands.registerCommand("codex-account-switch.configureAutoSwitch", async () => {

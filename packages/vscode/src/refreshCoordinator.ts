@@ -464,15 +464,6 @@ export class RefreshCoordinator implements vscode.Disposable {
         return { skipQuota: false };
       }
 
-      if (account.source === "cloud" && account.autoRefreshAllowed === false) {
-        perf.finish({
-          result: "skipped-device-authority",
-          effectiveAutoRefreshDeviceName: account.effectiveAutoRefreshDeviceName,
-          currentDeviceName: account.currentDeviceName,
-        });
-        return { skipQuota: false };
-      }
-
       const result = await refreshSavedAccountEntry(account);
       if (result.success) {
         perf.finish({

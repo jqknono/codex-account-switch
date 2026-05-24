@@ -13,7 +13,6 @@ import { registerCommands } from "./commands";
 import { disposeLogging, initializeLogging, logInfo, writeRawLog } from "./log";
 import { restoreSavedAuthPassphrase } from "./storagePassword";
 import {
-  ensureCurrentDeviceRegistered,
   hasEncryptedSyncedEntries,
   initializeSavedEntries,
 } from "./savedEntries";
@@ -44,7 +43,6 @@ export async function activate(context: vscode.ExtensionContext) {
   applyNamedAuthDirSetting();
   applyDiagnosticLogSettings();
   await initializeSavedEntries(context);
-  await ensureCurrentDeviceRegistered({ onActivate: true });
   await restoreSavedAuthPassphrase(context, {
     promptIfMissing: true,
     promptForLockedStorage: hasEncryptedSyncedEntries(),

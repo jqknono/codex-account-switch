@@ -2150,8 +2150,6 @@ test("cloud account tooltip keeps sync metadata while hiding redundant detail fi
           tooltip: syncedEntry,
         },
         providers: {},
-        devices: ["device-tooltip"],
-        autoRefreshDeviceName: "device-tooltip",
       },
     });
 
@@ -2168,16 +2166,14 @@ test("cloud account tooltip keeps sync metadata while hiding redundant detail fi
 
           assert.match(String(cloudItem.tooltip ?? ""), /Sync version: 3/);
           assert.match(String(cloudItem.tooltip ?? ""), /Updated: 2026-04-05T06:07:08.000Z/);
-          assert.match(String(cloudItem.tooltip ?? ""), /Auto-refresh device: device-tooltip/);
           assert.doesNotMatch(String(cloudItem.tooltip ?? ""), /Source:/);
           assert.doesNotMatch(String(cloudItem.tooltip ?? ""), /Current device:/);
-          assert.doesNotMatch(String(cloudItem.tooltip ?? ""), /Auto-refresh here:/);
+          assert.doesNotMatch(String(cloudItem.tooltip ?? ""), /Auto-refresh/);
           assert.equal(details.some((item) => item.label === "Source"), false);
           assert.equal(details.some((item) => item.label === "Current device"), false);
-          assert.equal(details.some((item) => item.label === "Auto-refresh here"), false);
+          assert.equal(details.some((item) => item.label.startsWith("Auto-refresh")), false);
           assert.equal(details.some((item) => item.label === "Sync version"), true);
           assert.equal(details.some((item) => item.label === "Updated"), true);
-          assert.equal(details.some((item) => item.label === "Auto-refresh device"), true);
 
           for (const subscription of context.subscriptions.reverse()) {
             subscription?.dispose?.();
@@ -2488,7 +2484,7 @@ test("refreshToken command offers All and refreshes every saved account", async 
         (items) => {
           const allItem = items.find((item) => item.label === "All");
           assert.ok(allItem);
-          assert.equal(allItem.description, "Refresh token and quota for all eligible accounts");
+          assert.equal(allItem.description, "Refresh token and quota for all accounts");
           return allItem;
         },
       ],
@@ -3873,7 +3869,6 @@ test("stale cloud provider mutations are blocked and keep the latest synced entr
         );
         bumpedEntry.entryVersion = 2;
         bumpedEntry.updatedAt = "2026-04-02T00:00:00.000Z";
-        bumpedEntry.lastWriterDeviceName = "Dev";
         bumpedEntry.lastWriterAction = "save_provider_profile";
         core.setSavedAuthPassphrase(null);
         mocked.config.syncedStorage.providers.proxy = bumpedEntry;
@@ -3885,7 +3880,6 @@ test("stale cloud provider mutations are blocked and keep the latest synced entr
         assert.equal(mocked.errorMessages.length, 0);
         assert.match(mocked.warningMessages[0]?.message ?? "", /conflict/i);
         assert.match(mocked.warningMessages[0]?.message ?? "", /current version 2/i);
-        assert.match(mocked.warningMessages[0]?.message ?? "", /Last writer device Dev/i);
         assert.match(mocked.warningMessages[0]?.message ?? "", /last writer action save_provider_profile/i);
         assert.ok(
           mocked.executedCommands.some((command) => command.name === "workbench.action.openSettingsJson")
@@ -4378,7 +4372,6 @@ test("cloud provider tooltip shows visible sync revision metadata", async (t) =>
     );
     syncedEntry.entryVersion = 4;
     syncedEntry.updatedAt = "2026-04-06T07:08:09.000Z";
-    syncedEntry.lastWriterDeviceName = "Dev";
     syncedEntry.lastWriterAction = "sync_current_provider_auth";
     core.setSavedAuthPassphrase(null);
 
@@ -4407,9 +4400,9 @@ test("cloud provider tooltip shows visible sync revision metadata", async (t) =>
 
         assert.match(String(providerItem.tooltip ?? ""), /Sync version: 4/);
         assert.match(String(providerItem.tooltip ?? ""), /Updated: 2026-04-06T07:08:09.000Z/);
-        assert.match(String(providerItem.tooltip ?? ""), /Last writer device: Dev/);
+        assert.doesNotMatch(String(providerItem.tooltip ?? ""), /Last writer device/);
         assert.match(String(providerItem.tooltip ?? ""), /Last writer action: sync_current_provider_auth/);
-        assert.equal(details.some((item) => item.label === "Last writer device" && item.description === "Dev"), true);
+        assert.equal(details.some((item) => item.label === "Last writer device"), false);
         assert.equal(
           details.some((item) => item.label === "Last writer action" && item.description === "sync_current_provider_auth"),
           true,
@@ -4489,7 +4482,7 @@ test("moving a local provider to cloud records provider audit metadata", async (
 
           const envelope = getCloudEnvelope(mocked.config, "provider", "proxy");
           assert.equal(envelope.entryVersion, 1);
-          assert.equal(envelope.lastWriterDeviceName, "AuditDevice");
+          assert.equal("lastWriterDeviceName" in envelope, false);
           assert.equal(envelope.lastWriterAction, "move_provider_to_cloud");
 
           for (const subscription of context.subscriptions.reverse()) {
@@ -5107,8 +5100,8 @@ test("switching away from a cloud account syncs the current auth back to cloud s
   });
 });
 
-test("switching away from a cloud account on a non-authorized device does not update cloud storage", async (t) => {
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-cloud-switch-nonauthority-"));
+test("switching away from a cloud account ignores legacy device authority and updates cloud storage", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-cloud-switch-legacy-device-"));
   const codexHome = path.join(tempRoot, ".codex");
   const authDir = path.join(tempRoot, "saved-auth");
   fs.mkdirSync(codexHome, { recursive: true });
@@ -5180,7 +5173,7 @@ test("switching away from a cloud account on a non-authorized device does not up
       },
     });
 
-    await withMockedHostname("non-authorized-device", async () => {
+    await withMockedHostname("legacy-other-device", async () => {
       await withDisabledIntervals(() =>
         withSuccessfulHttps(async () => {
           const extension = loadExtensionWithMockedVscode(mocked.vscode);
@@ -5198,10 +5191,10 @@ test("switching away from a cloud account on a non-authorized device does not up
             "sync-user",
             "manual-passphrase"
           );
-          assert.equal(cloudAuth.tokens.access_token, "access-cloud-saved");
-          assert.equal(cloudAuth.tokens.refresh_token, "refresh-cloud-saved");
-          assert.equal(mocked.config.syncedStorage.accounts["sync-user"].entryVersion, 6);
-          assert.equal(mocked.config.syncedStorage.accounts["sync-user"].updatedAt, "2026-05-01T00:00:00.000Z");
+          assert.equal(cloudAuth.tokens.access_token, "access-cloud-current");
+          assert.equal(cloudAuth.tokens.refresh_token, "refresh-cloud-current");
+          assert.equal(mocked.config.syncedStorage.accounts["sync-user"].entryVersion, 7);
+          assert.notEqual(mocked.config.syncedStorage.accounts["sync-user"].updatedAt, "2026-05-01T00:00:00.000Z");
 
           for (const subscription of context.subscriptions.reverse()) {
             subscription?.dispose?.();
@@ -5980,11 +5973,10 @@ test("timer maintenance refreshes local tokens when remaining validity is below 
   });
 });
 
-test("timer maintenance refreshes cloud tokens on the selected auto-refresh device", async (t) => {
+test("timer maintenance refreshes cloud tokens while ignoring legacy auto-refresh device", async (t) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-cloud-token-maintenance-"));
   const codexHome = path.join(tempRoot, ".codex");
   const authDir = path.join(tempRoot, "saved-auth");
-  const currentDeviceName = "device-current";
   fs.mkdirSync(codexHome, { recursive: true });
   fs.mkdirSync(authDir, { recursive: true });
 
@@ -6012,8 +6004,8 @@ test("timer maintenance refreshes cloud tokens on the selected auto-refresh devi
         ),
       },
       providers: {},
-      devices: ["device-other", currentDeviceName],
-      autoRefreshDeviceName: currentDeviceName,
+      devices: ["device-other", "device-current"],
+      autoRefreshDeviceName: "device-current",
     };
     core.setSavedAuthPassphrase(null);
 
@@ -6027,7 +6019,7 @@ test("timer maintenance refreshes cloud tokens on the selected auto-refresh devi
       showStatusBar: false,
     });
 
-    await withMockedHostname(currentDeviceName, async () => {
+    await withMockedHostname("device-current", async () => {
       await withDisabledIntervals(() =>
         withSuccessfulHttps(async () => {
           const extension = loadExtensionWithMockedVscode(mocked.vscode);
@@ -6080,8 +6072,8 @@ test("timer maintenance refreshes cloud tokens on the selected auto-refresh devi
   });
 });
 
-test("timer maintenance skips cloud token refresh on a non-selected device", async (t) => {
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-cloud-token-maintenance-skip-"));
+test("timer maintenance refreshes cloud tokens even when legacy auto-refresh device differs", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-cloud-token-maintenance-legacy-device-"));
   const codexHome = path.join(tempRoot, ".codex");
   const authDir = path.join(tempRoot, "saved-auth");
   const currentDeviceName = "device-current";
@@ -6144,15 +6136,15 @@ test("timer maintenance skips cloud token refresh on a non-selected device", asy
           });
           await waitForRefreshCoordinatorIdle(context);
 
-          assert.equal(countAuthRefreshRequests(requestLog), 0);
+          assert.equal(countAuthRefreshRequests(requestLog), 1);
 
           const cloudAuth = readCloudAccount(
             mocked.config,
             "sync-user",
             "maintenance-skip-passphrase"
           );
-          assert.notEqual(cloudAuth.tokens.access_token, "access-rotated");
-          assert.equal(cloudAuth.tokens.refresh_token, "refresh-cloud-old");
+          assert.equal(cloudAuth.tokens.access_token, "access-rotated");
+          assert.equal(cloudAuth.tokens.refresh_token, "refresh-rotated");
 
           for (const subscription of context.subscriptions.reverse()) {
             subscription?.dispose?.();
@@ -7014,8 +7006,8 @@ test("quota refresh does not update cloud auth even when sync metadata already e
   });
 });
 
-test("activate registers the current device once when synced cloud state exists", async (t) => {
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-device-register-"));
+test("activate does not register devices when synced cloud state exists", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-no-device-register-"));
   const codexHome = path.join(tempRoot, ".codex");
   const authDir = path.join(tempRoot, "saved-auth");
   const currentDeviceName = "device-current";
@@ -7060,7 +7052,7 @@ test("activate registers the current device once when synced cloud state exists"
           await extension.activate(context);
           await waitForRefreshCoordinatorIdle(context);
 
-          assert.deepEqual(mocked.config.syncedStorage.devices, [currentDeviceName]);
+          assert.deepEqual(mocked.config.syncedStorage.devices, []);
           assert.equal(mocked.config.syncedStorage.autoRefreshDeviceName, null);
 
           for (const subscription of context.subscriptions.reverse()) {
@@ -7072,7 +7064,7 @@ test("activate registers the current device once when synced cloud state exists"
           await extensionAgain.activate(contextAgain);
           await waitForRefreshCoordinatorIdle(contextAgain);
 
-          assert.deepEqual(mocked.config.syncedStorage.devices, [currentDeviceName]);
+          assert.deepEqual(mocked.config.syncedStorage.devices, []);
 
           for (const subscription of contextAgain.subscriptions.reverse()) {
             subscription?.dispose?.();
@@ -7153,8 +7145,8 @@ test("activate does not create a synced device entry when synced cloud state is 
   });
 });
 
-test("activate appends the current synced device without mutating cloud auth", async (t) => {
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-device-first-default-"));
+test("activate ignores legacy synced devices without mutating cloud auth", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-legacy-devices-"));
   const codexHome = path.join(tempRoot, ".codex");
   const authDir = path.join(tempRoot, "saved-auth");
   const currentDeviceName = "device-current";
@@ -7215,7 +7207,7 @@ test("activate appends the current synced device without mutating cloud auth", a
           );
           assert.equal(cloudAuth.tokens.access_token, savedCloudAccessToken);
           assert.equal(cloudAuth.tokens.refresh_token, "refresh-cloud-old");
-          assert.deepEqual(mocked.config.syncedStorage.devices, ["device-other", currentDeviceName]);
+          assert.deepEqual(mocked.config.syncedStorage.devices, []);
 
           for (const subscription of context.subscriptions.reverse()) {
             subscription?.dispose?.();
@@ -7243,8 +7235,8 @@ test("activate appends the current synced device without mutating cloud auth", a
   });
 });
 
-test("quota refresh preserves cloud auth when a synced device is explicitly selected", async (t) => {
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-device-explicit-select-"));
+test("quota refresh preserves cloud auth while ignoring legacy selected device", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-legacy-device-quota-"));
   const codexHome = path.join(tempRoot, ".codex");
   const authDir = path.join(tempRoot, "saved-auth");
   const currentDeviceName = "device-current";
@@ -7315,7 +7307,7 @@ test("quota refresh preserves cloud auth when a synced device is explicitly sele
           assert.equal(countAuthRefreshRequests(requestLog), 0);
           assert.notEqual(cloudAuth.tokens.access_token, "access-rotated");
           assert.equal(cloudAuth.tokens.refresh_token, "refresh-cloud-old");
-          assert.equal(mocked.config.syncedStorage.autoRefreshDeviceName, currentDeviceName);
+          assert.equal(mocked.config.syncedStorage.autoRefreshDeviceName, null);
 
           for (const subscription of context.subscriptions.reverse()) {
             subscription?.dispose?.();
@@ -7343,8 +7335,8 @@ test("quota refresh preserves cloud auth when a synced device is explicitly sele
   });
 });
 
-test("manual cloud token refresh is blocked when this device is not selected for automatic refresh", async (t) => {
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-device-manual-override-"));
+test("manual cloud token refresh ignores legacy selected device", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-legacy-device-manual-refresh-"));
   const codexHome = path.join(tempRoot, ".codex");
   const authDir = path.join(tempRoot, "saved-auth");
   const currentDeviceName = "device-current";
@@ -7412,7 +7404,7 @@ test("manual cloud token refresh is blocked when this device is not selected for
           const [cloudItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
             .filter((item) => item.account.name === "sync-user" && item.account.source === "cloud");
 
-          assert.equal(cloudItem.contextValue, "accountCloudNoRefreshToken");
+          assert.equal(cloudItem.contextValue, "accountCloud");
 
           await mocked.registeredCommands.get("codex-account-switch.refreshToken")(cloudItem);
 
@@ -7421,13 +7413,9 @@ test("manual cloud token refresh is blocked when this device is not selected for
             "sync-user",
             "manual-override-passphrase"
           );
-          assert.equal(cloudAuth.tokens.access_token, savedCloudAccessToken);
-          assert.equal(cloudAuth.tokens.refresh_token, "refresh-cloud-old");
-          assert.equal(mocked.warningMessages.length > 0, true);
-          assert.match(
-            mocked.warningMessages.at(-1)?.message ?? "",
-            /selected auto-refresh device "device-other"/i,
-          );
+          assert.equal(cloudAuth.tokens.access_token, "access-rotated");
+          assert.equal(cloudAuth.tokens.refresh_token, "refresh-rotated");
+          assert.equal(mocked.warningMessages.length, 0);
           assert.equal(mocked.errorMessages.length, 0);
 
           for (const subscription of context.subscriptions.reverse()) {
@@ -7457,8 +7445,8 @@ test("manual cloud token refresh is blocked when this device is not selected for
   });
 });
 
-test("invalid selected auto-refresh device is not replaced when quota refresh does not persist tokens", async (t) => {
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-device-prompt-select-"));
+test("legacy invalid selected auto-refresh device is ignored when quota refresh does not persist tokens", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-legacy-device-ignored-"));
   const codexHome = path.join(tempRoot, ".codex");
   const authDir = path.join(tempRoot, "saved-auth");
   const currentDeviceName = "device-current";
@@ -7524,8 +7512,8 @@ test("invalid selected auto-refresh device is not replaced when quota refresh do
           );
           assert.equal(cloudAuth.tokens.access_token, savedCloudAccessToken);
           assert.equal(cloudAuth.tokens.refresh_token, "refresh-cloud-old");
-          assert.deepEqual(mocked.config.syncedStorage.devices, ["device-other", currentDeviceName]);
-          assert.equal(mocked.config.syncedStorage.autoRefreshDeviceName, "device-missing");
+          assert.deepEqual(mocked.config.syncedStorage.devices, []);
+          assert.equal(mocked.config.syncedStorage.autoRefreshDeviceName, null);
 
           for (const subscription of context.subscriptions.reverse()) {
             subscription?.dispose?.();
@@ -7553,8 +7541,8 @@ test("invalid selected auto-refresh device is not replaced when quota refresh do
   });
 });
 
-test("select auto-refresh device command updates the synced selection", async (t) => {
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-device-command-select-"));
+test("select auto-refresh device command is not registered", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-no-device-command-"));
   const codexHome = path.join(tempRoot, ".codex");
   const authDir = path.join(tempRoot, "saved-auth");
   const currentDeviceName = "device-current";
@@ -7587,9 +7575,7 @@ test("select auto-refresh device command updates the synced selection", async (t
         const context = createExtensionContext(mocked);
         await extension.activate(context);
 
-        await mocked.registeredCommands.get("codex-account-switch.selectAutoRefreshDevice")();
-
-        assert.equal(mocked.config.syncedStorage.autoRefreshDeviceName, "device-b");
+        assert.equal(mocked.registeredCommands.has("codex-account-switch.selectAutoRefreshDevice"), false);
 
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();

@@ -169,10 +169,6 @@ test("storage migration commands are contributed", () => {
     "Remove Provider"
   );
   assert.equal(
-    byId.get("codex-account-switch.selectAutoRefreshDevice")?.title,
-    "Select Auto-Refresh Device"
-  );
-  assert.equal(
     byId.get("codex-account-switch.enableAutoSwitch")?.title,
     "Enable Auto-Switch"
   );
@@ -191,7 +187,7 @@ test("account inline actions do not include remove", () => {
   const inlineAccountActions = contextMenus.filter(
     (item) =>
       item.when ===
-        "view == codexAccountSwitchAccounts && (viewItem == accountLocal || viewItem == accountCloud || viewItem == accountCloudNoRefreshToken)" &&
+        "view == codexAccountSwitchAccounts && (viewItem == accountLocal || viewItem == accountCloud)" &&
       typeof item.group === "string" &&
       item.group.startsWith("inline@")
   );
@@ -223,45 +219,35 @@ test("refreshable account item context menu exposes refresh actions", () => {
   );
 });
 
-test("non-auto-refresh cloud account context menu hides refresh token", () => {
+test("cloud account context menu exposes refresh token", () => {
   const contextMenus = manifest.contributes.menus["view/item/context"] ?? [];
   const refreshAccountActions = contextMenus.filter(
     (item) =>
       item.when ===
-        "view == codexAccountSwitchAccounts && (viewItem == accountLocal || viewItem == accountCloud || viewItem == accountCloudNoRefreshToken)" &&
+        "view == codexAccountSwitchAccounts && (viewItem == accountLocal || viewItem == accountCloud)" &&
       typeof item.group === "string" &&
       item.group.startsWith("refresh@")
   );
-  const restrictedRefreshActions = refreshAccountActions
-    .filter((item) => item.when.includes("accountCloudNoRefreshToken"))
-    .map((item) => item.command)
-    .sort();
 
   assert.deepEqual(
-    restrictedRefreshActions,
+    refreshAccountActions.map((item) => item.command).sort(),
     [
       "codex-account-switch.refreshList",
       "codex-account-switch.refreshQuota",
+      "codex-account-switch.refreshToken",
     ]
   );
 });
 
-test("non-auto-refresh cloud account context menu hides move account to local", () => {
+test("cloud account context menu exposes move account to local", () => {
   const contextMenus = manifest.contributes.menus["view/item/context"] ?? [];
   const moveAccountToLocal = contextMenus.find(
     (item) =>
       item.command === "codex-account-switch.moveAccountToLocal"
       && item.when === "view == codexAccountSwitchAccounts && viewItem == accountCloud"
   );
-  const restrictedMoveAccountToLocal = contextMenus.find(
-    (item) =>
-      item.command === "codex-account-switch.moveAccountToLocal"
-      && typeof item.when === "string"
-      && item.when.includes("accountCloudNoRefreshToken")
-  );
 
   assert.equal(moveAccountToLocal?.group, "context@4");
-  assert.equal(restrictedMoveAccountToLocal, undefined);
 });
 
 test("account group context menu exposes refresh quota for local and cloud groups", () => {
@@ -350,7 +336,6 @@ test("accounts view title menu is ordered by semantic groups", () => {
       "codex-account-switch.addAccount",
       "codex-account-switch.importAccounts",
       "codex-account-switch.reloadWindow",
-      "codex-account-switch.selectAutoRefreshDevice",
       "codex-account-switch.enableAutoSwitch",
       "codex-account-switch.disableAutoSwitch",
     ]
@@ -363,7 +348,6 @@ test("accounts view title menu is ordered by semantic groups", () => {
       "navigation@3",
       "navigation@4",
       "navigation@6",
-      "navigation@7",
       "navigation@8",
       "navigation@8",
     ]

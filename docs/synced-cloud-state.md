@@ -6,23 +6,18 @@
 | --- | --- | --- |
 | Cloud account index | VS Code `globalState` synced key `codex-account-switch.syncedCloudState.v1` | Stores account names plus shared cloud metadata; account payloads are not stored in this aggregate key. |
 | Cloud accounts | Per-account VS Code `globalState` synced keys `codex-account-switch.syncedCloudAccount.v1.{name}` | Payload stays encrypted with the saved-auth passphrase; updating one account does not rewrite sibling accounts. |
-| Cloud providers | Per-provider VS Code `globalState` synced keys `codex-account-switch.syncedCloudProvider.v1.{name}` | Uses the same encrypted envelope format as accounts, plus sync revision metadata and provider audit metadata (`lastWriterDeviceName`, `lastWriterAction`). |
-| Device list | VS Code `globalState` synced key | Shared across machines through Settings Sync. |
-| Auto-refresh device | VS Code `globalState` synced key | Controls which synced device may perform automatic cloud token refresh. |
+| Cloud providers | Per-provider VS Code `globalState` synced keys `codex-account-switch.syncedCloudProvider.v1.{name}` | Uses the same encrypted envelope format as accounts, plus sync revision metadata and provider audit metadata (`lastWriterAction`). |
 | Saved-auth passphrase | VS Code `SecretStorage` | Local-only secret, never synced. |
-| Current selection marker | VS Code `globalState` unsynced key | Per-device UI state. |
+| Current selection marker | VS Code `globalState` unsynced key | Local UI state. |
 
 ## Sync Behavior
 
 ```mermaid
 flowchart LR
   A[Legacy syncedStorage setting] -->|first activation migration| B[globalState synced cloud state]
-  B -->|activation appends current hostname when cloud state exists| C[Device list]
   B -->|accountNames index| I[Per-account synced keys]
   B -->|providerNames index| J[Per-provider synced keys]
   B --> D[Settings Sync]
-  E[Selected auto-refresh device] --> F[Only this device may automatically refresh cloud tokens]
-  D --> F
   G[SecretStorage passphrase] --> H[Decrypt encrypted envelopes locally]
   B --> H
 ```
@@ -40,15 +35,13 @@ flowchart LR
 | Legacy cleanup succeeds | Remove the old `codex-account-switch.syncedStorage` setting. |
 | Legacy cleanup fails | Keep the migrated `globalState` data active, log a warning, and show a non-fatal notice. |
 
-## Device Registration
+## Legacy Device Fields
 
 | Rule | Behavior |
 | --- | --- |
-| Activation sees existing synced cloud state | Append the current hostname into `devices` if it is missing. |
-| Activation runs again on the same machine | Keep a single entry for that hostname; do not duplicate it. |
-| Synced cloud state is still empty | Do not create a device record just because the extension activated once. |
-| `autoRefreshDeviceName` is unset | The first synced device remains the effective refresh authority until the user explicitly changes it. |
-| Current machine is not the selected auto-refresh device | This machine can still read synced entries and appear in the device list, but it must not persist automatically refreshed cloud tokens. |
+| Legacy `devices` exists | Ignore it during migration, activation, refresh, and UI rendering. |
+| Legacy `autoRefreshDeviceName` exists | Ignore it; any machine with the saved-auth passphrase may refresh and persist cloud tokens. |
+| New writes | Do not write `devices`, `autoRefreshDeviceName`, or provider `lastWriterDeviceName`. |
 
 ## Constraints
 
@@ -65,7 +58,6 @@ flowchart LR
 
 | Field | Scope | Meaning |
 | --- | --- | --- |
-| `lastWriterDeviceName` | Cloud provider entry | Hostname of the device that last wrote the provider entry. |
 | `lastWriterAction` | Cloud provider entry | Action that last wrote the provider entry, such as `save_provider_profile`, `sync_current_provider_auth`, or `move_provider_to_cloud`. |
 
 | Write Path | Stored `lastWriterAction` |

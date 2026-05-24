@@ -1,5 +1,4 @@
 import * as fs from "fs";
-import * as os from "os";
 import * as vscode from "vscode";
 import {
   AccountMeta,
@@ -66,35 +65,6 @@ export interface SavedAccountInfo {
   encrypted: boolean;
   syncVersion: number | null;
   syncUpdatedAt: string | null;
-  currentDeviceName: string | null;
-  effectiveAutoRefreshDeviceName: string | null;
-  autoRefreshAllowed: boolean | null;
-}
-
-export function getSavedAccountTokenRefreshBlockReason(account: SavedAccountInfo): string | null {
-  if (account.source !== "cloud" || account.autoRefreshAllowed !== false) {
-    return null;
-  }
-
-  if (!account.effectiveAutoRefreshDeviceName) {
-    return `Cloud account "${account.name}" cannot refresh tokens on this device because no auto-refresh device is selected.`;
-  }
-
-  return `Cloud account "${account.name}" can only refresh tokens on the selected auto-refresh device `
-    + `"${account.effectiveAutoRefreshDeviceName}". Current device: "${account.currentDeviceName ?? "unknown"}".`;
-}
-
-export function getSavedAccountMoveToLocalBlockReason(account: SavedAccountInfo): string | null {
-  if (account.source !== "cloud" || account.autoRefreshAllowed !== false) {
-    return null;
-  }
-
-  if (!account.effectiveAutoRefreshDeviceName) {
-    return `Cloud account "${account.name}" cannot be moved to local storage on this device because no auto-refresh device is selected.`;
-  }
-
-  return `Cloud account "${account.name}" can only be moved to local storage on the selected auto-refresh device `
-    + `"${account.effectiveAutoRefreshDeviceName}". Current device: "${account.currentDeviceName ?? "unknown"}".`;
 }
 
 export interface SavedProviderInfo {
@@ -111,7 +81,6 @@ export interface SavedProviderInfo {
   profile: ProviderProfile | null;
   syncVersion: number | null;
   syncUpdatedAt: string | null;
-  lastWriterDeviceName: string | null;
   lastWriterAction: string | null;
 }
 
@@ -122,14 +91,12 @@ export interface CloudSyncConflict {
   expectedUpdatedAt: string | null;
   currentEntryVersion: number | null;
   currentUpdatedAt: string | null;
-  currentLastWriterDeviceName: string | null;
   currentLastWriterAction: string | null;
 }
 
 interface SavedStorageSyncMetadata {
   entryVersion: number | null;
   updatedAt: string | null;
-  lastWriterDeviceName?: string | null;
   lastWriterAction?: string | null;
 }
 
@@ -190,8 +157,6 @@ interface SyncedStorageData {
   accountNames: string[];
   providers: Record<string, unknown>;
   providerNames: string[];
-  devices: string[];
-  autoRefreshDeviceName: string | null;
 }
 
 interface CurrentSelectionMarker {
@@ -213,11 +178,9 @@ const DEFAULT_TARGET_SETTING = "defaultSaveTarget";
 const CURRENT_SELECTION_KEY = "codex-account-switch.currentSavedSelection";
 const DEFAULT_QUOTA_CACHE_INTERVAL_MS = 30 * 1000;
 const inflightCloudQuotaQueries = new Map<string, Promise<QuotaQueryResult>>();
-let inflightAutoRefreshDevicePrompt: Promise<string | null> | null = null;
 const EMPTY_SYNC_METADATA: SavedStorageSyncMetadata = {
   entryVersion: null,
   updatedAt: null,
-  lastWriterDeviceName: null,
   lastWriterAction: null,
 };
 
@@ -271,12 +234,12 @@ function normalizeSyncedStorage(raw: unknown): SyncedStorageData {
   }
 
   const accounts = isRecord(raw.accounts) ? clone(raw.accounts) : {};
-  const accountNames = normalizeDeviceNames([
+  const accountNames = normalizeNames([
     ...Object.keys(accounts),
     ...(Array.isArray(raw.accountNames) ? raw.accountNames : []),
   ]);
   const providers = isRecord(raw.providers) ? clone(raw.providers) : {};
-  const providerNames = normalizeDeviceNames([
+  const providerNames = normalizeNames([
     ...Object.keys(providers),
     ...(Array.isArray(raw.providerNames) ? raw.providerNames : []),
   ]);
@@ -286,8 +249,6 @@ function normalizeSyncedStorage(raw: unknown): SyncedStorageData {
     accountNames,
     providers,
     providerNames,
-    devices: normalizeDeviceNames(raw.devices),
-    autoRefreshDeviceName: getNormalizedAutoRefreshDeviceName(raw.autoRefreshDeviceName),
   };
 }
 
@@ -296,7 +257,6 @@ function getSyncMetadata(value: unknown): SavedStorageSyncMetadata {
     return {
       entryVersion: null,
       updatedAt: null,
-      lastWriterDeviceName: null,
       lastWriterAction: null,
     };
   }
@@ -307,10 +267,6 @@ function getSyncMetadata(value: unknown): SavedStorageSyncMetadata {
         ? (value.entryVersion as number)
         : null,
     updatedAt: typeof value.updatedAt === "string" && value.updatedAt.length > 0 ? value.updatedAt : null,
-    lastWriterDeviceName:
-      typeof value.lastWriterDeviceName === "string" && value.lastWriterDeviceName.trim().length > 0
-        ? value.lastWriterDeviceName.trim()
-        : null,
     lastWriterAction:
       typeof value.lastWriterAction === "string" && value.lastWriterAction.trim().length > 0
         ? value.lastWriterAction.trim()
@@ -320,17 +276,16 @@ function getSyncMetadata(value: unknown): SavedStorageSyncMetadata {
 
 function nextSyncMetadata(
   current: SavedStorageSyncMetadata,
-  options: { lastWriterDeviceName?: string | null; lastWriterAction?: string | null } = {},
+  options: { lastWriterAction?: string | null } = {},
 ): SavedStorageSyncMetadata {
   return {
     entryVersion: current.entryVersion == null ? 1 : current.entryVersion + 1,
     updatedAt: new Date().toISOString(),
-    lastWriterDeviceName: options.lastWriterDeviceName ?? null,
     lastWriterAction: options.lastWriterAction ?? null,
   };
 }
 
-function normalizeDeviceNames(value: unknown): string[] {
+function normalizeNames(value: unknown): string[] {
   if (!Array.isArray(value)) {
     return [];
   }
@@ -349,18 +304,9 @@ function normalizeDeviceNames(value: unknown): string[] {
   return normalized;
 }
 
-function getNormalizedAutoRefreshDeviceName(value: unknown): string | null {
-  if (typeof value !== "string") {
-    return null;
-  }
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
-}
-
 function applySyncMetadata(value: Record<string, unknown>, metadata: SavedStorageSyncMetadata): Record<string, unknown> {
   value.entryVersion = metadata.entryVersion;
   value.updatedAt = metadata.updatedAt;
-  value.lastWriterDeviceName = metadata.lastWriterDeviceName;
   value.lastWriterAction = metadata.lastWriterAction;
   return value;
 }
@@ -397,7 +343,6 @@ function getExpectedSyncMetadata(
   return {
     entryVersion: expectedEntryVersion ?? null,
     updatedAt: expectedUpdatedAt ?? null,
-    lastWriterDeviceName: null,
     lastWriterAction: null,
   };
 }
@@ -456,7 +401,6 @@ function buildConflict(
     expectedUpdatedAt: expected.updatedAt,
     currentEntryVersion: current.entryVersion,
     currentUpdatedAt: current.updatedAt,
-    currentLastWriterDeviceName: current.lastWriterDeviceName ?? null,
     currentLastWriterAction: current.lastWriterAction ?? null,
   };
 }
@@ -467,7 +411,6 @@ function formatConflictResult(conflict: CloudSyncConflict): CloudMutationResult 
   const currentVersion = conflict.currentEntryVersion ?? "unknown";
   const expectedUpdatedAt = conflict.expectedUpdatedAt ?? "unknown";
   const currentUpdatedAt = conflict.currentUpdatedAt ?? "unknown";
-  const currentWriterDevice = conflict.currentLastWriterDeviceName ?? "unknown";
   const currentWriterAction = conflict.currentLastWriterAction ?? "unknown";
   return {
     success: false,
@@ -475,7 +418,7 @@ function formatConflictResult(conflict: CloudSyncConflict): CloudMutationResult 
       `${label} "${conflict.name}" has a sync conflict: `
       + `expected version ${expectedVersion} (${expectedUpdatedAt}), `
       + `current version ${currentVersion} (${currentUpdatedAt}). `
-      + `Last writer device ${currentWriterDevice}, last writer action ${currentWriterAction}. `
+      + `Last writer action ${currentWriterAction}. `
       + "Refresh the list before retrying.",
     conflict,
   };
@@ -567,8 +510,6 @@ function getDefaultSyncedStorage(): SyncedStorageData {
     accountNames: [],
     providers: {},
     providerNames: [],
-    devices: [],
-    autoRefreshDeviceName: null,
   };
 }
 
@@ -590,11 +531,11 @@ function readSyncedStorage(): SyncedStorageData {
   const accounts: Record<string, unknown> = {};
   const providers: Record<string, unknown> = {};
   const legacy = readLegacySyncedStorage();
-  const accountNames = normalizeDeviceNames([
+  const accountNames = normalizeNames([
     ...storage.accountNames,
     ...Object.keys(storage.accounts),
   ]);
-  const providerNames = normalizeDeviceNames([
+  const providerNames = normalizeNames([
     ...storage.providerNames,
     ...Object.keys(storage.providers),
   ]);
@@ -635,8 +576,8 @@ function getSyncedCloudProviderKey(name: string): string {
 function getSyncedCloudSyncKeys(accountNames: string[], providerNames: string[]): string[] {
   return [
     SYNCED_CLOUD_STATE_KEY,
-    ...normalizeDeviceNames(accountNames).sort().map(getSyncedCloudAccountKey),
-    ...normalizeDeviceNames(providerNames).sort().map(getSyncedCloudProviderKey),
+    ...normalizeNames(accountNames).sort().map(getSyncedCloudAccountKey),
+    ...normalizeNames(providerNames).sort().map(getSyncedCloudProviderKey),
   ];
 }
 
@@ -653,8 +594,6 @@ function toSyncedCloudStateIndex(data: SyncedStorageData): SyncedStorageData {
     accountNames,
     providers: {},
     providerNames,
-    devices: [...data.devices],
-    autoRefreshDeviceName: data.autoRefreshDeviceName,
   };
 }
 
@@ -764,7 +703,7 @@ export async function initializeSavedEntries(context: vscode.ExtensionContext): 
   }
 
   const legacy = readLegacySyncedStorage();
-  if (!hasSyncedDeviceState(legacy)) {
+  if (!hasSyncedCloudState(legacy)) {
     await setSyncedCloudMigrationState({
       completedAt: new Date().toISOString(),
       migratedFromLegacy: false,
@@ -809,121 +748,21 @@ export function hasEncryptedSyncedEntries(): boolean {
     || Object.values(storage.providers).some((value) => isSerializedSavedValueEncrypted(value));
 }
 
-export function getCurrentDeviceName(): string {
-  const hostname = os.hostname().trim();
-  return hostname.length > 0 ? hostname : "unknown-device";
-}
-
 function getCurrentWriterMetadata(action?: ProviderAuditAction): {
-  lastWriterDeviceName: string | null;
   lastWriterAction: string | null;
 } {
   return {
-    lastWriterDeviceName: getCurrentDeviceName(),
     lastWriterAction: action ?? null,
   };
 }
 
-export function getEffectiveAutoRefreshDeviceName(storage = readSyncedStorage()): string | null {
-  if (storage.autoRefreshDeviceName && storage.devices.includes(storage.autoRefreshDeviceName)) {
-    return storage.autoRefreshDeviceName;
-  }
-  return storage.devices[0] ?? null;
-}
-
-export function canCurrentDeviceAutoRefresh(storage = readSyncedStorage()): boolean {
-  return getEffectiveAutoRefreshDeviceName(storage) === getCurrentDeviceName();
-}
-
-export function listSyncedDevices(): string[] {
-  return [...readSyncedStorage().devices];
-}
-
-function hasSyncedDeviceState(storage: SyncedStorageData): boolean {
+function hasSyncedCloudState(storage: SyncedStorageData): boolean {
   return (
-    storage.devices.length > 0
-    || storage.autoRefreshDeviceName != null
-    || Object.keys(storage.accounts).length > 0
+    Object.keys(storage.accounts).length > 0
     || Object.keys(storage.providers).length > 0
+    || storage.accountNames.length > 0
+    || storage.providerNames.length > 0
   );
-}
-
-export async function ensureCurrentDeviceRegistered(options?: { onActivate?: boolean }): Promise<SyncedStorageData> {
-  const storage = readSyncedStorage();
-  if (options?.onActivate && !hasSyncedDeviceState(storage)) {
-    return storage;
-  }
-
-  const currentDeviceName = getCurrentDeviceName();
-  if (storage.devices.includes(currentDeviceName)) {
-    return storage;
-  }
-
-  storage.devices = [...storage.devices, currentDeviceName];
-  await writeSyncedStorage(storage);
-  return storage;
-}
-
-export async function setAutoRefreshDeviceName(deviceName: string | null): Promise<void> {
-  const storage = await ensureCurrentDeviceRegistered();
-  const normalized = typeof deviceName === "string" ? deviceName.trim() : "";
-  storage.autoRefreshDeviceName = normalized && storage.devices.includes(normalized) ? normalized : null;
-  await writeSyncedStorage(storage);
-}
-
-async function promptForAutoRefreshDevice(devices: string[]): Promise<string | null> {
-  const currentDeviceName = getCurrentDeviceName();
-  const options = normalizeDeviceNames([...devices, currentDeviceName]);
-  if (options.length === 0) {
-    return null;
-  }
-  if (inflightAutoRefreshDevicePrompt) {
-    return inflightAutoRefreshDevicePrompt;
-  }
-
-  inflightAutoRefreshDevicePrompt = (async () => {
-    const picked = await vscode.window.showQuickPick(
-      options.map((deviceName) => ({
-        label: deviceName,
-        description: deviceName === currentDeviceName ? "Current device" : undefined,
-        deviceName,
-      })),
-      {
-        placeHolder: "Select the synced device that is allowed to automatically refresh synced account tokens",
-      },
-    );
-    if (!picked) {
-      return null;
-    }
-    await setAutoRefreshDeviceName(picked.deviceName);
-    return picked.deviceName;
-  })();
-
-  try {
-    return await inflightAutoRefreshDevicePrompt;
-  } finally {
-    inflightAutoRefreshDevicePrompt = null;
-  }
-}
-
-async function resolveAutomaticRefreshAuthority(): Promise<{ allowed: boolean; storage: SyncedStorageData }> {
-  let storage = readSyncedStorage();
-
-  if (storage.autoRefreshDeviceName && !storage.devices.includes(storage.autoRefreshDeviceName)) {
-    const selectedDeviceName = await promptForAutoRefreshDevice(storage.devices);
-    storage = readSyncedStorage();
-    if (!selectedDeviceName) {
-      return {
-        allowed: false,
-        storage,
-      };
-    }
-  }
-
-  return {
-    allowed: canCurrentDeviceAutoRefresh(storage),
-    storage,
-  };
 }
 
 function requireCloudPassphrase(): void {
@@ -1018,9 +857,6 @@ function getLocalAccounts(perf?: ReturnType<typeof startPerformanceLog>): SavedA
         encrypted: result.encrypted,
         syncVersion: null,
         syncUpdatedAt: null,
-        currentDeviceName: null,
-        effectiveAutoRefreshDeviceName: null,
-        autoRefreshAllowed: null,
       };
     }
 
@@ -1037,9 +873,6 @@ function getLocalAccounts(perf?: ReturnType<typeof startPerformanceLog>): SavedA
       encrypted: result.encrypted,
       syncVersion: null,
       syncUpdatedAt: null,
-      currentDeviceName: null,
-      effectiveAutoRefreshDeviceName: null,
-      autoRefreshAllowed: null,
     };
   });
   perf?.mark("read-local-auth-files", {
@@ -1053,9 +886,6 @@ function getCloudAccounts(perf?: ReturnType<typeof startPerformanceLog>): SavedA
   perf?.mark("read-synced-storage", {
     cloudAccountCount: Object.keys(storage.accounts).length,
   });
-  const currentDeviceName = getCurrentDeviceName();
-  const effectiveAutoRefreshDeviceName = getEffectiveAutoRefreshDeviceName(storage);
-  const autoRefreshAllowed = effectiveAutoRefreshDeviceName === currentDeviceName;
   const accounts = Object.keys(storage.accounts).sort().map((name) => {
     const raw = storage.accounts[name];
     const syncMetadata = getSyncMetadata(raw);
@@ -1083,9 +913,6 @@ function getCloudAccounts(perf?: ReturnType<typeof startPerformanceLog>): SavedA
         encrypted: result.encrypted,
         syncVersion: syncMetadata.entryVersion,
         syncUpdatedAt: syncMetadata.updatedAt,
-        currentDeviceName,
-        effectiveAutoRefreshDeviceName,
-        autoRefreshAllowed,
       };
     }
 
@@ -1102,9 +929,6 @@ function getCloudAccounts(perf?: ReturnType<typeof startPerformanceLog>): SavedA
       encrypted: result.encrypted,
       syncVersion: syncMetadata.entryVersion,
       syncUpdatedAt: syncMetadata.updatedAt,
-      currentDeviceName,
-      effectiveAutoRefreshDeviceName,
-      autoRefreshAllowed,
     };
   });
   perf?.mark("deserialize-cloud-accounts", {
@@ -1131,7 +955,6 @@ function getLocalProviders(): SavedProviderInfo[] {
       profile,
       syncVersion: null,
       syncUpdatedAt: null,
-      lastWriterDeviceName: null,
       lastWriterAction: null,
     };
   });
@@ -1162,7 +985,6 @@ function getCloudProviders(): SavedProviderInfo[] {
       profile,
       syncVersion: syncMetadata.entryVersion,
       syncUpdatedAt: syncMetadata.updatedAt,
-      lastWriterDeviceName: syncMetadata.lastWriterDeviceName ?? null,
       lastWriterAction: syncMetadata.lastWriterAction ?? null,
     };
   });
@@ -1380,7 +1202,6 @@ async function writeCloudAccountWithExpectedVersion(
   expectedUpdatedAt?: string | null,
 ): Promise<CloudMutationResult> {
   requireCloudPassphrase();
-  await ensureCurrentDeviceRegistered();
   const storage = readSyncedStorage();
   const currentMetadata = getSyncMetadata(storage.accounts[name]);
   const expectedMetadata = getExpectedSyncMetadata(expectedEntryVersion, expectedUpdatedAt);
@@ -1418,7 +1239,6 @@ async function writeCloudProviderWithExpectedVersion(
   auditAction?: ProviderAuditAction,
 ): Promise<CloudMutationResult> {
   requireCloudPassphrase();
-  await ensureCurrentDeviceRegistered();
   const storage = readSyncedStorage();
   const currentMetadata = getSyncMetadata(storage.providers[profile.name]);
   const expectedMetadata = getExpectedSyncMetadata(expectedEntryVersion, expectedUpdatedAt);
@@ -1557,15 +1377,6 @@ export async function syncCurrentAuthToSavedSelection(): Promise<SyncCurrentSele
   if (marker.kind === "account") {
     const auth = readCurrentAuth();
     if (auth && hasAccountAuthTokens(auth)) {
-      const account = getSavedAccountEntry(marker.name, "cloud");
-      if (account?.autoRefreshAllowed === false) {
-        logInfo(LOG_PREFIX, "skip-current-cloud-account-sync-device-authority", {
-          account: marker.name,
-          effectiveAutoRefreshDeviceName: account.effectiveAutoRefreshDeviceName,
-          currentDeviceName: account.currentDeviceName,
-        });
-        return healedMarker ? { success: true, healedMarker } : { success: true };
-      }
       const result = await persistCloudAccountAuth(
         marker.name,
         auth,
@@ -1895,15 +1706,6 @@ export async function refreshSavedAccountEntry(account: SavedAccountInfo): Promi
     });
   }
 
-  const tokenRefreshBlockReason = getSavedAccountTokenRefreshBlockReason(account);
-  if (tokenRefreshBlockReason) {
-    return {
-      success: false,
-      message: tokenRefreshBlockReason,
-      unsupported: true,
-    };
-  }
-
   if (account.storageState !== "ready" || !account.auth) {
     return { success: false, message: account.storageMessage ?? `Saved cloud account "${account.name}" is unavailable.` };
   }
@@ -1998,13 +1800,6 @@ export async function moveSavedAccountEntry(
   if (account.storageState !== "ready" || !account.auth) {
     return { success: false, message: account.storageMessage ?? `Saved account "${account.name}" is unavailable.` };
   }
-  if (target === "local") {
-    const moveToLocalBlockReason = getSavedAccountMoveToLocalBlockReason(account);
-    if (moveToLocalBlockReason) {
-      return { success: false, message: moveToLocalBlockReason };
-    }
-  }
-
   let nextCloudMetadata: SavedStorageSyncMetadata = EMPTY_SYNC_METADATA;
 
   if (target === "local") {

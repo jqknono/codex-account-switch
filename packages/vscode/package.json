@@ -150,12 +150,6 @@
         "icon": "$(refresh)"
       },
       {
-        "command": "codex-account-switch.selectAutoRefreshDevice",
-        "title": "Select Auto-Refresh Device",
-        "category": "Codex Account Switch",
-        "icon": "$(device-desktop)"
-      },
-      {
         "command": "codex-account-switch.enableAutoSwitch",
         "title": "Enable Auto-Switch",
         "category": "Codex Account Switch",
@@ -286,11 +280,6 @@
           "group": "navigation@6"
         },
         {
-          "command": "codex-account-switch.selectAutoRefreshDevice",
-          "when": "view == codexAccountSwitchAccounts",
-          "group": "navigation@7"
-        },
-        {
           "command": "codex-account-switch.enableAutoSwitch",
           "when": "view == codexAccountSwitchAccounts && !codexAccountSwitch.autoSwitchEnabled",
           "group": "navigation@8"
@@ -314,12 +303,12 @@
       "view/item/context": [
         {
           "command": "codex-account-switch.useAccount",
-          "when": "view == codexAccountSwitchAccounts && (viewItem == accountLocal || viewItem == accountCloud || viewItem == accountCloudNoRefreshToken)",
+          "when": "view == codexAccountSwitchAccounts && (viewItem == accountLocal || viewItem == accountCloud)",
           "group": "inline@1"
         },
         {
           "command": "codex-account-switch.refreshList",
-          "when": "view == codexAccountSwitchAccounts && (viewItem == accountLocal || viewItem == accountCloud || viewItem == accountCloudNoRefreshToken)",
+          "when": "view == codexAccountSwitchAccounts && (viewItem == accountLocal || viewItem == accountCloud)",
           "group": "refresh@1"
         },
         {
@@ -329,22 +318,22 @@
         },
         {
           "command": "codex-account-switch.refreshQuota",
-          "when": "view == codexAccountSwitchAccounts && (viewItem == accountLocal || viewItem == accountCloud || viewItem == accountCloudNoRefreshToken)",
+          "when": "view == codexAccountSwitchAccounts && (viewItem == accountLocal || viewItem == accountCloud)",
           "group": "refresh@3"
         },
         {
           "command": "codex-account-switch.reloginAccount",
-          "when": "view == codexAccountSwitchAccounts && (viewItem == accountLocal || viewItem == accountCloud || viewItem == accountCloudNoRefreshToken)",
+          "when": "view == codexAccountSwitchAccounts && (viewItem == accountLocal || viewItem == accountCloud)",
           "group": "context@1"
         },
         {
           "command": "codex-account-switch.renameAccount",
-          "when": "view == codexAccountSwitchAccounts && (viewItem == accountLocal || viewItem == accountCloud || viewItem == accountCloudNoRefreshToken)",
+          "when": "view == codexAccountSwitchAccounts && (viewItem == accountLocal || viewItem == accountCloud)",
           "group": "context@2"
         },
         {
           "command": "codex-account-switch.removeAccount",
-          "when": "view == codexAccountSwitchAccounts && (viewItem == accountLocal || viewItem == accountCloud || viewItem == accountCloudNoRefreshToken)",
+          "when": "view == codexAccountSwitchAccounts && (viewItem == accountLocal || viewItem == accountCloud)",
           "group": "context@3"
         },
         {
@@ -484,9 +473,7 @@
             "accounts": {},
             "accountNames": [],
             "providers": {},
-            "providerNames": [],
-            "devices": [],
-            "autoRefreshDeviceName": null
+            "providerNames": []
           },
           "markdownDeprecationMessage": "Legacy migration-only setting. Cloud data now lives in synced extension storage managed by the extension.",
           "description": "Legacy migration-only backup of encrypted cloud accounts and providers. Managed internally by the extension."

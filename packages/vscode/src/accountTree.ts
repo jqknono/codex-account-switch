@@ -262,8 +262,6 @@ export class AccountTreeItem extends vscode.TreeItem {
     this.contextValue =
       account.source === "cloud" && account.storageState === "locked"
         ? "accountCloudLocked"
-        : account.source === "cloud" && account.autoRefreshAllowed === false
-          ? "accountCloudNoRefreshToken"
         : account.source === "cloud"
           ? "accountCloud"
           : "accountLocal";
@@ -298,7 +296,6 @@ export class AccountTreeItem extends vscode.TreeItem {
     if (account.source === "cloud" && (account.syncVersion != null || account.syncUpdatedAt)) {
       tooltipLines.push(`Sync version: ${account.syncVersion ?? "legacy"}`);
       tooltipLines.push(`Updated: ${account.syncUpdatedAt ?? "unknown"}`);
-      tooltipLines.push(`Auto-refresh device: ${account.effectiveAutoRefreshDeviceName ?? "none"}`);
     }
 
     if (account.storageState !== "ready") {
@@ -783,14 +780,6 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
       updatedItem.iconPath = new vscode.ThemeIcon("history");
       items.push(updatedItem);
 
-      const autoRefreshDeviceItem = new AccountDetailItem(
-        "Auto-refresh device",
-        account.effectiveAutoRefreshDeviceName ?? "none",
-        account.effectiveAutoRefreshDeviceName ?? "none",
-        parent,
-      );
-      autoRefreshDeviceItem.iconPath = new vscode.ThemeIcon("sync");
-      items.push(autoRefreshDeviceItem);
     }
 
     const planItem = new AccountDetailItem("Plan", plan, plan, parent);
