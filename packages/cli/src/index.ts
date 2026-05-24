@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { Command } from "commander";
-import { setNamedAuthDir, setSavedAuthPassphrase } from "@codex-account-switch/core";
+import { setDiagnosticLogOptions, setNamedAuthDir, setSavedAuthPassphrase } from "@codex-account-switch/core";
 import {
   cmdList,
   cmdAdd,
@@ -27,11 +27,13 @@ program
 
 program
   .option("--auth-dir <path>", "Directory for saving and loading auth_{name}.json files; defaults to the Codex config directory")
-  .option("--password <password>", "Password to decrypt encrypted saved accounts; can also be set via CODEX_ACCOUNT_SWITCH_PASSWORD env var");
+  .option("--password <password>", "Password to decrypt encrypted saved accounts; can also be set via CODEX_ACCOUNT_SWITCH_PASSWORD env var")
+  .option("--debug", "Write diagnostic performance logs to the Codex Account Switch CLI log file", false);
 
 program.hook("preAction", () => {
-  const opts = program.opts<{ authDir?: string; password?: string }>();
+  const opts = program.opts<{ authDir?: string; password?: string; debug?: boolean }>();
   setNamedAuthDir(opts.authDir);
+  setDiagnosticLogOptions({ detailedPerformanceLogging: opts.debug === true });
   const password = opts.password || process.env.CODEX_ACCOUNT_SWITCH_PASSWORD;
   if (password) {
     setSavedAuthPassphrase(password);

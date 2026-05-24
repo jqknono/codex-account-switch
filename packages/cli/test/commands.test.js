@@ -712,7 +712,7 @@ test("quota: prints access and refresh token status lines", () => {
   assert.ok(r.stdout.includes("Refresh token: available"));
 });
 
-test("quota: diagnostic performance logs are written to file instead of stdout", () => {
+test("quota: diagnostic performance logs are disabled by default", () => {
   const home = tmpHome();
   writeJson(path.join(home, "auth_work.json"), {
     auth_mode: "chatgpt",
@@ -737,11 +737,42 @@ test("quota: diagnostic performance logs are written to file instead of stdout",
   assert.doesNotMatch(r.stdout, /perf-(start|stage|finish|fail)/);
 
   const logPath = cliDiagnosticLogPath(home);
+  if (fs.existsSync(logPath)) {
+    const logContents = fs.readFileSync(logPath, "utf-8");
+    assert.doesNotMatch(logContents, /perf-(start|stage|finish|fail)/);
+  }
+});
+
+test("quota: debug writes diagnostic performance logs to file instead of stdout", () => {
+  const home = tmpHome();
+  writeJson(path.join(home, "auth_work.json"), {
+    auth_mode: "chatgpt",
+    OPENAI_API_KEY: null,
+    last_refresh: new Date().toISOString(),
+    tokens: {
+      id_token: jwt({
+        email: "work@example.com",
+        name: "work",
+        sub: "sub-work@example.com",
+        exp: Math.floor(Date.now() / 1000) + 3600,
+        "https://api.openai.com/auth": { chatgpt_plan_type: "plus" },
+      }),
+      refresh_token: "rt-work@example.com",
+      account_id: "acct-work",
+    },
+  });
+  writeJson(path.join(home, "auth.json"), readJson(path.join(home, "auth_work.json")));
+
+  const r = cli("--debug quota", home);
+  assert.equal(r.code, 0);
+  assert.doesNotMatch(r.stdout, /perf-(start|stage|finish|fail)/);
+
+  const logPath = cliDiagnosticLogPath(home);
   assert.ok(fs.existsSync(logPath));
 
   const logContents = fs.readFileSync(logPath, "utf-8");
-  assert.match(logContents, /\[info\].*"operation":"queryQuota"/);
-  assert.match(logContents, /\[info\].*"operation":"getQuotaInfo"/);
+  assert.match(logContents, /\[info\].*perf-finish.*"operation":"queryQuota"/);
+  assert.match(logContents, /\[info\].*perf-finish.*"operation":"getQuotaInfo"/);
 });
 
 // ─── refresh ─────────────────────────────────────────────────
@@ -1181,4 +1212,5 @@ test("password: --help shows password option", () => {
   assert.equal(r.code, 0);
   assert.ok(r.stdout.includes("--password"));
   assert.ok(r.stdout.includes("CODEX_ACCOUNT_SWITCH_PASSWORD"));
+  assert.ok(r.stdout.includes("--debug"));
 });

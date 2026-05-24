@@ -61,12 +61,20 @@ export function createDiagnosticPerformanceTimer(
   details: Record<string, unknown> = {},
   options: PerformanceLogOptions = {},
 ): PerformanceTimer {
+  if (!isDetailedDiagnosticPerformanceLoggingEnabled()) {
+    return {
+      mark() {},
+      finish() {},
+      fail() {},
+    };
+  }
+
   const startedAt = Date.now();
   let lastMarkAt = startedAt;
   let finished = false;
   const mode = options.mode ?? "normal";
   const slowThresholdMs = options.slowThresholdMs ?? 0;
-  const immediateLogging = mode === "normal" || isDetailedDiagnosticPerformanceLoggingEnabled();
+  const immediateLogging = mode === "normal";
 
   if (immediateLogging) {
     writeDiagnosticLog("info", formatDiagnosticLine(prefix, "perf-start", {
@@ -77,7 +85,7 @@ export function createDiagnosticPerformanceTimer(
 
   return {
     mark(stage: string, stageDetails: Record<string, unknown> = {}) {
-      if (finished || !isDetailedDiagnosticPerformanceLoggingEnabled()) {
+      if (finished) {
         return;
       }
 

@@ -7,6 +7,7 @@ const path = require("node:path");
 const Module = require("node:module");
 const core = require("@codex-account-switch/core");
 const SYNCED_CLOUD_STATE_KEY = "codex-account-switch.syncedCloudState.v1";
+const PERFORMANCE_LOG_PATTERN = / perf-(start|stage|finish|fail) /;
 
 function createDisposable(fn = () => {}) {
   return {
@@ -30,7 +31,7 @@ function createVscodeMock() {
   const config = {
     authDirectory: "",
     showStatusBar: false,
-    quotaRefreshInterval: 5,
+    quotaRefreshInterval: 30,
     detailedPerformanceLogging: false,
     syncedStorage: globalStateValues.get(SYNCED_CLOUD_STATE_KEY),
   };
@@ -426,7 +427,7 @@ test("activate creates a dedicated VS Code log channel and writes startup logs i
   assert.ok(mocked.createdChannels[0].entries.length > 0);
   assert.ok(
     mocked.createdChannels[0].entries.some((entry) =>
-      /\[codex-account-switch:vscode:(accountTree|statusBar)\]/.test(entry.line)
+      /\[codex-account-switch:vscode:extension\] activate-start/.test(entry.line)
     )
   );
 
@@ -513,21 +514,14 @@ async function withAccountRefreshLoggingScenario(options, runAssertions) {
   }
 }
 
-test("default performance logging keeps account refresh logs at summary level", async () => {
+test("default performance logging suppresses performance entries", async () => {
   await withAccountRefreshLoggingScenario({ detailedPerformanceLogging: false }, async (mocked) => {
     const lines = mocked.createdChannels[0].entries.map((entry) => entry.line);
-    assert.equal(
-      lines.some((line) => line.includes("\"operation\":\"command:refreshQuota\"") && line.includes("\"durationMs\":")),
-      true
-    );
-    assert.equal(
-      lines.some((line) => line.includes("\"operation\":\"command:refreshQuota\"") && line.includes("\"stage\":")),
-      false
-    );
+    assert.equal(lines.some((line) => PERFORMANCE_LOG_PATTERN.test(line)), false);
   });
 });
 
-test("detailed performance logging emits account refresh stage timings to the output channel", async () => {
+test("debug performance logging emits account refresh timings to the output channel", async () => {
   await withAccountRefreshLoggingScenario({ detailedPerformanceLogging: true }, async (mocked) => {
     const lines = mocked.createdChannels[0].entries.map((entry) => entry.line);
     assert.equal(

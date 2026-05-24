@@ -72,12 +72,20 @@ export function startPerformanceLog(
   details: Record<string, unknown> = {},
   options: PerformanceLogOptions = {},
 ): PerformanceTimer {
+  if (!isDetailedPerformanceLoggingEnabled()) {
+    return {
+      mark() {},
+      finish() {},
+      fail() {},
+    };
+  }
+
   const startedAt = Date.now();
   let lastMarkAt = startedAt;
   let finished = false;
   const mode = options.mode ?? "normal";
   const slowThresholdMs = options.slowThresholdMs ?? 0;
-  const immediateLogging = mode === "normal" || isDetailedPerformanceLoggingEnabled();
+  const immediateLogging = mode === "normal";
 
   if (immediateLogging) {
     logInfo(prefix, "perf-start", {
@@ -88,7 +96,7 @@ export function startPerformanceLog(
 
   return {
     mark(stage: string, stageDetails: Record<string, unknown> = {}) {
-      if (finished || !isDetailedPerformanceLoggingEnabled()) {
+      if (finished) {
         return;
       }
 

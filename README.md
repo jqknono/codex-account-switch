@@ -57,7 +57,7 @@ codex-account-switch --auth-dir /path/to/accounts list
 
 You can also use the environment variable `CODEX_ACCOUNT_SWITCH_AUTH_DIR`.
 
-CLI diagnostic logs such as performance traces are written to `~/.codex/logs/codex-account-switch-cli.log` by default instead of being printed in command output. If `CODEX_HOME` is set, the log file is written under that directory's `logs/`.
+CLI diagnostic performance traces are written to `~/.codex/logs/codex-account-switch-cli.log` only when `--debug` is passed, and are never printed in command output. If `CODEX_HOME` is set, the log file is written under that directory's `logs/`.
 
 ## VS Code Extension
 
@@ -80,7 +80,7 @@ Activity Bar account view:
 
 | Setting | Default | Description |
 |---|---|---|
-| `codex-account-switch.quotaRefreshInterval` | `5` | Background maintenance interval, in seconds; minimum `5`; each interval checks one saved account for token refresh and rotates one saved account quota refresh |
+| `codex-account-switch.quotaRefreshInterval` | `30` | Background maintenance interval, in seconds; minimum `5`; each interval checks one saved account for token refresh and rotates one saved account quota refresh |
 | `codex-account-switch.showStatusBar` | `true` | Show the current account quota in the status bar |
 | `codex-account-switch.reloadWindowAfterSwitch` | `prompt` | Whether to prompt or automatically reload the window after switching accounts |
 | `codex-account-switch.authDirectory` | `""` | Directory used to save and load `auth_{name}.json`; empty means the default Codex config directory |

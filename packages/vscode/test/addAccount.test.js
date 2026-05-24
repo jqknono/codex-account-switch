@@ -260,7 +260,7 @@ function createVscodeMock(options) {
     authDirectory: options.authDirectory,
     reloadWindowAfterSwitch: "never",
     useDeviceAuthForLogin: options.useDeviceAuthForLogin ?? false,
-    quotaRefreshInterval: 5,
+    quotaRefreshInterval: 30,
     tokenAutoUpdate: options.tokenAutoUpdate ?? options.cloudTokenAutoUpdate ?? false,
     tokenAutoUpdateIntervalHours:
       options.tokenAutoUpdateIntervalHours ?? options.cloudTokenAutoUpdateIntervalHours ?? 24,
@@ -2579,6 +2579,7 @@ test("activate in provider mode skips quota refresh and logs zero effective targ
     const mocked = createVscodeMock({
       authDirectory: authDir,
       showStatusBar: true,
+      detailedPerformanceLogging: true,
       cloudTokenAutoUpdate: false,
     });
     const requestLog = [];
@@ -2651,6 +2652,7 @@ test("activate in account mode refreshes only the current account quota", async 
     const mocked = createVscodeMock({
       authDirectory: authDir,
       showStatusBar: true,
+      detailedPerformanceLogging: true,
       cloudTokenAutoUpdate: false,
     });
     const requestLog = [];
@@ -2770,7 +2772,7 @@ test("background quota refresh rotates one saved account per interval without ex
 
       const usageRequests = requestLog.filter((request) => request.hostname === "chatgpt.com");
       assert.equal(intervalHandles.length, 1);
-      assert.equal(intervalHandles[0].ms, 5000);
+      assert.equal(intervalHandles[0].ms, 30000);
       assert.equal(usageRequests.length, 1);
       assert.equal(usageRequests[0].authorization, `Bearer ${stableAccessBeta}`);
 
@@ -3141,6 +3143,7 @@ test("provider switch refreshes views without triggering quota requests", async 
     const mocked = createVscodeMock({
       authDirectory: authDir,
       showStatusBar: true,
+      detailedPerformanceLogging: true,
       cloudTokenAutoUpdate: false,
       quickPickResponses: [
         (items) => items.find((item) => item.provider?.name === "proxy"),
@@ -3290,6 +3293,7 @@ test("refresh quota command reuses one saved entries snapshot for tree and statu
     const mocked = createVscodeMock({
       authDirectory: authDir,
       showStatusBar: true,
+      detailedPerformanceLogging: true,
       cloudTokenAutoUpdate: false,
     });
 

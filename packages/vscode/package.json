@@ -414,7 +414,7 @@
       "properties": {
         "codex-account-switch.quotaRefreshInterval": {
           "type": "number",
-          "default": 5,
+          "default": 30,
           "minimum": 5,
           "description": "Background maintenance interval, in seconds. Each interval checks one saved account for token refresh and refreshes one saved account quota in rotation."
         },
@@ -437,7 +437,7 @@
         "codex-account-switch.detailedPerformanceLogging": {
           "type": "boolean",
           "default": false,
-          "description": "Emit detailed staged performance logs for account list refresh and quota operations."
+          "description": "Debug-only. Emit performance logs for account list refresh and quota operations."
         },
         "codex-account-switch.reloadWindowAfterSwitch": {
           "type": "string",

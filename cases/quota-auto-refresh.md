@@ -2,7 +2,7 @@
 
 | 场景 | 前置条件 / 输入 | 预期结果 |
 | --- | --- | --- |
-| 默认后台刷新 | 有多个 saved account，未修改 `codex-account-switch.quotaRefreshInterval` | 插件每 `5s` 在后台只刷新 1 个 account 的 quota，按轮转方式推进，不阻塞其余账号。 |
+| 默认后台刷新 | 有多个 saved account，未修改 `codex-account-switch.quotaRefreshInterval` | 插件每 `30s` 在后台只刷新 1 个 account 的 quota，按轮转方式推进，不阻塞其余账号。 |
 | 修改刷新周期 | 用户把 `codex-account-switch.quotaRefreshInterval` 改为 `5` | 旧 timer 被释放，新 timer 按 `5s` 生效，后续后台刷新采用新周期。 |
 | 低于下限的刷新周期 | 用户绕过设置 UI 把 `codex-account-switch.quotaRefreshInterval` 写成 `1` | 后台 timer 按 `5s` 下限执行，共享 quota cache 的节流窗口也按 `5s` 计算。 |
 | 分组右键批量刷新 | 用户在 `Local Accounts` 或 `Cloud Accounts` 分组节点点击右键并选择 `Refresh Quota` | 仅刷新该分组内全部 accounts 的 quota，不要求逐个手动点击账号。 |

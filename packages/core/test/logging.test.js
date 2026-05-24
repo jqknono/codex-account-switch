@@ -103,7 +103,7 @@ function captureDiagnosticLogs() {
   return lines;
 }
 
-test("queryQuota keeps performance logs at summary level when detailed logging is disabled", async (t) => {
+test("queryQuota suppresses performance logs when debug logging is disabled", async (t) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-core-query-quota-summary-"));
   const codexHome = path.join(tempRoot, ".codex");
   fs.mkdirSync(codexHome, { recursive: true });
@@ -132,10 +132,7 @@ test("queryQuota keeps performance logs at summary level when detailed logging i
       assert.equal(result.kind, "ok");
     });
 
-    assert.equal(
-      lines.some((entry) => entry.line.includes("\"operation\":\"queryQuota\"") && entry.line.includes("\"durationMs\":")),
-      true
-    );
+    assert.equal(lines.some((entry) => entry.line.includes("perf-")), false);
     assert.equal(
       lines.some((entry) => entry.line.includes("\"operation\":\"queryQuota\"") && entry.line.includes("\"stage\":")),
       false
@@ -155,7 +152,7 @@ test("queryQuota keeps performance logs at summary level when detailed logging i
   });
 });
 
-test("detailed core performance logging emits stage timings for quota and refresh flows", async () => {
+test("debug core performance logging emits timings for quota and refresh flows", async () => {
   const lines = captureDiagnosticLogs();
   core.setDiagnosticLogOptions({ detailedPerformanceLogging: true });
 
@@ -167,6 +164,10 @@ test("detailed core performance logging emits stage timings for quota and refres
     assert.equal(quotaInfo.unavailableReason, null);
   });
 
+  assert.equal(
+    lines.some((entry) => entry.line.includes("\"operation\":\"refreshAccessToken\"") && entry.line.includes("\"durationMs\":")),
+    true
+  );
   assert.equal(
     lines.some((entry) => entry.line.includes("\"operation\":\"refreshAccessToken\"") && entry.line.includes("\"stage\":")),
     true
