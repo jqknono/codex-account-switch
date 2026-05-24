@@ -73,6 +73,7 @@ export interface CachedQuotaSnapshot {
 
 export interface CachedQuotaFallbackMetadata {
   fallbackErrorMessage?: string;
+  fallbackStatusCode?: number | null;
   fallbackReloginRequired?: boolean;
   usedCachedQuota?: boolean;
 }
@@ -409,28 +410,38 @@ export async function queryQuotaWithCache(
   try {
     const result = await options.fetch();
     if (result.kind === "ok") {
-      if (result.info.unavailableReason && cached && options.allowCachedFallback !== false) {
+      if (
+        result.info.unavailableReason
+        && result.info.unavailableReason.code !== "missing_auth_tokens"
+        && cached
+        && options.allowCachedFallback !== false
+      ) {
         logWarn(LOG_PREFIX, "fallback-to-cache-after-unavailable-result", {
           account: account.name,
           source: account.source,
           unavailableReason: result.info.unavailableReason.code,
+          statusCode: result.info.unavailableReason.statusCode,
+          message: result.info.unavailableReason.message,
         });
         return {
           kind: "ok",
           displayName: account.name,
           info: cached.info,
           fallbackErrorMessage: result.info.unavailableReason.message,
+          fallbackStatusCode: result.info.unavailableReason.statusCode,
           fallbackReloginRequired: result.info.unavailableReason.code === "relogin_required",
           usedCachedQuota: true,
         };
       }
       writeCachedQuotaSnapshot(account, result.info);
     } else if (cached && options.allowCachedFallback !== false) {
+      const cachedSnapshot = getCachedQuotaSnapshotByKey(getCacheKey(account));
       logWarn(LOG_PREFIX, "fallback-to-cache-after-query-result", {
         account: account.name,
         source: account.source,
         resultKind: result.kind,
         message: result.message,
+        cacheAgeMs: cachedSnapshot ? Date.now() - cachedSnapshot.queriedAtMs : null,
       });
       return {
         kind: "ok",
@@ -443,10 +454,13 @@ export async function queryQuotaWithCache(
     return result;
   } catch (error) {
     if (cached && options.allowCachedFallback !== false) {
+      const cachedSnapshot = getCachedQuotaSnapshotByKey(getCacheKey(account));
       logWarn(LOG_PREFIX, "fallback-to-cache-after-query-error", {
         account: account.name,
         source: account.source,
         error: error instanceof Error ? error.message : String(error),
+        cacheAgeMs: cachedSnapshot ? Date.now() - cachedSnapshot.queriedAtMs : null,
+        errorType: error instanceof Error ? error.constructor.name : typeof error,
       });
       return {
         kind: "ok",

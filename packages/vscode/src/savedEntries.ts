@@ -6,7 +6,7 @@ import {
   CurrentSelection,
   ProviderProfile,
   QuotaQueryResult,
-  addAccountFromAuth,
+  addAccountAuth,
   applyRefreshResponse,
   clearActiveModelProvider,
   deleteProviderProfile,
@@ -485,6 +485,99 @@ async function setMarkerToCurrentAuthAccount(): Promise<void> {
     entryVersion: selection.source === "cloud" ? account?.syncVersion : undefined,
     updatedAt: selection.source === "cloud" ? account?.syncUpdatedAt : undefined,
   });
+}
+
+export async function restoreSavedCurrentSelectionMarker(selection: SavedSelection): Promise<void> {
+  if (selection.kind === "account") {
+    const account = getSavedAccountEntry(selection.name, selection.source);
+    await setMarker({
+      kind: "account",
+      name: selection.name,
+      source: selection.source,
+      entryVersion: selection.source === "cloud" ? account?.syncVersion : undefined,
+      updatedAt: selection.source === "cloud" ? account?.syncUpdatedAt : undefined,
+    });
+    return;
+  }
+
+  if (selection.kind === "provider") {
+    const provider = getSavedProviderEntry(selection.name, selection.source);
+    await setMarker({
+      kind: "provider",
+      name: selection.name,
+      source: selection.source,
+      entryVersion: selection.source === "cloud" ? provider?.syncVersion : undefined,
+      updatedAt: selection.source === "cloud" ? provider?.syncUpdatedAt : undefined,
+    });
+    return;
+  }
+
+  await setMarker(null);
+}
+
+export async function restoreSavedSelectionAfterTransientLogin(
+  selection: SavedSelection,
+  previousAuth: AuthFile | null,
+): Promise<{ success: boolean; restoredLabel?: string; message?: string }> {
+  if (selection.kind === "account") {
+    const account = getSavedAccountEntry(selection.name, selection.source);
+    const authToRestore = previousAuth ?? (
+      account && account.storageState === "ready" ? account.auth : null
+    );
+    if (!authToRestore) {
+      return {
+        success: false,
+        message: account?.storageMessage ?? `Saved account "${selection.name}" is unavailable.`,
+      };
+    }
+
+    writeCurrentAuth(authToRestore);
+    clearActiveModelProvider();
+    if (account && account.storageState === "ready") {
+      await setCurrentAccountMarker(account);
+    } else {
+      await restoreSavedCurrentSelectionMarker(selection);
+    }
+    return {
+      success: true,
+      restoredLabel: `${selection.name} (${getSourceLabel(selection.source)})`,
+    };
+  }
+
+  if (selection.kind === "provider") {
+    const provider = getSavedProviderEntry(selection.name, selection.source);
+    if (!provider || !provider.profile || provider.invalid || provider.locked) {
+      return {
+        success: false,
+        message: provider?.storageMessage ?? `Provider "${selection.name}" is unavailable.`,
+      };
+    }
+
+    writeCurrentAuth(provider.profile.auth);
+    switchMode("account");
+    const core = await import("@codex-account-switch/core");
+    core.activateProviderConfig(provider.name, provider.profile.config);
+    await setMarker({
+      kind: "provider",
+      name: provider.name,
+      source: provider.source,
+      entryVersion: provider.source === "cloud" ? provider.syncVersion : undefined,
+      updatedAt: provider.source === "cloud" ? provider.syncUpdatedAt : undefined,
+    });
+    return {
+      success: true,
+      restoredLabel: getModeDisplayName(provider.name),
+    };
+  }
+
+  if (previousAuth) {
+    writeCurrentAuth(previousAuth);
+  }
+  await setMarker(null);
+  return {
+    success: Boolean(previousAuth),
+    restoredLabel: previousAuth ? "previous auth" : undefined,
+  };
 }
 
 async function reconcileCurrentCloudMarker(): Promise<HealedCloudMarker | null> {
@@ -1476,11 +1569,33 @@ function getSourceLabel(source: StorageSource): string {
 export async function saveCurrentAuthAsAccount(
   name: string,
   source: StorageSource,
-  options?: { expectedEntryVersion?: number | null; expectedUpdatedAt?: string | null },
+  options?: {
+    expectedEntryVersion?: number | null;
+    expectedUpdatedAt?: string | null;
+    selectAfterSave?: boolean;
+  },
+): Promise<{ success: boolean; message: string; meta?: AccountMeta; conflict?: CloudSyncConflict }> {
+  const auth = readCurrentAuth();
+  if (!auth) {
+    return { success: false, message: "auth.json was not found after login. Failed to add account." };
+  }
+
+  return saveAuthAsAccount(auth, name, source, options);
+}
+
+export async function saveAuthAsAccount(
+  auth: AuthFile,
+  name: string,
+  source: StorageSource,
+  options?: {
+    expectedEntryVersion?: number | null;
+    expectedUpdatedAt?: string | null;
+    selectAfterSave?: boolean;
+  },
 ): Promise<{ success: boolean; message: string; meta?: AccountMeta; conflict?: CloudSyncConflict }> {
   if (source === "local") {
-    const result = addAccountFromAuth(name);
-    if (result.success) {
+    const result = addAccountAuth(name, auth);
+    if (result.success && options?.selectAfterSave !== false) {
       await setCurrentAccountMarker({
         name,
         source: "local",
@@ -1492,10 +1607,6 @@ export async function saveCurrentAuthAsAccount(
   }
 
   requireCloudPassphrase();
-  const auth = readCurrentAuth();
-  if (!auth) {
-    return { success: false, message: "auth.json was not found after login. Failed to add account." };
-  }
   if (!hasAccountAuthTokens(auth)) {
     return {
       success: false,
@@ -1543,12 +1654,14 @@ export async function saveCurrentAuthAsAccount(
   if (!writeResult.success) {
     return { success: false, message: writeResult.message, meta, conflict: writeResult.conflict };
   }
-  await setCurrentAccountMarker({
-    name,
-    source: "cloud",
-    syncVersion: writeResult.syncVersion ?? null,
-    syncUpdatedAt: writeResult.syncUpdatedAt ?? null,
-  });
+  if (options?.selectAfterSave !== false) {
+    await setCurrentAccountMarker({
+      name,
+      source: "cloud",
+      syncVersion: writeResult.syncVersion ?? null,
+      syncUpdatedAt: writeResult.syncUpdatedAt ?? null,
+    });
+  }
   return { success: true, message: `Account "${name}" was saved to cloud storage`, meta };
 }
 

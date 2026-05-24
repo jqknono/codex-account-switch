@@ -62,7 +62,7 @@ test("getQuotaInfo reports workspace deactivated when usage API returns deactiva
   );
 });
 
-test("getQuotaInfo does not refresh tokens when usage API returns authentication errors", async () => {
+test("getQuotaInfo reports quota token rejected when usage API returns authentication errors", async () => {
   const requests = [];
   await withMockedHttpsRequest(
     (options, handler) => {
@@ -77,8 +77,8 @@ test("getQuotaInfo does not refresh tokens when usage API returns authentication
         },
       });
 
-      assert.equal(info.unavailableReason?.code, "invalid_auth_token");
-      assert.equal(info.unavailableReason?.message, "Missing auth tokens");
+      assert.equal(info.unavailableReason?.code, "quota_token_rejected");
+      assert.equal(info.unavailableReason?.message, "Quota API rejected current token");
       assert.equal(info.primaryWindow, null);
       assert.equal(info.secondaryWindow, null);
       assert.deepEqual(requests, ["chatgpt.com"]);
@@ -86,7 +86,35 @@ test("getQuotaInfo does not refresh tokens when usage API returns authentication
   );
 });
 
-test("getQuotaInfo reports relogin required when usage API invalidates the token", async () => {
+test("getQuotaInfo does not refresh tokens after quota authentication failures", async () => {
+  const requests = [];
+  let persistCalled = false;
+  await withMockedHttpsRequest(
+    (options, handler) => {
+      requests.push(options?.hostname ?? "");
+      return createMockRequest(401, JSON.stringify({ detail: "authentication token expired" }))(options, handler);
+    },
+    async () => {
+      const auth = {
+        tokens: {
+          access_token: "header.payload.signature",
+          refresh_token: "refresh-token",
+        },
+      };
+      const info = await getQuotaInfo(auth, async () => {
+        persistCalled = true;
+      });
+
+      assert.equal(info.unavailableReason?.code, "quota_token_rejected");
+      assert.equal(info.unavailableReason?.statusCode, 401);
+      assert.deepEqual(requests, ["chatgpt.com"]);
+      assert.equal(persistCalled, false);
+      assert.equal(auth.tokens.access_token, "header.payload.signature");
+    }
+  );
+});
+
+test("getQuotaInfo reports quota token rejected when usage API invalidates the token", async () => {
   await withMockedHttpsRequest(
     createMockRequest(401, JSON.stringify({
       error: {
@@ -105,9 +133,29 @@ test("getQuotaInfo reports relogin required when usage API invalidates the token
         },
       });
 
-      assert.equal(info.unavailableReason?.code, "relogin_required");
-      assert.equal(info.unavailableReason?.message, "Relogin required");
+      assert.equal(info.unavailableReason?.code, "quota_token_rejected");
+      assert.equal(info.unavailableReason?.message, "Quota API rejected current token (token_invalidated)");
       assert.equal(info.unavailableReason?.statusCode, 401);
+      assert.equal(info.primaryWindow, null);
+      assert.equal(info.secondaryWindow, null);
+    }
+  );
+});
+
+test("getQuotaInfo reports quota token rejected for generic quota auth failures", async () => {
+  await withMockedHttpsRequest(
+    createMockRequest(403, JSON.stringify({ error: { message: "Forbidden" } })),
+    async () => {
+      const info = await getQuotaInfo({
+        tokens: {
+          access_token: "header.payload.signature",
+          refresh_token: "refresh-token",
+        },
+      });
+
+      assert.equal(info.unavailableReason?.code, "quota_token_rejected");
+      assert.equal(info.unavailableReason?.message, "Quota API rejected current token");
+      assert.equal(info.unavailableReason?.statusCode, 403);
       assert.equal(info.primaryWindow, null);
       assert.equal(info.secondaryWindow, null);
     }

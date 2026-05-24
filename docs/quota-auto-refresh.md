@@ -11,7 +11,7 @@
 | Status bar refresh | `StatusBarManager` | 只负责展示与 `showStatusBar` 配置联动；timer 轮到非当前账号时不额外发起 quota 请求。 |
 | Group refresh action | `refreshQuota` command | 支持从 `Local Accounts` / `Cloud Accounts` 分组节点一次刷新组内全部账号 quota。 |
 | Quota persistence | `quotaCache.ts` | quota 结果仅写入本机共享 cache，不修改 local/cloud saved auth。 |
-| Token maintenance boundary | `RefreshCoordinator` | timer 周期可在 quota 前单独执行 token 检查；详细规则见 `docs/token-auto-refresh.md`。 |
+| Token maintenance boundary | `RefreshCoordinator` | timer 周期可在 quota 前按 `codex-account-switch.tokenAutoUpdate` 单独执行 token 检查；详细规则见 `docs/token-auto-refresh.md`。 |
 
 ## Refresh Flow
 

@@ -777,7 +777,7 @@ test("queryQuota skips proactive refresh when last_refresh is recent", async () 
   });
 });
 
-test("queryQuota refreshes on 401 and retries once when last_refresh is recent", async () => {
+test("queryQuota reports quota token rejected on 401 without refreshing tokens", async () => {
   const codexHome = createTempCodexHome();
   process.env.CODEX_HOME = codexHome;
 
@@ -800,61 +800,28 @@ test("queryQuota refreshes on 401 and retries once when last_refresh is recent",
         assert.equal(options.headers.Authorization, "Bearer access-current");
       },
     },
-    {
-      statusCode: 200,
-      body: JSON.stringify({
-        access_token: "access-rotated",
-        refresh_token: "rt-rotated",
-        id_token: "id-rotated",
-      }),
-      assertRequest: (options, body) => {
-        assert.equal(options.hostname, "auth.openai.com");
-        assert.match(body, /refresh_token=rt-current/);
-      },
-    },
-    {
-      statusCode: 200,
-      body: JSON.stringify({
-        plan_type: "plus",
-        rate_limit: {
-          primary_window: {
-            used_percent: 10,
-            reset_at: null,
-          },
-        },
-      }),
-      assertRequest: (options) => {
-        assert.equal(options.hostname, "chatgpt.com");
-        assert.equal(options.headers.Authorization, "Bearer access-rotated");
-        const savedWork = JSON.parse(fs.readFileSync(path.join(codexHome, "auth_work.json"), "utf-8"));
-        const currentAuth = JSON.parse(fs.readFileSync(path.join(codexHome, "auth.json"), "utf-8"));
-        assert.equal(savedWork.tokens.refresh_token, "rt-rotated");
-        assert.equal(currentAuth.tokens.refresh_token, "rt-rotated");
-      },
-    },
   ];
 
   await withMockedHttpsRequest(createQueuedHttpsMock(responses), async () => {
     const result = await core.queryQuota("work");
     assert.equal(result.kind, "ok");
-    assert.equal(result.info.plan, "plus");
+    assert.equal(result.info.unavailableReason?.code, "quota_token_rejected");
+    assert.equal(result.info.unavailableReason?.statusCode, 401);
   });
 
   const savedWork = JSON.parse(fs.readFileSync(path.join(codexHome, "auth_work.json"), "utf-8"));
-  assert.equal(savedWork.tokens.refresh_token, "rt-rotated");
-  assert.equal(savedWork.tokens.access_token, "access-rotated");
-  assert.equal(savedWork.tokens.id_token, "id-rotated");
+  assert.equal(savedWork.tokens.refresh_token, "rt-current");
+  assert.equal(savedWork.tokens.access_token, "access-current");
   assert.ok(typeof savedWork.last_refresh === "string");
   assert.equal("refresh_token_expires_at" in savedWork, false);
 
   const currentAuth = JSON.parse(fs.readFileSync(path.join(codexHome, "auth.json"), "utf-8"));
-  assert.equal(currentAuth.tokens.refresh_token, "rt-rotated");
-  assert.equal(currentAuth.tokens.access_token, "access-rotated");
-  assert.equal(currentAuth.tokens.id_token, "id-rotated");
+  assert.equal(currentAuth.tokens.refresh_token, "rt-current");
+  assert.equal(currentAuth.tokens.access_token, "access-current");
   assert.equal("refresh_token_expires_at" in currentAuth, false);
 });
 
-test("queryQuota serializes concurrent 401 refresh retries for the same account", async () => {
+test("queryQuota coalesces concurrent quota token rejections for the same account", async () => {
   const codexHome = createTempCodexHome();
   process.env.CODEX_HOME = codexHome;
 
@@ -870,39 +837,19 @@ test("queryQuota serializes concurrent 401 refresh retries for the same account"
         assert.equal(options.headers.Authorization, "Bearer access-current");
       },
     },
-    {
-      statusCode: 200,
-      body: JSON.stringify({
-        access_token: "access-rotated",
-        refresh_token: "rt-rotated",
-        id_token: "id-rotated",
-      }),
-      assertRequest: (options, body) => {
-        assert.equal(options.hostname, "auth.openai.com");
-        assert.match(body, /refresh_token=rt-current/);
-      },
-    },
-    {
-      statusCode: 200,
-      body: JSON.stringify({
-        plan_type: "plus",
-      }),
-      assertRequest: (options) => {
-        assert.equal(options.hostname, "chatgpt.com");
-        assert.equal(options.headers.Authorization, "Bearer access-rotated");
-      },
-    },
   ];
 
   await withMockedHttpsRequest(createQueuedHttpsMock(responses), async () => {
     const [first, second] = await Promise.all([core.queryQuota("work"), core.queryQuota("work")]);
     assert.equal(first.kind, "ok");
     assert.equal(second.kind, "ok");
+    assert.equal(first.info.unavailableReason?.code, "quota_token_rejected");
+    assert.equal(second.info.unavailableReason?.code, "quota_token_rejected");
   });
 
   const savedWork = JSON.parse(fs.readFileSync(path.join(codexHome, "auth_work.json"), "utf-8"));
-  assert.equal(savedWork.tokens.refresh_token, "rt-rotated");
-  assert.equal(savedWork.tokens.access_token, "access-rotated");
+  assert.equal(savedWork.tokens.refresh_token, "rt-current");
+  assert.equal(savedWork.tokens.access_token, "access-current");
 });
 
 test("queryQuota coalesces concurrent lookups for the same account", async () => {

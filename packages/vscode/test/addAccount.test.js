@@ -221,6 +221,7 @@ function createVscodeMock(options) {
   const executedCommands = [];
   const clipboardWrites = [];
   const sentTerminalCommands = [];
+  const createdTerminals = [];
   const warningMessages = [];
   const informationMessages = [];
   const errorMessages = [];
@@ -261,7 +262,7 @@ function createVscodeMock(options) {
     reloadWindowAfterSwitch: "never",
     useDeviceAuthForLogin: options.useDeviceAuthForLogin ?? false,
     quotaRefreshInterval: 30,
-    tokenAutoUpdate: options.tokenAutoUpdate ?? options.cloudTokenAutoUpdate ?? false,
+    tokenAutoUpdate: options.tokenAutoUpdate ?? options.cloudTokenAutoUpdate ?? true,
     tokenAutoUpdateIntervalHours:
       options.tokenAutoUpdateIntervalHours ?? options.cloudTokenAutoUpdateIntervalHours ?? 24,
     showStatusBar: options.showStatusBar ?? false,
@@ -399,13 +400,16 @@ function createVscodeMock(options) {
         createdChannels.push(channel);
         return channel;
       },
-      createTerminal() {
-        return {
+      createTerminal(options) {
+        const terminal = {
+          options,
           show() {},
           sendText(text) {
             sentTerminalCommands.push(text);
           },
         };
+        createdTerminals.push(terminal);
+        return terminal;
       },
       async showInputBox(inputOptions) {
         inputBoxCalls.push(inputOptions);
@@ -504,6 +508,7 @@ function createVscodeMock(options) {
     executedCommands,
     clipboardWrites,
     sentTerminalCommands,
+    createdTerminals,
     warningMessages,
     informationMessages,
     errorMessages,
@@ -727,6 +732,74 @@ async function withFailingHttps(fn, mockOptions = {}) {
   }
 }
 
+async function withQuotaRejectedHttps(fn, mockOptions = {}) {
+  const originalRequest = https.request;
+  const statusCode = mockOptions.statusCode ?? 401;
+  const rejectionBody = mockOptions.body ?? {
+    detail: "authentication token expired",
+  };
+  https.request = (requestOptions, handler) => {
+    const hostname = requestOptions?.hostname;
+    mockOptions?.requestLog?.push?.({
+      hostname,
+      path: requestOptions?.path ?? "",
+      method: requestOptions?.method ?? "GET",
+      authorization:
+        requestOptions?.headers?.Authorization
+        ?? requestOptions?.headers?.authorization
+        ?? null,
+    });
+    const isQuotaRequest = hostname === "chatgpt.com";
+    const body = isQuotaRequest
+      ? JSON.stringify(rejectionBody)
+      : JSON.stringify({
+          access_token: "access-rotated",
+          refresh_token: "refresh-rotated",
+          id_token: makeJwt({
+            email: "restored@example.com",
+            name: "restored",
+            "https://api.openai.com/auth": {
+              chatgpt_plan_type: "plus",
+            },
+          }),
+        });
+    const response = {
+      statusCode: isQuotaRequest ? statusCode : 200,
+      on(event, listener) {
+        if (event === "data") {
+          setImmediate(() => listener(body));
+        }
+        if (event === "end") {
+          setImmediate(listener);
+        }
+        return response;
+      },
+    };
+
+    const request = {
+      on() {
+        return request;
+      },
+      setTimeout() {
+        return request;
+      },
+      destroy() {},
+      write() {},
+      end() {
+        handler(response);
+      },
+    };
+
+    return request;
+  };
+
+  try {
+    return await fn();
+  } finally {
+    https.request = originalRequest;
+  }
+}
+
 async function withRefreshTokenReusedHttps(fn, failure = {}) {
   const originalRequest = https.request;
   const failureMessage = failure.message
@@ -804,6 +877,14 @@ function countAuthRefreshRequests(requestLog) {
   return requestLog.filter((request) => request.hostname === "auth.openai.com").length;
 }
 
+function writeLastTerminalAuth(mocked, auth) {
+  const terminal = mocked.createdTerminals.at(-1);
+  const codexHome = terminal?.options?.env?.CODEX_HOME;
+  assert.equal(typeof codexHome, "string");
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.writeFileSync(path.join(codexHome, "auth.json"), JSON.stringify(auth, null, 2), "utf-8");
+}
+
 function getRefreshCoordinator(context) {
   return context.subscriptions.find(
     (item) =>
@@ -834,7 +915,13 @@ test("addAccount can use device auth for a new account", async (t) => {
     authDirectory: authDir,
     inputBoxResponses: ["device-user"],
     warningResponses: ["Use Device Auth"],
-    infoResponses: ["Done", "Later"],
+    infoResponses: [
+      () => {
+        writeLastTerminalAuth(mocked, makeAuthFile("acct-device"));
+        return "Done";
+      },
+      "Later",
+    ],
   });
 
   try {
@@ -861,6 +948,331 @@ test("addAccount can use device auth for a new account", async (t) => {
       })
     );
   } finally {
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
+test("addAccount saves a new local account without switching away from the active account", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-add-local-preserve-active-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  const authDir = path.join(tempRoot, "saved-auth");
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(authDir, { recursive: true });
+
+  const activeAuth = makeAuthFile("acct-active", {
+    accessToken: "access-active-current",
+    refreshToken: "refresh-active-current",
+  });
+  core.setNamedAuthDir(authDir);
+  core.writeSavedAuthFile(path.join(authDir, "auth_active.json"), makeAuthFile("acct-active", {
+    accessToken: "access-active-saved",
+    refreshToken: "refresh-active-saved",
+  }));
+  core.setNamedAuthDir(undefined);
+  fs.writeFileSync(path.join(codexHome, "auth.json"), JSON.stringify(activeAuth, null, 2), "utf-8");
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  const requestLog = [];
+  const mocked = createVscodeMock({
+    authDirectory: authDir,
+    inputBoxResponses: ["new-user"],
+    warningResponses: ["Login"],
+    infoResponses: [
+      () => {
+        writeLastTerminalAuth(
+          mocked,
+          makeAuthFile("acct-new", {
+            accessToken: "access-new",
+            refreshToken: "refresh-new",
+          }),
+        );
+        return "Done";
+      },
+      "Later",
+    ],
+  });
+
+  try {
+    await withDisabledIntervals(() =>
+      withSuccessfulHttps(async () => {
+        const extension = loadExtensionWithMockedVscode(mocked.vscode);
+        const context = createExtensionContext(mocked);
+        await extension.activate(context);
+        await waitForRefreshCoordinatorIdle(context);
+        requestLog.length = 0;
+
+        await mocked.registeredCommands.get("codex-account-switch.addAccount")();
+        await waitForRefreshCoordinatorIdle(context);
+
+        const savedNew = JSON.parse(fs.readFileSync(path.join(authDir, "auth_new-user.json"), "utf-8"));
+        const currentAuth = JSON.parse(fs.readFileSync(path.join(codexHome, "auth.json"), "utf-8"));
+        const savedActive = JSON.parse(fs.readFileSync(path.join(authDir, "auth_active.json"), "utf-8"));
+        assert.equal(savedNew.tokens.account_id, "acct-new");
+        assert.equal(savedNew.tokens.access_token, "access-new");
+        assert.equal(currentAuth.tokens.account_id, "acct-active");
+        assert.equal(currentAuth.tokens.access_token, "access-active-current");
+        assert.equal(savedActive.tokens.account_id, "acct-active");
+        assert.equal(savedActive.tokens.access_token, "access-active-saved");
+        const marker = mocked.globalStateValues.get("codex-account-switch.currentSavedSelection");
+        assert.equal(marker?.kind, "account");
+        assert.equal(marker?.name, "active");
+        assert.equal(marker?.source, "local");
+        assert.equal(countAuthRefreshRequests(requestLog), 0);
+
+        for (const subscription of context.subscriptions.reverse()) {
+          subscription?.dispose?.();
+        }
+      }, { requestLog })
+    );
+  } finally {
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
+test("addAccount saves bob1990 without replacing the active cloud google1 auth", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-add-local-preserve-cloud-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  const authDir = path.join(tempRoot, "saved-auth");
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(authDir, { recursive: true });
+
+  const googleAuth = makeAuthFile("acct-google1", {
+    email: "google1@example.com",
+    accessToken: "access-google1-current",
+    refreshToken: "refresh-google1-current",
+  });
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  try {
+    core.setSavedAuthPassphrase("cloud-passphrase");
+    const cloudEntry = core.serializeSavedValue("saved_auth", googleAuth, {
+      requireEncryption: true,
+    });
+    cloudEntry.entryVersion = 2;
+    cloudEntry.updatedAt = "2026-05-01T00:00:00.000Z";
+    core.setSavedAuthPassphrase(null);
+    fs.writeFileSync(path.join(codexHome, "auth.json"), JSON.stringify(googleAuth, null, 2), "utf-8");
+
+    const requestLog = [];
+    const mocked = createVscodeMock({
+      authDirectory: authDir,
+      secretValues: {
+        [STORAGE_SECRET_KEY]: "cloud-passphrase",
+      },
+      syncedStorage: {
+        version: 1,
+        accounts: {
+          google1: cloudEntry,
+        },
+        providers: {},
+      },
+      globalStateValues: {
+        "codex-account-switch.currentSavedSelection": {
+          kind: "account",
+          name: "google1",
+          source: "cloud",
+          entryVersion: 2,
+          updatedAt: "2026-05-01T00:00:00.000Z",
+        },
+      },
+      inputBoxResponses: ["bob1990"],
+      warningResponses: ["Login"],
+      infoResponses: [
+        () => {
+          writeLastTerminalAuth(
+            mocked,
+            makeAuthFile("acct-bob", {
+              email: "bob1990@example.com",
+              accessToken: "access-bob-login",
+              refreshToken: "refresh-bob-login",
+            }),
+          );
+          return "Done";
+        },
+        "Later",
+      ],
+    });
+
+    await withDisabledIntervals(() =>
+      withSuccessfulHttps(async () => {
+        const extension = loadExtensionWithMockedVscode(mocked.vscode);
+        const context = createExtensionContext(mocked);
+        await extension.activate(context);
+        await waitForRefreshCoordinatorIdle(context);
+        requestLog.length = 0;
+
+        await mocked.registeredCommands.get("codex-account-switch.addAccount")();
+        await waitForRefreshCoordinatorIdle(context);
+
+        core.setSavedAuthPassphrase("cloud-passphrase");
+        const savedBobResult = core.readSavedAuthFileResult(path.join(authDir, "auth_bob1990.json"));
+        core.setSavedAuthPassphrase(null);
+        assert.equal(savedBobResult.status, "ok");
+        const savedBob = savedBobResult.value;
+        const currentAuth = JSON.parse(fs.readFileSync(path.join(codexHome, "auth.json"), "utf-8"));
+        const cloudAuth = readCloudAccount(mocked.config, "google1", "cloud-passphrase");
+        assert.equal(savedBob.tokens.account_id, "acct-bob");
+        assert.equal(savedBob.tokens.access_token, "access-bob-login");
+        assert.equal(currentAuth.tokens.account_id, "acct-google1");
+        assert.equal(currentAuth.tokens.access_token, "access-google1-current");
+        assert.equal(cloudAuth.tokens.account_id, "acct-google1");
+        assert.equal(cloudAuth.tokens.access_token, "access-google1-current");
+        assert.equal(getCloudEnvelope(mocked.config, "account", "google1").entryVersion, 2);
+        assert.deepEqual(mocked.globalStateValues.get("codex-account-switch.currentSavedSelection"), {
+          kind: "account",
+          name: "google1",
+          source: "cloud",
+          entryVersion: 2,
+          updatedAt: "2026-05-01T00:00:00.000Z",
+        });
+        assert.equal(countAuthRefreshRequests(requestLog), 0);
+        assert.equal(
+          requestLog.some((request) => request.authorization === "Bearer access-google1-current"),
+          true,
+        );
+
+        for (const subscription of context.subscriptions.reverse()) {
+          subscription?.dispose?.();
+        }
+      }, { requestLog })
+    );
+  } finally {
+    core.setSavedAuthPassphrase(null);
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
+test("addAccount restores the active account when a duplicate local login is rejected", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-add-local-duplicate-restore-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  const authDir = path.join(tempRoot, "saved-auth");
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(authDir, { recursive: true });
+
+  core.setNamedAuthDir(authDir);
+  core.writeSavedAuthFile(path.join(authDir, "auth_active.json"), makeAuthFile("acct-active", {
+    accessToken: "access-active-current",
+    refreshToken: "refresh-active-current",
+  }));
+  core.writeSavedAuthFile(path.join(authDir, "auth_bob1990.json"), makeAuthFile("acct-bob", {
+    email: "bob1990@jqknono.com",
+    accessToken: "access-bob-saved",
+    refreshToken: "refresh-bob-saved",
+  }));
+  core.setNamedAuthDir(undefined);
+  fs.writeFileSync(
+    path.join(codexHome, "auth.json"),
+    JSON.stringify(makeAuthFile("acct-active", {
+      accessToken: "access-active-current",
+      refreshToken: "refresh-active-current",
+    }), null, 2),
+    "utf-8",
+  );
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  const mocked = createVscodeMock({
+    authDirectory: authDir,
+    inputBoxResponses: ["microsoft2"],
+    warningResponses: ["Login"],
+    infoResponses: [
+      () => {
+        writeLastTerminalAuth(
+          mocked,
+          makeAuthFile("acct-bob", {
+            email: "bob1990@jqknono.com",
+            accessToken: "access-bob-login",
+            refreshToken: "refresh-bob-login",
+          }),
+        );
+        return "Done";
+      },
+    ],
+  });
+
+  try {
+    await withDisabledIntervals(() =>
+      withSuccessfulHttps(async () => {
+        const extension = loadExtensionWithMockedVscode(mocked.vscode);
+        const context = createExtensionContext(mocked);
+        await extension.activate(context);
+        await waitForRefreshCoordinatorIdle(context);
+
+        await mocked.registeredCommands.get("codex-account-switch.addAccount")();
+        await waitForRefreshCoordinatorIdle(context);
+
+        const currentAuth = JSON.parse(fs.readFileSync(path.join(codexHome, "auth.json"), "utf-8"));
+        const savedBob = JSON.parse(fs.readFileSync(path.join(authDir, "auth_bob1990.json"), "utf-8"));
+        assert.equal(fs.existsSync(path.join(authDir, "auth_microsoft2.json")), false);
+        assert.equal(currentAuth.tokens.account_id, "acct-active");
+        assert.equal(currentAuth.tokens.access_token, "access-active-current");
+        assert.equal(savedBob.tokens.account_id, "acct-bob");
+        assert.equal(savedBob.tokens.access_token, "access-bob-saved");
+        const marker = mocked.globalStateValues.get("codex-account-switch.currentSavedSelection");
+        assert.equal(marker?.kind, "account");
+        assert.equal(marker?.name, "active");
+        assert.equal(marker?.source, "local");
+        assert.match(mocked.errorMessages.at(-1)?.message ?? "", /Duplicate add was rejected/i);
+
+        for (const subscription of context.subscriptions.reverse()) {
+          subscription?.dispose?.();
+        }
+      })
+    );
+  } finally {
+    core.setNamedAuthDir(undefined);
     if (previousCodexHome === undefined) {
       delete process.env.CODEX_HOME;
     } else {
@@ -1643,7 +2055,13 @@ test("addAccount can save to synced settings when cloud storage is selected", as
       authDirectory: authDir,
       inputBoxResponses: ["sync-user", "cloud-passphrase", "cloud-passphrase"],
       warningResponses: ["Login"],
-      infoResponses: ["Done", "Later"],
+      infoResponses: [
+        () => {
+          writeLastTerminalAuth(mocked, makeAuthFile("acct-cloud"));
+          return "Done";
+        },
+        "Later",
+      ],
       defaultSaveTarget: "cloud",
     });
 
@@ -3069,7 +3487,7 @@ test("current account uses yellow icon when quota refresh falls back to cache", 
       cloudTokenAutoUpdate: false,
     });
     await withDisabledIntervals(() =>
-      withFailingHttps(async () => {
+      withQuotaRejectedHttps(async () => {
         const extension = loadExtensionWithMockedVscode(secondWindow.vscode);
         const context = createExtensionContext(secondWindow);
         await extension.activate(context);
@@ -3084,10 +3502,11 @@ test("current account uses yellow icon when quota refresh falls back to cache", 
         assert.equal(appleItem.iconPath?.id, "pass-filled");
         assert.equal(appleItem.iconPath?.color?.id, "editorWarning.foreground");
         assert.match(String(appleItem.tooltip ?? ""), /Showing cached data/);
+        assert.match(String(appleItem.tooltip ?? ""), /HTTP 401/);
 
         const details = getAccountDetailItems(provider, appleItem);
         const freshnessItem = details.find((item) => item.label === "Quota freshness");
-        assert.equal(freshnessItem?.description, "Cached");
+        assert.equal(freshnessItem?.description, "Cached (HTTP 401)");
 
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
@@ -6579,6 +6998,90 @@ test("timer maintenance refreshes local tokens when remaining validity is below 
         assert.equal(savedAuth.tokens.refresh_token, "refresh-rotated");
         assert.equal(currentAuth.tokens.access_token, "access-rotated");
         assert.equal(currentAuth.tokens.refresh_token, "refresh-rotated");
+
+        for (const subscription of context.subscriptions.reverse()) {
+          subscription?.dispose?.();
+        }
+      }, { requestLog })
+    );
+  } finally {
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
+test("timer maintenance skips token refresh when token auto update is disabled", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-token-maintenance-disabled-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  fs.mkdirSync(codexHome, { recursive: true });
+
+  const nearExpiryAccessToken = makeJwt({
+    exp: Math.floor(Date.now() / 1000) + 4 * 24 * 3600,
+  });
+  const localAuth = makeAuthFile("acct-local", {
+    accessToken: nearExpiryAccessToken,
+    refreshToken: "refresh-local-old",
+  });
+  fs.writeFileSync(
+    path.join(codexHome, "auth_local-user.json"),
+    JSON.stringify(localAuth, null, 2),
+    "utf-8"
+  );
+  fs.writeFileSync(
+    path.join(codexHome, "auth.json"),
+    JSON.stringify(localAuth, null, 2),
+    "utf-8"
+  );
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  const requestLog = [];
+  const mocked = createVscodeMock({
+    showStatusBar: false,
+    tokenAutoUpdate: false,
+  });
+
+  try {
+    await withDisabledIntervals(() =>
+      withSuccessfulHttps(async () => {
+        const extension = loadExtensionWithMockedVscode(mocked.vscode);
+        const context = createExtensionContext(mocked);
+        await extension.activate(context);
+        await waitForRefreshCoordinatorIdle(context);
+        requestLog.length = 0;
+
+        const refreshCoordinator = getRefreshCoordinator(context);
+        assert.ok(refreshCoordinator);
+
+        refreshCoordinator.scheduleQuotaRefresh({
+          reason: "timer",
+        });
+        await waitForRefreshCoordinatorIdle(context);
+
+        assert.equal(countAuthRefreshRequests(requestLog), 0);
+
+        const savedAuth = JSON.parse(fs.readFileSync(path.join(codexHome, "auth_local-user.json"), "utf-8"));
+        const currentAuth = JSON.parse(fs.readFileSync(path.join(codexHome, "auth.json"), "utf-8"));
+        assert.equal(savedAuth.tokens.access_token, nearExpiryAccessToken);
+        assert.equal(savedAuth.tokens.refresh_token, "refresh-local-old");
+        assert.equal(currentAuth.tokens.access_token, nearExpiryAccessToken);
+        assert.equal(currentAuth.tokens.refresh_token, "refresh-local-old");
 
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();

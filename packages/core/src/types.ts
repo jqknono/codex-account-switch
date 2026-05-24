@@ -77,6 +77,7 @@ export type QuotaUnavailableCode =
   | "missing_auth_tokens"
   | "invalid_auth_token"
   | "relogin_required"
+  | "quota_token_rejected"
   | "request_failed";
 
 export interface QuotaUnavailableReason {

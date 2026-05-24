@@ -1,11 +1,14 @@
 import * as vscode from "vscode";
 import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
 import {
   exportAccounts,
   importAccounts,
   ExportData,
   ProviderProfile,
   QuotaInfo,
+  readAuthFile,
   getModeDisplayName,
   switchMode,
 } from "@codex-account-switch/core";
@@ -37,6 +40,8 @@ import {
   refreshSavedAccountEntry,
   renameSavedAccountEntry,
   removeSavedAccountEntry,
+  restoreSavedCurrentSelectionMarker,
+  saveAuthAsAccount,
   saveCurrentAuthAsAccount,
   saveProviderProfileToSource,
   SavedAccountInfo,
@@ -396,6 +401,49 @@ async function runCodexLogin(options?: { useDeviceAuth?: boolean }): Promise<boo
   });
 
   return action === "Done";
+}
+
+async function runTransientCodexLogin(options?: { useDeviceAuth?: boolean }) {
+  const useDeviceAuth = options?.useDeviceAuth ?? getUseDeviceAuthForLogin();
+  const loginCommand = getCodexLoginCommand(useDeviceAuth);
+  const tempCodexHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-account-switch-login-"));
+  logCommandInfo("login", "terminal-started", {
+    useDeviceAuth,
+    command: loginCommand,
+    transient: true,
+  });
+
+  try {
+    const terminal = vscode.window.createTerminal({
+      name: "Codex Login",
+      env: {
+        CODEX_HOME: tempCodexHome,
+      },
+    });
+    terminal.show();
+    terminal.sendText(loginCommand);
+
+    const message = useDeviceAuth
+      ? `Complete \`${loginCommand}\` in the terminal, then click Done. If Codex says "Enable device code authorization for Codex in ChatGPT Security Settings, then run \\"codex login --device-auth\\" again.", enable it in ChatGPT Security Settings first.`
+      : `Complete \`${loginCommand}\` in the terminal, then click Done.`;
+
+    const action = await vscode.window.showInformationMessage(message, "Done", "Cancel");
+    logCommandInfo("login", action === "Done" ? "confirmed" : "cancelled", {
+      useDeviceAuth,
+      transient: true,
+    });
+
+    if (action !== "Done") {
+      return { completed: false, auth: null };
+    }
+
+    return {
+      completed: true,
+      auth: readAuthFile(path.join(tempCodexHome, "auth.json")),
+    };
+  } finally {
+    fs.rmSync(tempCodexHome, { recursive: true, force: true });
+  }
 }
 
 function getSourceLabel(source: StorageSource): string {
@@ -1234,23 +1282,27 @@ export function registerCommands(
             return;
           }
 
-          const loginState = exitProviderModeForLogin();
-          if (!loginState) return;
-
-          const completed = await runCodexLogin({ useDeviceAuth: overwriteMethod === "device-auth" });
-          if (!completed) {
+          const previousSelection = getSavedCurrentSelection();
+          const loginResult = await runTransientCodexLogin({ useDeviceAuth: overwriteMethod === "device-auth" });
+          if (!loginResult.completed) {
             logCommandInfo("add-account", "login-cancelled", {
               account: trimmedName,
               target,
               overwrite: true,
             });
-            await restoreProviderModeAfterFailedLogin(loginState.previousSelection, loginState.switched);
+            await restoreSavedCurrentSelectionMarker(previousSelection);
+            return;
+          }
+          if (!loginResult.auth) {
+            await restoreSavedCurrentSelectionMarker(previousSelection);
+            vscode.window.showErrorMessage("auth.json was not found after login. Failed to add account.");
             return;
           }
 
-          const result = await saveCurrentAuthAsAccount(trimmedName, target, {
+          const result = await saveAuthAsAccount(loginResult.auth, trimmedName, target, {
             expectedEntryVersion: existing.syncVersion,
             expectedUpdatedAt: existing.syncUpdatedAt,
+            selectAfterSave: false,
           });
           if (result.success) {
             logCommandInfo("add-account", "saved", {
@@ -1259,9 +1311,11 @@ export function registerCommands(
               overwrite: true,
               email: result.meta?.email ?? null,
             });
+            await restoreSavedCurrentSelectionMarker(previousSelection);
             refreshAll(refreshCoordinator);
             await promptReloadWindowAfterAdd(trimmedName, result.meta?.email);
           } else {
+            await restoreSavedCurrentSelectionMarker(previousSelection);
             logCommandWarn("add-account", "save-failed", {
               account: trimmedName,
               target,
@@ -1269,7 +1323,6 @@ export function registerCommands(
               conflict: result.conflict ?? false,
               message: result.message,
             });
-            await restoreProviderModeAfterFailedLogin(loginState.previousSelection, loginState.switched);
             if (result.conflict) {
               await showSyncConflictWarning(result.message);
             } else {
@@ -1291,21 +1344,26 @@ export function registerCommands(
           return;
         }
 
-        const loginState = exitProviderModeForLogin();
-        if (!loginState) return;
-
-        const completed = await runCodexLogin({ useDeviceAuth: loginMethod === "device-auth" });
-        if (!completed) {
+        const previousSelection = getSavedCurrentSelection();
+        const loginResult = await runTransientCodexLogin({ useDeviceAuth: loginMethod === "device-auth" });
+        if (!loginResult.completed) {
           logCommandInfo("add-account", "login-cancelled", {
             account: trimmedName,
             target,
             overwrite: false,
           });
-          await restoreProviderModeAfterFailedLogin(loginState.previousSelection, loginState.switched);
+          await restoreSavedCurrentSelectionMarker(previousSelection);
+          return;
+        }
+        if (!loginResult.auth) {
+          await restoreSavedCurrentSelectionMarker(previousSelection);
+          vscode.window.showErrorMessage("auth.json was not found after login. Failed to add account.");
           return;
         }
 
-        const result = await saveCurrentAuthAsAccount(trimmedName, target);
+        const result = await saveAuthAsAccount(loginResult.auth, trimmedName, target, {
+          selectAfterSave: false,
+        });
         if (result.success) {
           logCommandInfo("add-account", "saved", {
             account: trimmedName,
@@ -1313,9 +1371,11 @@ export function registerCommands(
             overwrite: false,
             email: result.meta?.email ?? null,
           });
+          await restoreSavedCurrentSelectionMarker(previousSelection);
           refreshAll(refreshCoordinator);
           await promptReloadWindowAfterAdd(trimmedName, result.meta?.email);
         } else {
+          await restoreSavedCurrentSelectionMarker(previousSelection);
           logCommandWarn("add-account", "save-failed", {
             account: trimmedName,
             target,
@@ -1323,7 +1383,6 @@ export function registerCommands(
             conflict: result.conflict ?? false,
             message: result.message,
           });
-          await restoreProviderModeAfterFailedLogin(loginState.previousSelection, loginState.switched);
           if (result.conflict) {
             await showSyncConflictWarning(result.message);
           } else {

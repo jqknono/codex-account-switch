@@ -1,11 +1,13 @@
 import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
 import { execSync } from "child_process";
 import * as readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import chalk from "chalk";
 import {
   listAccounts,
-  addAccountFromAuth,
+  addAccountAuth,
   removeAccount,
   useAccount,
   getCurrentAccount,
@@ -19,6 +21,7 @@ import {
   ExportData,
   WindowInfo,
   getNamedAuthPath,
+  readAuthFile,
   readNamedAuth,
   readCurrentAuth,
   getCurrentSelection,
@@ -370,22 +373,6 @@ export async function cmdAdd(name: string, options?: { deviceAuth?: boolean }): 
     console.log(chalk.cyan("  Starting a new login flow to re-authorize and overwrite the saved account.\n"));
   }
 
-  const previousSelection = getCurrentSelection();
-  let restoreProviderOnFailure = false;
-  if (previousSelection.kind === "provider") {
-    const switchResult = switchMode("account");
-    if (!switchResult.success) {
-      console.log(chalk.red(switchResult.message));
-      return;
-    }
-    restoreProviderOnFailure = true;
-    console.log(
-      chalk.dim(
-        `Exited provider mode "${getModeDisplayName(previousSelection.name)}" before login so Codex can create an account auth.json.`
-      )
-    );
-  }
-
   console.log(
     chalk.cyan(
       `Starting the Codex login flow${deviceAuth ? " with device auth" : ""}...\n  Command: ${loginCommand}\n`
@@ -399,21 +386,30 @@ export async function cmdAdd(name: string, options?: { deviceAuth?: boolean }): 
     );
   }
 
+  const tempCodexHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-account-switch-login-"));
   try {
-    execSync(loginCommand, { stdio: "inherit" });
+    execSync(loginCommand, {
+      stdio: "inherit",
+      env: {
+        ...process.env,
+        CODEX_HOME: tempCodexHome,
+      },
+    });
   } catch {
-    if (restoreProviderOnFailure && previousSelection.kind === "provider") {
-      switchMode(previousSelection.name);
-    }
     console.log(chalk.red("\nLogin failed or was cancelled."));
+    fs.rmSync(tempCodexHome, { recursive: true, force: true });
     return;
   }
 
-  const result = addAccountFromAuth(name);
+  const loginAuth = readAuthFile(path.join(tempCodexHome, "auth.json"));
+  fs.rmSync(tempCodexHome, { recursive: true, force: true });
+  if (!loginAuth) {
+    console.log(chalk.red("auth.json was not found after login. Failed to add account."));
+    return;
+  }
+
+  const result = addAccountAuth(name, loginAuth);
   if (!result.success) {
-    if (restoreProviderOnFailure && previousSelection.kind === "provider") {
-      switchMode(previousSelection.name);
-    }
     console.log(chalk.red(result.message));
     return;
   }

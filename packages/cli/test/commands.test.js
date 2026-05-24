@@ -194,6 +194,40 @@ test("add: uses browser login by default", () => {
   assert.equal(saved.tokens.refresh_token, auth.tokens.refresh_token);
 });
 
+test("add: preserves the active account auth while saving the captured login", () => {
+  const home = tmpHome();
+  const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "cas-cli-bin-"));
+  const logPath = path.join(home, "codex-login-args.txt");
+  const active = makeAuth("google1@example.com", "plus", {
+    acctId: "acct-google1",
+    refreshToken: "refresh-google1-current",
+  });
+  const bob = makeAuth("bob1990@example.com", "plus", {
+    acctId: "acct-bob1990",
+    refreshToken: "refresh-bob1990-login",
+  });
+  writeJson(path.join(home, "auth_google1.json"), active);
+  writeJson(path.join(home, "auth.json"), active);
+  writeFakeCodexCommand(binDir, { auth: bob, logPath });
+
+  const r = cli("add bob1990", home, {
+    env: {
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+    },
+  });
+
+  assert.equal(r.code, 0);
+  assert.ok(r.stdout.includes('Account "bob1990" was saved'));
+  assert.equal(fs.readFileSync(logPath, "utf-8").trim(), "login");
+
+  const savedBob = readJson(path.join(home, "auth_bob1990.json"));
+  const current = readJson(path.join(home, "auth.json"));
+  assert.equal(savedBob.tokens.account_id, "acct-bob1990");
+  assert.equal(savedBob.tokens.refresh_token, "refresh-bob1990-login");
+  assert.equal(current.tokens.account_id, "acct-google1");
+  assert.equal(current.tokens.refresh_token, "refresh-google1-current");
+});
+
 test("add: uses device auth only when explicitly enabled", () => {
   const home = tmpHome();
   const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "cas-cli-bin-"));

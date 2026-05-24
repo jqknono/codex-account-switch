@@ -191,6 +191,10 @@ export class RefreshCoordinator implements vscode.Disposable {
     return vscode.workspace.getConfiguration("codex-account-switch").get<boolean>("autoSwitchOnZeroQuota", false);
   }
 
+  private isTokenAutoUpdateEnabled(): boolean {
+    return vscode.workspace.getConfiguration("codex-account-switch").get<boolean>("tokenAutoUpdate", true);
+  }
+
   private enqueueQuotaRefresh(request: ScheduledQuotaRefresh & { targetIds?: Iterable<string> }): void {
     this.pendingReason = request.reason;
     if (request.fullRefresh) {
@@ -281,7 +285,7 @@ export class RefreshCoordinator implements vscode.Disposable {
       targetIds = [];
     }
 
-    if (pendingReason === "timer" && autoTargetAccount) {
+    if (pendingReason === "timer" && autoTargetAccount && this.isTokenAutoUpdateEnabled()) {
       const tokenRefreshResult = await this.maybeRefreshExpiringToken(autoTargetAccount, refreshId);
       if (tokenRefreshResult.skipQuota) {
         targetIds = [];

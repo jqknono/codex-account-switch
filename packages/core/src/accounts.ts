@@ -553,12 +553,7 @@ export function listAccounts(): AccountInfo[] {
   return listNamedAuthFiles().map((name) => toAccountInfo(name, name === currentName));
 }
 
-export function addAccountFromAuth(name: string): { success: boolean; message: string; meta?: AccountMeta } {
-  const auth = readCurrentAuth();
-  if (!auth) {
-    return { success: false, message: "auth.json was not found after login. Failed to add account." };
-  }
-
+export function addAccountAuth(name: string, auth: AuthFile): { success: boolean; message: string; meta?: AccountMeta } {
   if (!hasAccountAuthTokens(auth)) {
     return {
       success: false,
@@ -625,6 +620,15 @@ export function addAccountFromAuth(name: string): { success: boolean; message: s
   writeSavedAuthFile(dest, auth);
 
   return { success: true, message: `Account "${name}" was saved`, meta };
+}
+
+export function addAccountFromAuth(name: string): { success: boolean; message: string; meta?: AccountMeta } {
+  const auth = readCurrentAuth();
+  if (!auth) {
+    return { success: false, message: "auth.json was not found after login. Failed to add account." };
+  }
+
+  return addAccountAuth(name, auth);
 }
 
 export function removeAccount(name: string): { success: boolean; message: string } {
@@ -758,38 +762,11 @@ export async function queryQuota(name?: string, options: AccountQuotaQueryOption
         return target;
       }
 
-      const { auth, authPath, displayName, shouldSyncCurrentAuth } = target;
-      const persistUpdatedAuth = async (): Promise<void> => {
-        if (options.persistUpdatedAuth) {
-          await options.persistUpdatedAuth({
-            auth,
-            authPath,
-            displayName,
-            shouldSyncCurrentAuth,
-          });
-        } else {
-          if (authPath) {
-            writeSavedAuthFile(authPath, auth);
-          }
-          if (!authPath || shouldSyncCurrentAuth) {
-            writeCurrentAuth(auth);
-          }
-        }
-        perf.mark("persist-updated-auth", {
-          authPath: authPath ?? null,
-          shouldSyncCurrentAuth,
-          customPersistence: Boolean(options.persistUpdatedAuth),
-        });
-      };
-
-      const authBefore = JSON.stringify(auth);
-      const info = await getQuotaInfo(auth, persistUpdatedAuth, options);
+      const { auth, displayName } = target;
+      const info = await getQuotaInfo(auth, options);
       perf.mark("get-quota-info", {
         unavailableReason: info.unavailableReason?.code ?? null,
       });
-      if (JSON.stringify(auth) !== authBefore) {
-        await persistUpdatedAuth();
-      }
       return { kind: "ok" as const, displayName, info };
     });
 

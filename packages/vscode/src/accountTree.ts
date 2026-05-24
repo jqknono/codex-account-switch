@@ -25,12 +25,14 @@ interface QuotaState {
   updatedAt: number | null;
   cached?: boolean;
   cacheMessage?: string;
+  cacheReason?: string;
   reloginRequired?: boolean;
   reloginMessage?: string;
 }
 
 interface QuotaResultFallbackMetadata {
   fallbackErrorMessage?: string;
+  fallbackStatusCode?: number | null;
   fallbackReloginRequired?: boolean;
   usedCachedQuota?: boolean;
 }
@@ -125,6 +127,15 @@ function formatWindowDetailDescription(w: WindowInfo): string {
   return reset
     ? `${remaining}% remaining · ${reset}`
     : `${remaining}% remaining`;
+}
+
+function formatCachedQuotaReason(fallback: QuotaResultFallbackMetadata): string | undefined {
+  if (typeof fallback.fallbackStatusCode === "number") {
+    return fallback.fallbackErrorMessage
+      ? `HTTP ${fallback.fallbackStatusCode}: ${fallback.fallbackErrorMessage}`
+      : `HTTP ${fallback.fallbackStatusCode}`;
+  }
+  return fallback.fallbackErrorMessage;
 }
 
 function quotaIcon(usedPercent: number): vscode.ThemeIcon {
@@ -417,6 +428,7 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
           updatedAt: previous?.updatedAt ?? null,
           cached: false,
           cacheMessage: undefined,
+          cacheReason: undefined,
         });
       }
       perf.mark("set-loading-state");
@@ -482,6 +494,7 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
           const previous = this.quotaState.get(account.id);
           const fallback = result as QuotaResultFallbackMetadata;
           const usedCachedQuota = result.kind === "ok" && fallback.usedCachedQuota === true;
+          const cacheReason = usedCachedQuota ? formatCachedQuotaReason(fallback) : undefined;
           const reloginRequired =
             result.kind === "ok"
               ? isQuotaInfoReloginRequired(result.info) || fallback.fallbackReloginRequired === true
@@ -493,10 +506,11 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
             updatedAt: result.kind === "ok" ? Date.now() : previous?.updatedAt ?? null,
             cached: usedCachedQuota,
             cacheMessage: usedCachedQuota
-              ? fallback.fallbackErrorMessage
-                ? `Quota: Showing cached data; latest refresh failed: ${fallback.fallbackErrorMessage}`
+              ? cacheReason
+                ? `Quota: Showing cached data; latest refresh failed: ${cacheReason}`
                 : "Quota: Showing cached data"
               : undefined,
+            cacheReason,
             reloginRequired,
             reloginMessage: reloginRequired ? RELOGIN_REQUIRED_MESSAGE : undefined,
           });
@@ -535,6 +549,7 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
             updatedAt: previous?.updatedAt ?? null,
             cached: false,
             cacheMessage: undefined,
+            cacheReason: undefined,
             reloginRequired,
             reloginMessage: reloginRequired ? RELOGIN_REQUIRED_MESSAGE : previous?.reloginMessage,
           });
@@ -648,6 +663,7 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
         updatedAt: previous?.updatedAt ?? null,
         cached: previous?.cached ?? false,
         cacheMessage: previous?.cacheMessage,
+        cacheReason: previous?.cacheReason,
         reloginRequired: true,
         reloginMessage: message,
       });
@@ -694,6 +710,7 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
         updatedAt: cached.queriedAtMs,
         cached: true,
         cacheMessage: "Quota: Showing cached data",
+        cacheReason: undefined,
         reloginRequired: false,
       });
     }
@@ -866,9 +883,10 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
     }
 
     if (quotaState.cached) {
+      const cacheStatus = quotaState.cacheReason?.match(/^HTTP \d+/)?.[0];
       const cacheItem = new AccountDetailItem(
         "Quota freshness",
-        "Cached",
+        cacheStatus ? `Cached (${cacheStatus})` : "Cached",
         quotaState.cacheMessage ?? "Quota data came from cache",
         parent
       );

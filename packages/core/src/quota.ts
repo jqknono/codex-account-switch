@@ -2,10 +2,8 @@ import * as https from "https";
 import { AuthFile, IdTokenPayload, WindowInfo, QuotaInfo, QuotaUnavailableReason } from "./types";
 import { jwtDecode } from "jwt-decode";
 import {
-  applyRefreshResponse,
   RELOGIN_REQUIRED_MESSAGE,
   isReloginRequiredRefreshError,
-  refreshAccessToken,
 } from "./refresh";
 import { createDiagnosticPerformanceTimer } from "./log";
 
@@ -52,6 +50,16 @@ export interface QuotaPerformanceOptions {
 }
 
 type AuthUpdateHook = (auth: AuthFile) => void | Promise<void>;
+
+function quotaTokenRejectedReason(statusCode: number | null, upstreamCode?: string): QuotaUnavailableReason {
+  return {
+    code: "quota_token_rejected",
+    message: upstreamCode
+      ? `Quota API rejected current token (${upstreamCode})`
+      : "Quota API rejected current token",
+    statusCode,
+  };
+}
 
 function httpsGet(url: string, headers: Record<string, string>): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -163,14 +171,6 @@ function parseUnavailableReason(auth: AuthFile, err: unknown): QuotaUnavailableR
   const httpErr = err as HttpErrorLike;
   const statusCode = typeof httpErr.statusCode === "number" ? httpErr.statusCode : null;
 
-  if (isReloginRequiredRefreshError(err)) {
-    return {
-      code: "relogin_required",
-      message: RELOGIN_REQUIRED_MESSAGE,
-      statusCode,
-    };
-  }
-
   if (typeof httpErr.body === "string" && httpErr.body) {
     try {
       const parsed = JSON.parse(httpErr.body) as {
@@ -186,11 +186,7 @@ function parseUnavailableReason(auth: AuthFile, err: unknown): QuotaUnavailableR
       }
 
       if (typeof parsed.detail === "string" && /authentication token/i.test(parsed.detail)) {
-        return {
-          code: "invalid_auth_token",
-          message: "Missing auth tokens",
-          statusCode,
-        };
+        return quotaTokenRejectedReason(statusCode);
       }
 
       if (
@@ -208,15 +204,19 @@ function parseUnavailableReason(auth: AuthFile, err: unknown): QuotaUnavailableR
         (typeof parsed.detail === "object" && parsed.detail?.code === "token_invalidated")
         || parsed.error?.code === "token_invalidated"
       ) {
-        return {
-          code: "relogin_required",
-          message: RELOGIN_REQUIRED_MESSAGE,
-          statusCode,
-        };
+        return quotaTokenRejectedReason(statusCode, "token_invalidated");
       }
     } catch {
       // Ignore body parse failures and fall through to the generic mapping.
     }
+  }
+
+  if (isReloginRequiredRefreshError(err)) {
+    return {
+      code: "relogin_required",
+      message: RELOGIN_REQUIRED_MESSAGE,
+      statusCode,
+    };
   }
 
   if (httpErr.message === "No access_token in auth file") {
@@ -225,6 +225,10 @@ function parseUnavailableReason(auth: AuthFile, err: unknown): QuotaUnavailableR
       message: "Missing auth tokens",
       statusCode,
     };
+  }
+
+  if (statusCode === 401 || statusCode === 403) {
+    return quotaTokenRejectedReason(statusCode);
   }
 
   return {
@@ -239,12 +243,8 @@ export async function getQuotaInfo(
   onAuthUpdatedOrOptions?: AuthUpdateHook | QuotaPerformanceOptions,
   maybeOptions: QuotaPerformanceOptions = {},
 ): Promise<QuotaInfo> {
-  const onAuthUpdated: AuthUpdateHook | null =
-    typeof onAuthUpdatedOrOptions === "function"
-      ? onAuthUpdatedOrOptions
-      : null;
   const options: QuotaPerformanceOptions =
-    onAuthUpdated
+    typeof onAuthUpdatedOrOptions === "function"
       ? maybeOptions
       : ((onAuthUpdatedOrOptions as QuotaPerformanceOptions | undefined) ?? {});
   const perf = createDiagnosticPerformanceTimer(
@@ -291,54 +291,21 @@ export async function getQuotaInfo(
     apiData = await fetchUsageApi(auth, options);
     perf.mark("fetch-usage-api");
   } catch (err: unknown) {
-    const httpErr = err as HttpErrorLike;
-    if (
-      onAuthUpdated
-      && (httpErr.statusCode === 401 || httpErr.statusCode === 403)
-    ) {
-      try {
-        const refreshed = await refreshAccessToken(auth);
-        perf.mark("refresh-access-token");
-        applyRefreshResponse(auth, refreshed);
-        perf.mark("apply-refresh-response");
-        await onAuthUpdated(auth);
-        perf.mark("persist-auth-update");
-        apiData = await fetchUsageApi(auth, options);
-        perf.mark("fetch-usage-api-retry");
-      } catch (retryError: unknown) {
-        const unavailable = {
-          plan: getPlanFromToken(auth),
-          primaryWindow: null,
-          secondaryWindow: null,
-          additional: [],
-          codeReview: null,
-          credits: null,
-          email,
-          tokenExpired,
-          unavailableReason: parseUnavailableReason(auth, retryError),
-        };
-        perf.finish({
-          unavailableReason: unavailable.unavailableReason?.code ?? null,
-        });
-        return unavailable;
-      }
-    } else {
-      const unavailable = {
-        plan: getPlanFromToken(auth),
-        primaryWindow: null,
-        secondaryWindow: null,
-        additional: [],
-        codeReview: null,
-        credits: null,
-        email,
-        tokenExpired,
-        unavailableReason: parseUnavailableReason(auth, err),
-      };
-      perf.finish({
-        unavailableReason: unavailable.unavailableReason?.code ?? null,
-      });
-      return unavailable;
-    }
+    const unavailable = {
+      plan: getPlanFromToken(auth),
+      primaryWindow: null,
+      secondaryWindow: null,
+      additional: [],
+      codeReview: null,
+      credits: null,
+      email,
+      tokenExpired,
+      unavailableReason: parseUnavailableReason(auth, err),
+    };
+    perf.finish({
+      unavailableReason: unavailable.unavailableReason?.code ?? null,
+    });
+    return unavailable;
   }
 
   const rl = apiData.rate_limit ?? {};

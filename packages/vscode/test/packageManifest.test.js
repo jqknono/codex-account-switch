@@ -130,6 +130,18 @@ test("quota refresh setting defaults to 30 seconds for rotating background refre
   assert.match(setting?.description ?? "", /rotation/i);
 });
 
+test("token auto update setting defaults to enabled", () => {
+  const setting =
+    manifest.contributes.configuration.properties[
+      "codex-account-switch.tokenAutoUpdate"
+    ];
+
+  assert.equal(setting?.type, "boolean");
+  assert.equal(setting?.default, true);
+  assert.match(setting?.description ?? "", /automatically refresh saved account tokens/i);
+  assert.match(setting?.description ?? "", /background timer/i);
+});
+
 test("auto-switch settings are contributed with conservative defaults", () => {
   const properties = manifest.contributes.configuration.properties;
   const enabledSetting = properties["codex-account-switch.autoSwitchOnZeroQuota"];
