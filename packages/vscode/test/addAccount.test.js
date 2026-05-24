@@ -727,18 +727,21 @@ async function withFailingHttps(fn, mockOptions = {}) {
   }
 }
 
-async function withRefreshTokenReusedHttps(fn) {
+async function withRefreshTokenReusedHttps(fn, failure = {}) {
   const originalRequest = https.request;
+  const failureMessage = failure.message
+    ?? "Your refresh token has already been used to generate a new access token. Please try signing in again.";
+  const failureCode = failure.code ?? "refresh_token_reused";
   https.request = (requestOptions, handler) => {
     const hostname = requestOptions?.hostname;
     const isTokenRequest = hostname === "auth.openai.com";
     const body = isTokenRequest
       ? JSON.stringify({
           error: {
-            message: "Your refresh token has already been used to generate a new access token. Please try signing in again.",
+            message: failureMessage,
             type: "invalid_request_error",
             param: null,
-            code: "refresh_token_reused",
+            code: failureCode,
           },
         })
       : JSON.stringify({
@@ -4269,6 +4272,86 @@ test("moving one local provider to cloud does not rewrite sibling cloud provider
   });
 });
 
+test("manual token refresh marks invalidated refresh token as relogin required", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-account-tree-refresh-invalidated-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  fs.mkdirSync(codexHome, { recursive: true });
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  try {
+    core.setSavedAuthPassphrase("invalidated-passphrase");
+    const cloudEntry = core.serializeSavedValue("saved_auth", makeAuthFile("acct-microsoft1"), {
+      requireEncryption: true,
+    });
+    core.setSavedAuthPassphrase(null);
+
+    const mocked = createVscodeMock({
+      syncedStorage: {
+        version: 1,
+        accounts: {
+          microsoft1: cloudEntry,
+        },
+        providers: {},
+      },
+      secretValues: {
+        [STORAGE_SECRET_KEY]: "invalidated-passphrase",
+      },
+    });
+
+    await withDisabledIntervals(() =>
+      withRefreshTokenReusedHttps(
+        async () => {
+          const extension = loadExtensionWithMockedVscode(mocked.vscode);
+          const context = createExtensionContext(mocked);
+          await extension.activate(context);
+
+          const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
+          const provider = accountTreeView.treeDataProvider;
+          const [accountItem] = getAccountTreeItems(provider)
+            .filter((item) => item.account.name === "microsoft1" && item.account.source === "cloud");
+
+          await mocked.registeredCommands.get("codex-account-switch.refreshToken")(accountItem);
+
+          const [manualItem] = getAccountTreeItems(provider)
+            .filter((item) => item.account.name === "microsoft1" && item.account.source === "cloud");
+          assert.match(String(manualItem.description ?? ""), /Relogin required/);
+          assert.match(String(manualItem.tooltip ?? ""), /Re-login this account/);
+
+          for (const subscription of context.subscriptions.reverse()) {
+            subscription?.dispose?.();
+          }
+          await waitForRefreshCoordinatorIdle(context);
+        },
+        {
+          code: "refresh_token_invalidated",
+          message: "Your refresh token has been invalidated. Please try signing in again.",
+        },
+      )
+    );
+  } finally {
+    core.setSavedAuthPassphrase(null);
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
 test("remove provider asks for confirmation before deleting a local provider", async (t) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-provider-remove-local-"));
   const codexHome = path.join(tempRoot, ".codex");
@@ -5810,6 +5893,213 @@ test("current cloud marker does not prompt when already up to date", async (t) =
   });
 });
 
+test("stale cloud account marker does not overwrite a different current account", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-account-marker-identity-guard-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  const authDir = path.join(tempRoot, "saved-auth");
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(authDir, { recursive: true });
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  try {
+    core.setSavedAuthPassphrase("account-marker-guard-passphrase");
+    core.setNamedAuthDir(authDir);
+    core.writeSavedAuthFile(path.join(authDir, "auth_current-user.json"), makeAuthFile("acct-current"));
+    core.writeSavedAuthFile(path.join(authDir, "auth_target-user.json"), makeAuthFile("acct-target"));
+    const cloudEntry = core.serializeSavedValue(
+      "saved_auth",
+      makeAuthFile("acct-cloud", {
+        accessToken: "access-cloud-old",
+        refreshToken: "refresh-cloud-old",
+      }),
+      {
+        requireEncryption: true,
+      },
+    );
+    cloudEntry.entryVersion = 2;
+    cloudEntry.updatedAt = "2026-04-02T00:00:00.000Z";
+    core.setSavedAuthPassphrase(null);
+    core.setNamedAuthDir(undefined);
+
+    fs.writeFileSync(
+      path.join(codexHome, "auth.json"),
+      JSON.stringify(
+        makeAuthFile("acct-current", {
+          accessToken: "access-current",
+          refreshToken: "refresh-current",
+        }),
+        null,
+        2,
+      ),
+      "utf-8",
+    );
+
+    const mocked = createVscodeMock({
+      authDirectory: authDir,
+      secretValues: {
+        [STORAGE_SECRET_KEY]: "account-marker-guard-passphrase",
+      },
+      syncedStorage: {
+        version: 1,
+        accounts: {
+          "cloud-user": cloudEntry,
+        },
+        providers: {},
+      },
+      globalStateValues: {
+        "codex-account-switch.currentSavedSelection": {
+          kind: "account",
+          name: "cloud-user",
+          source: "cloud",
+          entryVersion: 2,
+          updatedAt: "2026-04-02T00:00:00.000Z",
+        },
+      },
+    });
+
+    await withDisabledIntervals(() =>
+      withSuccessfulHttps(async () => {
+        const extension = loadExtensionWithMockedVscode(mocked.vscode);
+        const context = createExtensionContext(mocked);
+        await extension.activate(context);
+
+        const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
+        const [targetItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
+          .filter((item) => item.account.name === "target-user" && item.account.source === "local");
+
+        await mocked.registeredCommands.get("codex-account-switch.useAccount")(targetItem);
+
+        const cloudAuth = readCloudAccount(mocked.config, "cloud-user", "account-marker-guard-passphrase");
+        assert.equal(cloudAuth.tokens.account_id, "acct-cloud");
+        assert.equal(cloudAuth.tokens.access_token, "access-cloud-old");
+        assert.equal(cloudAuth.tokens.refresh_token, "refresh-cloud-old");
+        assert.equal(getCloudEnvelope(mocked.config, "account", "cloud-user").entryVersion, 2);
+        assert.deepEqual(mocked.globalStateValues.get("codex-account-switch.currentSavedSelection"), {
+          kind: "account",
+          name: "target-user",
+          source: "local",
+        });
+
+        const lines = mocked.createdChannels.flatMap((channel) => channel.entries.map((entry) => entry.line));
+        assert.equal(
+          lines.some((line) =>
+            line.includes("skip-cloud-account-sync-identity-mismatch")
+            && line.includes("\"markerAccount\":\"cloud-user\"")
+          ),
+          true,
+        );
+
+        for (const subscription of context.subscriptions.reverse()) {
+          subscription?.dispose?.();
+        }
+        await waitForRefreshCoordinatorIdle(context);
+      })
+    );
+  } finally {
+    core.setSavedAuthPassphrase(null);
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
+test("moving the current local account to cloud updates the current marker", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-account-move-current-marker-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  const authDir = path.join(tempRoot, "saved-auth");
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(authDir, { recursive: true });
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  try {
+    core.setNamedAuthDir(authDir);
+    core.writeSavedAuthFile(path.join(authDir, "auth_moving-user.json"), makeAuthFile("acct-moving"));
+    core.setNamedAuthDir(undefined);
+
+    fs.writeFileSync(
+      path.join(codexHome, "auth.json"),
+      JSON.stringify(makeAuthFile("acct-moving"), null, 2),
+      "utf-8",
+    );
+
+    const mocked = createVscodeMock({
+      authDirectory: authDir,
+      secretValues: {
+        [STORAGE_SECRET_KEY]: "move-current-passphrase",
+      },
+      syncedStorage: {
+        version: 1,
+        accounts: {},
+        providers: {},
+      },
+    });
+
+    await withDisabledIntervals(() =>
+      withSuccessfulHttps(async () => {
+        const extension = loadExtensionWithMockedVscode(mocked.vscode);
+        const context = createExtensionContext(mocked);
+        await extension.activate(context);
+
+        const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
+        const [movingItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
+          .filter((item) => item.account.name === "moving-user" && item.account.source === "local");
+
+        await mocked.registeredCommands.get("codex-account-switch.moveAccountToCloud")(movingItem);
+
+        const marker = mocked.globalStateValues.get("codex-account-switch.currentSavedSelection");
+        assert.equal(marker.kind, "account");
+        assert.equal(marker.name, "moving-user");
+        assert.equal(marker.source, "cloud");
+        assert.equal(marker.entryVersion, 1);
+        assert.equal(typeof marker.updatedAt, "string");
+        assert.equal(typeof mocked.globalStateValues.get(getSyncedCloudAccountKey("moving-user"))?.ciphertext, "string");
+
+        for (const subscription of context.subscriptions.reverse()) {
+          subscription?.dispose?.();
+        }
+        await waitForRefreshCoordinatorIdle(context);
+      })
+    );
+  } finally {
+    core.setSavedAuthPassphrase(null);
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
 test("manual refresh still updates cloud tokens when automatic sync is disabled", async (t) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-cloud-manual-refresh-"));
   const codexHome = path.join(tempRoot, ".codex");
@@ -5877,6 +6167,340 @@ test("manual refresh still updates cloud tokens when automatic sync is disabled"
         await waitForRefreshCoordinatorIdle(context);
       })
     );
+  } finally {
+    core.setSavedAuthPassphrase(null);
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
+test("manual cloud token refresh reloads newer synced tokens before consuming refresh token", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-cloud-manual-refresh-reload-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  fs.mkdirSync(codexHome, { recursive: true });
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  try {
+    core.setSavedAuthPassphrase("refresh-reload-passphrase");
+    const initialEntry = core.serializeSavedValue(
+      "saved_auth",
+      makeAuthFile("acct-cloud", {
+        accessToken: "access-cloud-old",
+        refreshToken: "refresh-cloud-old",
+      }),
+      { requireEncryption: true }
+    );
+    initialEntry.entryVersion = 1;
+    initialEntry.updatedAt = "2026-05-01T00:00:00.000Z";
+    core.setSavedAuthPassphrase(null);
+
+    const mocked = createVscodeMock({
+      syncedStorage: {
+        version: 1,
+        accounts: {
+          "sync-user": initialEntry,
+        },
+        providers: {},
+      },
+      secretValues: {
+        [STORAGE_SECRET_KEY]: "refresh-reload-passphrase",
+      },
+    });
+
+    const authRequestBodies = [];
+    const originalRequest = https.request;
+    https.request = (requestOptions, handler) => {
+      const hostname = requestOptions?.hostname;
+      let requestBody = "";
+      const responseBody =
+        hostname === "auth.openai.com"
+          ? JSON.stringify({
+              access_token: "access-rotated",
+              refresh_token: "refresh-rotated",
+              id_token: makeJwt({
+                email: "rotated@example.com",
+                name: "rotated",
+                "https://api.openai.com/auth": {
+                  chatgpt_plan_type: "plus",
+                },
+              }),
+            })
+          : JSON.stringify({
+              plan_type: "plus",
+              rate_limit: {
+                primary_window: {
+                  used_percent: 10,
+                  reset_at: null,
+                },
+              },
+            });
+
+      const response = {
+        statusCode: 200,
+        on(event, listener) {
+          if (event === "data") {
+            setImmediate(() => listener(responseBody));
+          }
+          if (event === "end") {
+            setImmediate(listener);
+          }
+          return response;
+        },
+      };
+
+      const request = {
+        on() {
+          return request;
+        },
+        setTimeout() {
+          return request;
+        },
+        destroy() {},
+        write(chunk) {
+          requestBody += String(chunk);
+          return request;
+        },
+        end() {
+          if (hostname === "auth.openai.com") {
+            authRequestBodies.push(requestBody);
+            if (requestBody.includes("refresh-cloud-old")) {
+              response.statusCode = 401;
+            }
+          }
+          handler(response);
+        },
+      };
+
+      return request;
+    };
+
+    await withDisabledIntervals(async () => {
+      try {
+        const extension = loadExtensionWithMockedVscode(mocked.vscode);
+        const context = createExtensionContext(mocked);
+        await extension.activate(context);
+
+        const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
+        const [staleCloudItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
+          .filter((item) => item.account.name === "sync-user" && item.account.source === "cloud");
+
+        core.setSavedAuthPassphrase("refresh-reload-passphrase");
+        const newerEntry = core.serializeSavedValue(
+          "saved_auth",
+          makeAuthFile("acct-cloud", {
+            accessToken: "access-cloud-newer",
+            refreshToken: "refresh-cloud-newer",
+          }),
+          { requireEncryption: true }
+        );
+        newerEntry.entryVersion = 2;
+        newerEntry.updatedAt = "2026-05-02T00:00:00.000Z";
+        core.setSavedAuthPassphrase(null);
+        mocked.config.syncedStorage.accounts["sync-user"] = newerEntry;
+
+        await mocked.registeredCommands.get("codex-account-switch.refreshToken")(staleCloudItem);
+
+        assert.equal(authRequestBodies.length, 1);
+        assert.match(authRequestBodies[0], /refresh_token=refresh-cloud-newer/);
+        assert.doesNotMatch(authRequestBodies[0], /refresh-cloud-old/);
+
+        const cloudAuth = readCloudAccount(
+          mocked.config,
+          "sync-user",
+          "refresh-reload-passphrase"
+        );
+        assert.equal(cloudAuth.tokens.access_token, "access-rotated");
+        assert.equal(cloudAuth.tokens.refresh_token, "refresh-rotated");
+        assert.equal(getCloudEnvelope(mocked.config, "account", "sync-user").entryVersion, 3);
+
+        for (const subscription of context.subscriptions.reverse()) {
+          subscription?.dispose?.();
+        }
+        await waitForRefreshCoordinatorIdle(context);
+      } finally {
+        https.request = originalRequest;
+      }
+    });
+  } finally {
+    core.setSavedAuthPassphrase(null);
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
+test("manual cloud token refresh persists rotated tokens after metadata conflict with same refresh token", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-cloud-manual-refresh-conflict-retry-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  fs.mkdirSync(codexHome, { recursive: true });
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  try {
+    core.setSavedAuthPassphrase("refresh-conflict-passphrase");
+    const initialEntry = core.serializeSavedValue(
+      "saved_auth",
+      makeAuthFile("acct-cloud", {
+        accessToken: "access-cloud-old",
+        refreshToken: "refresh-cloud-old",
+      }),
+      { requireEncryption: true }
+    );
+    initialEntry.entryVersion = 1;
+    initialEntry.updatedAt = "2026-05-01T00:00:00.000Z";
+    core.setSavedAuthPassphrase(null);
+
+    const mocked = createVscodeMock({
+      syncedStorage: {
+        version: 1,
+        accounts: {
+          "sync-user": initialEntry,
+        },
+        providers: {},
+      },
+      secretValues: {
+        [STORAGE_SECRET_KEY]: "refresh-conflict-passphrase",
+      },
+    });
+
+    let conflictInjected = false;
+    const originalRequest = https.request;
+    https.request = (requestOptions, handler) => {
+      const hostname = requestOptions?.hostname;
+      const responseBody =
+        hostname === "auth.openai.com"
+          ? JSON.stringify({
+              access_token: "access-rotated",
+              refresh_token: "refresh-rotated",
+              id_token: makeJwt({
+                email: "rotated@example.com",
+                name: "rotated",
+                "https://api.openai.com/auth": {
+                  chatgpt_plan_type: "plus",
+                },
+              }),
+            })
+          : JSON.stringify({
+              plan_type: "plus",
+              rate_limit: {
+                primary_window: {
+                  used_percent: 10,
+                  reset_at: null,
+                },
+              },
+            });
+
+      const response = {
+        statusCode: 200,
+        on(event, listener) {
+          if (event === "data") {
+            setImmediate(() => listener(responseBody));
+          }
+          if (event === "end") {
+            setImmediate(listener);
+          }
+          return response;
+        },
+      };
+
+      const request = {
+        on() {
+          return request;
+        },
+        setTimeout() {
+          return request;
+        },
+        destroy() {},
+        write() {
+          return request;
+        },
+        end() {
+          if (hostname === "auth.openai.com" && !conflictInjected) {
+            conflictInjected = true;
+            core.setSavedAuthPassphrase("refresh-conflict-passphrase");
+            const conflictedEntry = core.serializeSavedValue(
+              "saved_auth",
+              makeAuthFile("acct-cloud", {
+                accessToken: "access-cloud-metadata-only",
+                refreshToken: "refresh-cloud-old",
+              }),
+              { requireEncryption: true }
+            );
+            conflictedEntry.entryVersion = 2;
+            conflictedEntry.updatedAt = "2026-05-02T00:00:00.000Z";
+            core.setSavedAuthPassphrase(null);
+            mocked.config.syncedStorage.accounts["sync-user"] = conflictedEntry;
+          }
+          handler(response);
+        },
+      };
+
+      return request;
+    };
+
+    await withDisabledIntervals(async () => {
+      try {
+        const extension = loadExtensionWithMockedVscode(mocked.vscode);
+        const context = createExtensionContext(mocked);
+        await extension.activate(context);
+
+        const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
+        const [cloudItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
+          .filter((item) => item.account.name === "sync-user" && item.account.source === "cloud");
+
+        await mocked.registeredCommands.get("codex-account-switch.refreshToken")(cloudItem);
+
+        assert.equal(conflictInjected, true);
+        const cloudAuth = readCloudAccount(
+          mocked.config,
+          "sync-user",
+          "refresh-conflict-passphrase"
+        );
+        assert.equal(cloudAuth.tokens.access_token, "access-rotated");
+        assert.equal(cloudAuth.tokens.refresh_token, "refresh-rotated");
+        assert.equal(getCloudEnvelope(mocked.config, "account", "sync-user").entryVersion, 3);
+        assert.equal(mocked.warningMessages.some((message) => /conflict/i.test(message.message ?? "")), false);
+
+        for (const subscription of context.subscriptions.reverse()) {
+          subscription?.dispose?.();
+        }
+        await waitForRefreshCoordinatorIdle(context);
+      } finally {
+        https.request = originalRequest;
+      }
+    });
   } finally {
     core.setSavedAuthPassphrase(null);
     core.setNamedAuthDir(undefined);

@@ -234,7 +234,7 @@ function tryRemoveStaleAccountLock(
   }
 }
 
-async function withAccountLock<T>(auth: AuthFile, operation: string, fn: () => Promise<T>): Promise<T> {
+export async function withAccountLock<T>(auth: AuthFile, operation: string, fn: () => Promise<T>): Promise<T> {
   const lockPath = getAccountLockPath(auth);
   const lockKey = getAccountLockKey(auth);
   const lockLabel = getAccountLockLabel(auth);

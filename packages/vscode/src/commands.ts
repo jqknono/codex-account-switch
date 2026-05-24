@@ -869,7 +869,12 @@ async function restoreSelectionAfterLogin(
 
 function refreshFailureSupportsRelogin(message: string): boolean {
   const normalized = message.toLowerCase();
-  return normalized.includes("refresh_token_reused") || normalized.includes("sign in again");
+  return (
+    normalized.includes("refresh_token_reused")
+    || normalized.includes("refresh_token_invalidated")
+    || normalized.includes("has been invalidated")
+    || normalized.includes("sign in again")
+  );
 }
 
 async function promptForAccountRename(account: SavedAccountInfo): Promise<string | undefined> {

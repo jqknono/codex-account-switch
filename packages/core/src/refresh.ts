@@ -21,6 +21,8 @@ export function isReloginRequiredRefreshError(error: unknown): boolean {
   const normalized = message.toLowerCase();
   return (
     normalized.includes("refresh_token_reused")
+    || normalized.includes("refresh_token_invalidated")
+    || normalized.includes("has been invalidated")
     || normalized.includes("signing in again")
     || normalized.includes("sign in again")
   );

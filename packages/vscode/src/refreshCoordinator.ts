@@ -464,7 +464,17 @@ export class RefreshCoordinator implements vscode.Disposable {
         return { skipQuota: false };
       }
 
-      const result = await refreshSavedAccountEntry(account);
+      const result = await refreshSavedAccountEntry(account, {
+        shouldRefreshLatest: (latestAccount) => this.shouldRefreshToken(latestAccount),
+      });
+      if (result.success && result.skipped) {
+        perf.finish({
+          result: "skipped-threshold-after-lock",
+          lastRefresh: result.lastRefresh ?? null,
+        });
+        return { skipQuota: false };
+      }
+
       if (result.success) {
         perf.finish({
           result: "refreshed",

@@ -37,6 +37,7 @@ import {
   switchMode,
   syncCurrentAuthToSavedAccount,
   useAccount,
+  withAccountLock,
   writeCurrentAuth,
   writeProviderProfile,
   writeSavedAuthFile,
@@ -143,6 +144,10 @@ export interface SavedEntriesSnapshot {
 export interface SavedAccountQuotaQueryContext {
   snapshot?: SavedEntriesSnapshot;
   sharedQueries?: Map<string, Promise<QuotaQueryResult>>;
+}
+
+interface RefreshSavedAccountOptions {
+  shouldRefreshLatest?: (account: SavedAccountInfo) => boolean;
 }
 
 interface SavedAccountQuotaQueryOptions {
@@ -452,6 +457,33 @@ async function updateMarkerSyncMetadata(
     ...marker,
     entryVersion: metadata.entryVersion,
     updatedAt: metadata.updatedAt,
+  });
+}
+
+async function setCurrentAccountMarker(account: Pick<SavedAccountInfo, "name" | "source" | "syncVersion" | "syncUpdatedAt">): Promise<void> {
+  await setMarker({
+    kind: "account",
+    name: account.name,
+    source: account.source,
+    entryVersion: account.source === "cloud" ? account.syncVersion : undefined,
+    updatedAt: account.source === "cloud" ? account.syncUpdatedAt : undefined,
+  });
+}
+
+async function setMarkerToCurrentAuthAccount(): Promise<void> {
+  const selection = getSavedCurrentSelection();
+  if (selection.kind !== "account") {
+    await setMarker(null);
+    return;
+  }
+
+  const account = getSavedAccountEntry(selection.name, selection.source);
+  await setMarker({
+    kind: "account",
+    name: selection.name,
+    source: selection.source,
+    entryVersion: selection.source === "cloud" ? account?.syncVersion : undefined,
+    updatedAt: selection.source === "cloud" ? account?.syncUpdatedAt : undefined,
   });
 }
 
@@ -1377,6 +1409,18 @@ export async function syncCurrentAuthToSavedSelection(): Promise<SyncCurrentSele
   if (marker.kind === "account") {
     const auth = readCurrentAuth();
     if (auth && hasAccountAuthTokens(auth)) {
+      const markerAccount = getSavedAccountEntry(marker.name, "cloud");
+      const currentIdentity = getAccountIdentity(auth);
+      const markerIdentity = markerAccount?.auth ? getAccountIdentity(markerAccount.auth) : null;
+      if (currentIdentity && markerIdentity && currentIdentity !== markerIdentity) {
+        logWarn(LOG_PREFIX, "skip-cloud-account-sync-identity-mismatch", {
+          markerAccount: marker.name,
+          markerEmail: markerAccount?.meta?.email ?? null,
+          currentEmail: extractMeta(auth).email ?? null,
+        });
+        await setMarkerToCurrentAuthAccount();
+        return healedMarker ? { success: true, healedMarker } : { success: true };
+      }
       const result = await persistCloudAccountAuth(
         marker.name,
         auth,
@@ -1435,7 +1479,16 @@ export async function saveCurrentAuthAsAccount(
   options?: { expectedEntryVersion?: number | null; expectedUpdatedAt?: string | null },
 ): Promise<{ success: boolean; message: string; meta?: AccountMeta; conflict?: CloudSyncConflict }> {
   if (source === "local") {
-    return addAccountFromAuth(name);
+    const result = addAccountFromAuth(name);
+    if (result.success) {
+      await setCurrentAccountMarker({
+        name,
+        source: "local",
+        syncVersion: null,
+        syncUpdatedAt: null,
+      });
+    }
+    return result;
   }
 
   requireCloudPassphrase();
@@ -1490,9 +1543,11 @@ export async function saveCurrentAuthAsAccount(
   if (!writeResult.success) {
     return { success: false, message: writeResult.message, meta, conflict: writeResult.conflict };
   }
-  await updateMarkerSyncMetadata("account", name, {
-    entryVersion: writeResult.syncVersion ?? null,
-    updatedAt: writeResult.syncUpdatedAt ?? null,
+  await setCurrentAccountMarker({
+    name,
+    source: "cloud",
+    syncVersion: writeResult.syncVersion ?? null,
+    syncUpdatedAt: writeResult.syncUpdatedAt ?? null,
   });
   return { success: true, message: `Account "${name}" was saved to cloud storage`, meta };
 }
@@ -1688,13 +1743,14 @@ export async function querySavedAccountQuota(
   }
 }
 
-export async function refreshSavedAccountEntry(account: SavedAccountInfo): Promise<{
+export async function refreshSavedAccountEntry(account: SavedAccountInfo, options: RefreshSavedAccountOptions = {}): Promise<{
   success: boolean;
   message: string;
   meta?: AccountMeta;
   lastRefresh?: string;
   unsupported?: boolean;
   conflict?: CloudSyncConflict;
+  skipped?: boolean;
 }> {
   if (account.source === "local") {
     return refreshAccount(account.name, {
@@ -1710,16 +1766,103 @@ export async function refreshSavedAccountEntry(account: SavedAccountInfo): Promi
     return { success: false, message: account.storageMessage ?? `Saved cloud account "${account.name}" is unavailable.` };
   }
 
+  return withAccountLock(account.auth, "refreshCloudAccount", async () => {
+    const latestAccount = getSavedAccountEntry(account.name, "cloud");
+    const accountToRefresh = latestAccount ?? account;
+    if (accountToRefresh.storageState !== "ready" || !accountToRefresh.auth) {
+      return {
+        success: false,
+        message: accountToRefresh.storageMessage ?? `Saved cloud account "${account.name}" is unavailable.`,
+      };
+    }
+    const latestAuth = accountToRefresh.auth;
+    if (options.shouldRefreshLatest && !options.shouldRefreshLatest(accountToRefresh)) {
+      return {
+        success: true,
+        message: `Token for "${account.name}" is already fresh`,
+        meta: accountToRefresh.meta ?? extractMeta(latestAuth),
+        lastRefresh: latestAuth.last_refresh,
+        skipped: true,
+      };
+    }
+
+    return refreshCloudSavedAccountEntry({ ...accountToRefresh, auth: latestAuth });
+  });
+}
+
+async function retryPersistRotatedCloudAuthAfterConflict(
+  name: string,
+  rotatedAuth: AuthFile,
+  consumedRefreshToken: string | null,
+  originalResult: CloudMutationResult,
+): Promise<CloudMutationResult> {
+  const latestAccount = getSavedAccountEntry(name, "cloud");
+  const latestAuth = latestAccount?.auth;
+  const latestRefreshToken = latestAuth?.tokens?.refresh_token ?? null;
+  if (
+    !latestAccount
+    || latestAccount.storageState !== "ready"
+    || !latestAuth
+    || !consumedRefreshToken
+    || latestRefreshToken !== consumedRefreshToken
+  ) {
+    return originalResult;
+  }
+
+  const mergedAuth = clone(latestAuth);
+  mergedAuth.tokens ??= {};
+  if (rotatedAuth.tokens?.access_token) {
+    mergedAuth.tokens.access_token = rotatedAuth.tokens.access_token;
+  }
+  if (rotatedAuth.tokens?.refresh_token) {
+    mergedAuth.tokens.refresh_token = rotatedAuth.tokens.refresh_token;
+  }
+  if (rotatedAuth.tokens?.id_token) {
+    mergedAuth.tokens.id_token = rotatedAuth.tokens.id_token;
+  }
+  if (rotatedAuth.last_refresh) {
+    mergedAuth.last_refresh = rotatedAuth.last_refresh;
+  }
+
+  logWarn(LOG_PREFIX, "retry-cloud-token-persist-after-conflict", {
+    account: name,
+    expectedEntryVersion: originalResult.conflict?.expectedEntryVersion ?? null,
+    currentEntryVersion: latestAccount.syncVersion,
+  });
+  return persistCloudAccountAuth(
+    name,
+    mergedAuth,
+    latestAccount.syncVersion,
+    latestAccount.syncUpdatedAt,
+  );
+}
+
+async function refreshCloudSavedAccountEntry(account: SavedAccountInfo & { auth: AuthFile }): Promise<{
+  success: boolean;
+  message: string;
+  meta?: AccountMeta;
+  lastRefresh?: string;
+  conflict?: CloudSyncConflict;
+}> {
   const auth = clone(account.auth);
+  const consumedRefreshToken = auth.tokens?.refresh_token ?? null;
   try {
     const refreshed = await refreshAccessToken(auth);
     applyRefreshResponse(auth, refreshed);
-    const persistResult = await persistCloudAccountAuth(
+    let persistResult = await persistCloudAccountAuth(
       account.name,
       auth,
       account.syncVersion,
       account.syncUpdatedAt,
     );
+    if (!persistResult.success && persistResult.conflict) {
+      persistResult = await retryPersistRotatedCloudAuthAfterConflict(
+        account.name,
+        auth,
+        consumedRefreshToken,
+        persistResult,
+      );
+    }
     if (!persistResult.success) {
       return {
         success: false,
@@ -1800,6 +1943,11 @@ export async function moveSavedAccountEntry(
   if (account.storageState !== "ready" || !account.auth) {
     return { success: false, message: account.storageMessage ?? `Saved account "${account.name}" is unavailable.` };
   }
+  const currentBeforeMove = getSavedCurrentSelection();
+  const wasCurrent =
+    currentBeforeMove.kind === "account"
+    && currentBeforeMove.name === account.name
+    && currentBeforeMove.source === account.source;
   let nextCloudMetadata: SavedStorageSyncMetadata = EMPTY_SYNC_METADATA;
 
   if (target === "local") {
@@ -1828,14 +1976,12 @@ export async function moveSavedAccountEntry(
     await removeLocalAccountFile(account.name);
   }
 
-  const current = getSavedCurrentSelection();
-  if (current.kind === "account" && current.name === account.name && current.source === account.source) {
-    await setMarker({
-      kind: "account",
+  if (wasCurrent) {
+    await setCurrentAccountMarker({
       name: account.name,
       source: target,
-      entryVersion: target === "cloud" ? nextCloudMetadata.entryVersion : undefined,
-      updatedAt: target === "cloud" ? nextCloudMetadata.updatedAt : undefined,
+      syncVersion: target === "cloud" ? nextCloudMetadata.entryVersion : null,
+      syncUpdatedAt: target === "cloud" ? nextCloudMetadata.updatedAt : null,
     });
   }
 
