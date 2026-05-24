@@ -175,6 +175,7 @@ function parseUnavailableReason(auth: AuthFile, err: unknown): QuotaUnavailableR
     try {
       const parsed = JSON.parse(httpErr.body) as {
         detail?: string | { code?: string };
+        error?: { code?: string };
       };
       if (parsed.detail && typeof parsed.detail === "object" && parsed.detail.code === "deactivated_workspace") {
         return {
@@ -195,6 +196,17 @@ function parseUnavailableReason(auth: AuthFile, err: unknown): QuotaUnavailableR
       if (
         typeof parsed.detail === "object"
         && parsed.detail?.code === "refresh_token_reused"
+      ) {
+        return {
+          code: "relogin_required",
+          message: RELOGIN_REQUIRED_MESSAGE,
+          statusCode,
+        };
+      }
+
+      if (
+        (typeof parsed.detail === "object" && parsed.detail?.code === "token_invalidated")
+        || parsed.error?.code === "token_invalidated"
       ) {
         return {
           code: "relogin_required",

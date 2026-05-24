@@ -42,6 +42,7 @@ flowchart LR
 | Rotation order | 默认从当前账号的下一个 saved account 开始，之后按稳定顺序轮转。 |
 | Cache-first display | 账号树优先尝试从共享 cache 恢复最近一次成功 quota 结果，降低 `No data` 概率。 |
 | Shared throttling | 如果最近一次成功查询距今小于 `quotaRefreshInterval`，新窗口/新实例优先使用 cache，不重复打 quota API。 |
+| Cached quota logging | 任何使用 cached quota 数据的路径都记录 warning 级别日志，包括启动 hydrate、节流复用、锁竞争复用和失败 fallback。 |
 | Cross-window coordination | 当多个 VS Code 实例同时需要同一账号 quota 时，使用临时 lock 文件减少重复查询。 |
 | Failure fallback | 新查询失败但 cache 中已有最近一次成功结果时，优先继续显示缓存数据。 |
 | Current status bar | 只有轮到当前账号时才复用同一次 quota 查询更新状态栏。 |

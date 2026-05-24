@@ -85,3 +85,31 @@ test("getQuotaInfo does not refresh tokens when usage API returns authentication
     }
   );
 });
+
+test("getQuotaInfo reports relogin required when usage API invalidates the token", async () => {
+  await withMockedHttpsRequest(
+    createMockRequest(401, JSON.stringify({
+      error: {
+        message: "Your authentication token has been invalidated. Please try signing in again.",
+        type: "invalid_request_error",
+        code: "token_invalidated",
+        param: null,
+      },
+      status: 401,
+    })),
+    async () => {
+      const info = await getQuotaInfo({
+        tokens: {
+          access_token: "header.payload.signature",
+          refresh_token: "refresh-token",
+        },
+      });
+
+      assert.equal(info.unavailableReason?.code, "relogin_required");
+      assert.equal(info.unavailableReason?.message, "Relogin required");
+      assert.equal(info.unavailableReason?.statusCode, 401);
+      assert.equal(info.primaryWindow, null);
+      assert.equal(info.secondaryWindow, null);
+    }
+  );
+});

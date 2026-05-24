@@ -682,6 +682,11 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
       if (previous?.updatedAt != null && previous.updatedAt >= cached.queriedAtMs && previous.info) {
         continue;
       }
+      logWarn(LOG_PREFIX, "hydrate-quota-state-from-cache", {
+        account: account.name,
+        source: account.source,
+        ageMs: Date.now() - cached.queriedAtMs,
+      });
       this.quotaState.set(account.id, {
         info: cached.info,
         error: false,

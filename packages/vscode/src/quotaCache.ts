@@ -359,7 +359,7 @@ export async function queryQuotaWithCache(
   const key = getCacheKey(account);
   const cached = getCachedQuotaSnapshotByKey(key);
   if (!options.forceFetch && cached && shouldUseCachedQuota(cached.queriedAtMs, options.minIntervalMs)) {
-    logInfo(LOG_PREFIX, "use-fresh-cache", {
+    logWarn(LOG_PREFIX, "use-fresh-cache", {
       account: account.name,
       source: account.source,
       ageMs: Date.now() - cached.queriedAtMs,
@@ -376,7 +376,7 @@ export async function queryQuotaWithCache(
   let lock = tryAcquireLock(key);
   if (!lock) {
     if (cached) {
-      logInfo(LOG_PREFIX, "reuse-stale-cache-while-locked", {
+      logWarn(LOG_PREFIX, "reuse-stale-cache-while-locked", {
         account: account.name,
         source: account.source,
       });
@@ -390,7 +390,7 @@ export async function queryQuotaWithCache(
 
     const waited = await waitForCacheFromOtherProcess(key, Date.now());
     if (waited) {
-      logInfo(LOG_PREFIX, "use-cache-after-wait", {
+      logWarn(LOG_PREFIX, "use-cache-after-wait", {
         account: account.name,
         source: account.source,
       });
@@ -426,6 +426,12 @@ export async function queryQuotaWithCache(
       }
       writeCachedQuotaSnapshot(account, result.info);
     } else if (cached && options.allowCachedFallback !== false) {
+      logWarn(LOG_PREFIX, "fallback-to-cache-after-query-result", {
+        account: account.name,
+        source: account.source,
+        resultKind: result.kind,
+        message: result.message,
+      });
       return {
         kind: "ok",
         displayName: account.name,

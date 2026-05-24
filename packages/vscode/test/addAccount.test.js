@@ -2985,6 +2985,13 @@ test("second VS Code window reuses cached quota data and skips a fresh network r
 
         await waitForRefreshCoordinatorIdle(context);
         assert.equal(countUsageRequests(secondRequestLog), 0);
+        const cachedQuotaLogEvents = secondWindow.createdChannels
+          .flatMap((channel) => channel.entries)
+          .filter((entry) =>
+            /hydrate-quota-state-from-cache|use-fresh-cache|reuse-stale-cache-while-locked|use-cache-after-wait|fallback-to-cache-after/.test(entry.line)
+          );
+        assert.ok(cachedQuotaLogEvents.some((entry) => entry.level === "warn" && /cache-user/.test(entry.line)));
+        assert.equal(cachedQuotaLogEvents.filter((entry) => entry.level !== "warn").length, 0);
 
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();

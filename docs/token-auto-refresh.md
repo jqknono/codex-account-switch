@@ -33,3 +33,4 @@ flowchart LR
 | Manual refresh | `Refresh Token` follows the same cloud write-back path and is not limited by legacy device fields. |
 | Quota refresh | Manual or timer-driven quota refresh does not trigger token refresh unless the background token check already did so before the quota step. |
 | Re-login required | If token refresh returns `refresh_token_reused` or an equivalent sign-in-again error, the account is marked `Relogin required` and the timer skips quota for that account in the current step. |
+| Quota token invalidated | If the quota API returns `error.code = token_invalidated`, the quota result is mapped to `relogin_required` so the account surfaces the same re-login state instead of a generic request failure. |
