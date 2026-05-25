@@ -680,9 +680,15 @@ function readSyncedStorage(): SyncedStorageData {
   return {
     ...storage,
     accounts,
-    accountNames: Object.keys(accounts).sort(),
+    accountNames: normalizeNames([
+      ...accountNames,
+      ...Object.keys(accounts),
+    ]).sort(),
     providers,
-    providerNames: Object.keys(providers).sort(),
+    providerNames: normalizeNames([
+      ...providerNames,
+      ...Object.keys(providers),
+    ]).sort(),
   };
 }
 
@@ -711,8 +717,14 @@ function setSyncedCloudSyncKeys(accountNames: string[], providerNames: string[])
 }
 
 function toSyncedCloudStateIndex(data: SyncedStorageData): SyncedStorageData {
-  const accountNames = Object.keys(data.accounts).sort();
-  const providerNames = Object.keys(data.providers).sort();
+  const accountNames = normalizeNames([
+    ...data.accountNames,
+    ...Object.keys(data.accounts),
+  ]).sort();
+  const providerNames = normalizeNames([
+    ...data.providerNames,
+    ...Object.keys(data.providers),
+  ]).sort();
   return {
     version: 1,
     accounts: {},
@@ -780,6 +792,7 @@ async function writeSyncedCloudProvider(name: string, value: Record<string, unkn
 async function removeSyncedCloudAccount(name: string): Promise<void> {
   const storage = readSyncedStorage();
   delete storage.accounts[name];
+  storage.accountNames = storage.accountNames.filter((accountName) => accountName !== name);
   await requireContext().globalState.update(getSyncedCloudAccountKey(name), undefined);
   await writeSyncedCloudStateIndex(storage);
 }
@@ -787,6 +800,7 @@ async function removeSyncedCloudAccount(name: string): Promise<void> {
 async function removeSyncedCloudProvider(name: string): Promise<void> {
   const storage = readSyncedStorage();
   delete storage.providers[name];
+  storage.providerNames = storage.providerNames.filter((providerName) => providerName !== name);
   await requireContext().globalState.update(getSyncedCloudProviderKey(name), undefined);
   await writeSyncedCloudStateIndex(storage);
 }
@@ -795,6 +809,10 @@ async function renameSyncedCloudAccount(oldName: string, newName: string, value:
   const storage = readSyncedStorage();
   delete storage.accounts[oldName];
   storage.accounts[newName] = clone(value);
+  storage.accountNames = normalizeNames([
+    ...storage.accountNames.filter((accountName) => accountName !== oldName),
+    newName,
+  ]);
   await requireContext().globalState.update(getSyncedCloudAccountKey(oldName), undefined);
   await requireContext().globalState.update(getSyncedCloudAccountKey(newName), clone(value));
   await writeSyncedCloudStateIndex(storage);
@@ -931,11 +949,11 @@ function parseProviderProfile(name: string, value: unknown): ProviderProfile | n
 }
 
 function getCloudAccountNames(): string[] {
-  return Object.keys(readSyncedStorage().accounts).sort();
+  return readSyncedStorage().accountNames;
 }
 
 function getCloudProviderNames(): string[] {
-  return Object.keys(readSyncedStorage().providers).sort();
+  return readSyncedStorage().providerNames;
 }
 
 function getStoredCloudAccountRaw(name: string): unknown {
@@ -1009,9 +1027,9 @@ function getLocalAccounts(perf?: ReturnType<typeof startPerformanceLog>): SavedA
 function getCloudAccounts(perf?: ReturnType<typeof startPerformanceLog>): SavedAccountInfo[] {
   const storage = readSyncedStorage();
   perf?.mark("read-synced-storage", {
-    cloudAccountCount: Object.keys(storage.accounts).length,
+    cloudAccountCount: storage.accountNames.length,
   });
-  const accounts = Object.keys(storage.accounts).sort().map((name) => {
+  const accounts = storage.accountNames.map((name) => {
     const raw = storage.accounts[name];
     const syncMetadata = getSyncMetadata(raw);
     const publicEmail = getPublicEmail(raw);
@@ -1050,7 +1068,12 @@ function getCloudAccounts(perf?: ReturnType<typeof startPerformanceLog>): SavedA
       auth: null,
       isCurrent: false,
       storageState: result.status === "locked" ? "locked" as const : "invalid" as const,
-      storageMessage: "message" in result ? result.message : undefined,
+      storageMessage:
+        result.status === "missing"
+          ? `Cloud account "${name}" is indexed for sync, but its payload has not synced to this device yet. Refresh after VS Code Settings Sync finishes.`
+          : "message" in result
+            ? result.message
+            : undefined,
       encrypted: result.encrypted,
       syncVersion: syncMetadata.entryVersion,
       syncUpdatedAt: syncMetadata.updatedAt,
@@ -1096,10 +1119,12 @@ function getCloudProviders(): SavedProviderInfo[] {
       name,
       source: "cloud" as const,
       isCurrent: false,
-      invalid: result.status === "invalid" || (result.status === "ok" && !profile),
+      invalid: result.status === "missing" || result.status === "invalid" || (result.status === "ok" && !profile),
       locked: result.status === "locked",
       storageMessage:
-        result.status === "ok" && !profile
+        result.status === "missing"
+          ? `Cloud provider "${name}" is indexed for sync, but its payload has not synced to this device yet. Refresh after VS Code Settings Sync finishes.`
+          : result.status === "ok" && !profile
           ? `Provider "${name}" is invalid.`
           : "message" in result
             ? result.message
@@ -1462,6 +1487,10 @@ async function removeCloudAccountEntry(
     if (expected.entryVersion != null) {
       return formatMissingSyncedPayloadResult("account", name, expected);
     }
+    if (storage.accountNames.includes(name)) {
+      await removeSyncedCloudAccount(name);
+      return { success: true, message: `Account "${name}" was removed` };
+    }
     return { success: false, message: `Account "${name}" does not exist.` };
   }
   const currentMetadata = getSyncMetadata(storage.accounts[name]);
@@ -1480,6 +1509,10 @@ async function removeCloudProviderEntry(
   if (!(name in storage.providers)) {
     if (expected.entryVersion != null) {
       return formatMissingSyncedPayloadResult("provider", name, expected);
+    }
+    if (storage.providerNames.includes(name)) {
+      await removeSyncedCloudProvider(name);
+      return { success: true, message: `Removed provider "${name}"` };
     }
     return { success: false, message: `Provider "${name}" does not exist.` };
   }

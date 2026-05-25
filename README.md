@@ -143,27 +143,33 @@ npx ovsx create-namespace techfetch-dev -p <your-openvsx-token>
 # Build the CLI package
 npm run build:cli
 
-# Verify npm Trusted Publisher prerequisites
+# Verify local npm publish prerequisites
 npm run publish:cli:check
 
-# Create and push the release tag that triggers the GitHub Trusted Publisher workflow
+# Rehearse the local release flow without publishing
+npm run verify:publish:cli
+
+# Publish the CLI package to npm
 npm run publish:cli
 ```
 
 Examples:
 
 ```bash
-# Check whether the local npm account can manage the Trusted Publisher binding
+# Check whether the local npm account can publish
 npm run publish:cli:check
 
 # Show release helper usage
 npm run publish:cli:help
 
-# Tag a specific committed CLI version and push it to origin
+# Dry-run a specific committed CLI version
+npm run verify:publish:cli -- -Version 1.8.0
+
+# Publish a specific committed CLI version
 npm run publish:cli -- -Version 1.8.0
 ```
 
-The actual `npm publish` step now runs in GitHub Actions through npm Trusted Publisher. Configure the npm package trust once, enable npm account 2FA before managing that trust, then publish from the `main` branch by pushing a `cli-v<version>` tag that matches `packages/cli/package.json`.
+The CLI package is now published directly from the local machine. Use `npm login` or a local npm token before publishing. Stable versions default to the `latest` dist-tag, and pre-release versions default to `next`.
 
 ## Data Storage
 

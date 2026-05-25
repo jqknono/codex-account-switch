@@ -4,8 +4,8 @@ param(
     [string]$Command = "help",
 
     [string]$Version,
-
-    [string]$Remote = "origin",
+    
+    [string]$NpmTag,
 
     [switch]$AllowDirty,
 
@@ -24,18 +24,20 @@ publish-cli.ps1
 Usage:
   pwsh -File ./scripts/publish-cli.ps1 help
   pwsh -File ./scripts/publish-cli.ps1 check
-  pwsh -File ./scripts/publish-cli.ps1 tag [-Version <semver>] [-Remote <name>] [-AllowDirty] [-AllowNonMain]
+  pwsh -File ./scripts/publish-cli.ps1 dry-run [-Version <semver>] [-NpmTag <tag>] [-AllowDirty] [-AllowNonMain]
+  pwsh -File ./scripts/publish-cli.ps1 publish [-Version <semver>] [-NpmTag <tag>] [-AllowDirty] [-AllowNonMain]
 
 Commands:
-  help   Show this help text.
-  check  Validate the npm Trusted Publisher prerequisites for codex-account-switch.
-  tag    Validate the CLI package version, create tag cli-v<version>, and push it to the selected remote.
+  help     Show this help text.
+  check    Validate local npm publish prerequisites for codex-account-switch.
+  dry-run  Run the local CLI release checks and finish with npm publish --dry-run.
+  publish  Run the local CLI release checks and publish packages/cli to npm.
 
 Notes:
-  - The publish workflow runs in GitHub Actions via npm Trusted Publisher.
-  - Run the check command after changing npm trust settings or workflow metadata.
-  - Run the tag command from the main branch after committing the target version.
-  - The tag must match packages/cli/package.json exactly.
+  - Commands default to the version in packages/cli/package.json.
+  - Stable versions publish to the npm latest tag unless -NpmTag overrides it.
+  - Pre-release versions publish to the npm next tag unless -NpmTag overrides it.
+  - Run publish from the main branch after committing the target version.
 "@
 }
 
@@ -72,23 +74,23 @@ function Assert-CleanWorktree {
     }
 }
 
-function Assert-TagDoesNotExist {
+function Get-PackageManifest {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$TagName,
-        [Parameter(Mandatory = $true)]
-        [string]$Remote
+        [string]$RepositoryRoot
     )
 
-    $localTag = git tag --list $TagName
-    if ($localTag) {
-        throw "Tag '$TagName' already exists locally."
+    $manifestPath = Join-Path $RepositoryRoot "packages/cli/package.json"
+    $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
+    if (-not $manifest.name) {
+        throw "packages/cli/package.json does not define a package name."
     }
 
-    $remoteTag = git ls-remote --tags $Remote "refs/tags/$TagName"
-    if ($remoteTag) {
-        throw "Tag '$TagName' already exists on remote '$Remote'."
+    if (-not $manifest.version) {
+        throw "packages/cli/package.json does not define a version."
     }
+
+    return $manifest
 }
 
 function Get-NpmCliJson {
@@ -121,69 +123,81 @@ function Test-NpmCommand {
     }
 }
 
-function Assert-NpmTrustedPublisherReady {
+function Get-DefaultNpmTag {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Version
+    )
+
+    if ($Version.Contains("-")) {
+        return "next"
+    }
+    return "latest"
+}
+
+function Assert-NpmPublishReady {
     param(
         [Parameter(Mandatory = $true)]
         [string]$RepositoryRoot
     )
 
-    $manifestPath = Join-Path $RepositoryRoot "packages/cli/package.json"
-    $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
+    $manifest = Get-PackageManifest -RepositoryRoot $RepositoryRoot
     $packageName = [string]$manifest.name
-    if (-not $packageName) {
-        throw "packages/cli/package.json does not define a package name."
-    }
-
     $whoami = Test-NpmCommand -Arguments @("whoami")
     if ($whoami.ExitCode -ne 0) {
-        Write-Warning "Skipping npm account preflight because 'npm whoami' failed. Configure npm login locally if you want to validate Trusted Publisher prerequisites before tagging."
-        return
-    }
-
-    $profile = Get-NpmCliJson -Arguments @("profile", "get", "--json") -FailureMessage "Unable to read npm profile."
-    if (-not $profile.tfa) {
         throw @"
-npm account '$($whoami.Output.Trim())' has 2FA disabled.
-Enable 2FA before configuring or updating Trusted Publisher for '$packageName'.
-After enabling 2FA, run:
-  npm trust github $packageName --repo jqknono/codex-account-switch --file publish-cli.yml
-"@
-    }
-
-    $trustProbe = Test-NpmCommand -Arguments @(
-        "trust", "github", $packageName,
-        "--repo", "jqknono/codex-account-switch",
-        "--file", "publish-cli.yml",
-        "--dry-run", "--json"
-    )
-    if ($trustProbe.ExitCode -ne 0) {
-        throw @"
-npm Trusted Publisher dry-run failed for '$packageName'.
-Confirm that the npm package trust metadata matches:
-  owner/repo: jqknono/codex-account-switch
-  workflow: publish-cli.yml
-  branch: main
-  environment: (empty)
+Unable to verify the npm account for '$packageName'.
+Run 'npm login' or configure an npm token locally before publishing.
 Command output:
-$($trustProbe.Output.Trim())
+$($whoami.Output.Trim())
 "@
     }
 
-    Write-Host "npm Trusted Publisher prerequisites look valid for $packageName."
+    $ping = Test-NpmCommand -Arguments @("ping")
+    if ($ping.ExitCode -ne 0) {
+        throw @"
+Unable to reach the npm registry with the current credentials.
+Command output:
+$($ping.Output.Trim())
+"@
+    }
+
+    try {
+        $profile = Get-NpmCliJson -Arguments @("profile", "get", "--json") -FailureMessage "Unable to read npm profile."
+        $tfaState = if ($profile.tfa) { "enabled" } else { "disabled" }
+        Write-Host "npm account: $($whoami.Output.Trim())"
+        Write-Host "npm profile 2FA: $tfaState"
+    }
+    catch {
+        Write-Warning $_.Exception.Message
+    }
+
+    Write-Host "npm registry access looks valid for $packageName."
 }
 
 function Invoke-CheckRelease {
     $repositoryRoot = Get-RepositoryRoot
     Push-Location $repositoryRoot
     try {
-        Assert-NpmTrustedPublisherReady -RepositoryRoot $repositoryRoot
+        $packageVersion = Get-CliPackageVersion -RepositoryRoot $repositoryRoot
+        $defaultTag = Get-DefaultNpmTag -Version $packageVersion
+
+        Assert-NpmPublishReady -RepositoryRoot $repositoryRoot
+
+        Write-Host "package version: $packageVersion"
+        Write-Host "default npm tag: $defaultTag"
     }
     finally {
         Pop-Location
     }
 }
 
-function Invoke-TagRelease {
+function Invoke-PublishRelease {
+    param(
+        [Parameter(Mandatory = $true)]
+        [bool]$DryRun
+    )
+
     $repositoryRoot = Get-RepositoryRoot
     Push-Location $repositoryRoot
     try {
@@ -193,7 +207,7 @@ function Invoke-TagRelease {
 
         $branch = Get-CurrentBranch
         if (-not $AllowNonMain.IsPresent -and $branch -ne "main") {
-            throw "Current branch is '$branch'. Publish tags must be created from 'main', or rerun with -AllowNonMain."
+            throw "Current branch is '$branch'. CLI publishing must run from 'main', or rerun with -AllowNonMain."
         }
 
         $packageVersion = Get-CliPackageVersion -RepositoryRoot $repositoryRoot
@@ -203,16 +217,38 @@ function Invoke-TagRelease {
             throw "Requested version '$targetVersion' does not match packages/cli/package.json version '$packageVersion'."
         }
 
-        Assert-NpmTrustedPublisherReady -RepositoryRoot $repositoryRoot
+        $publishTag = if ($NpmTag) { $NpmTag } else { Get-DefaultNpmTag -Version $packageVersion }
 
-        $tagName = "cli-v$targetVersion"
-        Assert-TagDoesNotExist -TagName $tagName -Remote $Remote
+        Assert-NpmPublishReady -RepositoryRoot $repositoryRoot
 
-        git tag -a $tagName -m "Release CLI $targetVersion"
-        git push $Remote "refs/tags/$tagName"
+        npm ci
+        if ($LASTEXITCODE -ne 0) {
+            throw "npm ci failed."
+        }
 
-        Write-Host "Created and pushed tag $tagName to $Remote."
-        Write-Host "GitHub Actions workflow .github/workflows/publish-cli.yml should now publish codex-account-switch@$targetVersion."
+        npm run test -w packages/cli
+        if ($LASTEXITCODE -ne 0) {
+            throw "CLI release tests failed."
+        }
+
+        Push-Location (Join-Path $repositoryRoot "packages/cli")
+        try {
+            $publishArguments = @("publish", "--tag", $publishTag)
+            if ($DryRun) {
+                $publishArguments += "--dry-run"
+            }
+
+            npm @publishArguments
+            if ($LASTEXITCODE -ne 0) {
+                throw "npm publish failed."
+            }
+        }
+        finally {
+            Pop-Location
+        }
+
+        $mode = if ($DryRun) { "Dry-run publish completed" } else { "CLI package published" }
+        Write-Host "$mode for codex-account-switch@$targetVersion with npm tag '$publishTag'."
     }
     finally {
         Pop-Location
@@ -228,8 +264,12 @@ switch ($Command.ToLowerInvariant()) {
         Invoke-CheckRelease
         break
     }
-    "tag" {
-        Invoke-TagRelease
+    "dry-run" {
+        Invoke-PublishRelease -DryRun $true
+        break
+    }
+    "publish" {
+        Invoke-PublishRelease -DryRun $false
         break
     }
     default {

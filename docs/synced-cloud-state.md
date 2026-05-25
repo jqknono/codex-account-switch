@@ -31,7 +31,7 @@ flowchart LR
 | Aggregate key contains legacy payloads | Materialize missing per-entry keys, prefer already-existing per-entry keys, then clear aggregate `accounts` and `providers`. |
 | Multiple sources contain the same entry | Prefer payloads with `entryVersion`; when more than one source has a version, keep the highest version and materialize it into the per-entry key. |
 | Local operation snapshot has a newer version | Use the versioned local snapshot as the write baseline when current synced storage is missing or older, then write the next version. |
-| Index name has no payload | Remove names that have no per-entry key, aggregate payload, or legacy setting payload; do not create empty entries. |
+| Index name has no payload | Preserve the name and keep its per-entry key registered for sync; treat it as a pending payload rather than deleting it. |
 | Legacy cleanup succeeds | Remove the old `codex-account-switch.syncedStorage` setting. |
 | Legacy cleanup fails | Keep the migrated `globalState` data active, log a warning, and show a non-fatal notice. |
 
@@ -49,6 +49,7 @@ flowchart LR
 | --- | --- |
 | No `globalState` change event for remote sync | Reload/activation or explicit refresh is the supported pickup boundary. |
 | Passphrase is local-only | A second machine must enter the same password before synced cloud entries can be decrypted. |
+| Index and payload may arrive separately | A device can temporarily see `accountNames/providerNames` before the matching per-entry payload key; that state must not be interpreted as deletion. |
 | Envelope format must stay unchanged | `@codex-account-switch/core` remains the canonical serializer/deserializer. |
 | Account/provider writes are per-entry | Updating one cloud account or provider must not rewrite sibling payload keys. |
 | Public account email | Stored unencrypted on each cloud account entry so locked entries can still show the email; tokens remain encrypted. |

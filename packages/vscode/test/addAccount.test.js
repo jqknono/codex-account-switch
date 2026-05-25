@@ -1504,7 +1504,7 @@ test("activate materializes aggregate cloud accounts and providers into per-entr
   );
 });
 
-test("activate removes names-only cloud account and provider index entries", async () => {
+test("activate preserves names-only cloud account and provider index entries", async () => {
   const accountEntry = makeAuthFile("acct-present", { email: "present@example.com" });
   const providerEntry = {
     kind: "provider",
@@ -1540,15 +1540,129 @@ test("activate removes names-only cloud account and provider index entries", asy
       const context = createExtensionContext(mocked);
       await extension.activate(context);
 
-      assert.deepEqual(mocked.globalStateValues.get(SYNCED_CLOUD_STATE_KEY).accountNames, ["present"]);
-      assert.deepEqual(mocked.globalStateValues.get(SYNCED_CLOUD_STATE_KEY).providerNames, ["present-proxy"]);
+      assert.deepEqual(mocked.globalStateValues.get(SYNCED_CLOUD_STATE_KEY).accountNames, ["missing", "present"]);
+      assert.deepEqual(mocked.globalStateValues.get(SYNCED_CLOUD_STATE_KEY).providerNames, ["missing-proxy", "present-proxy"]);
       assert.equal(mocked.globalStateValues.has(getSyncedCloudAccountKey("missing")), false);
       assert.equal(mocked.globalStateValues.has(getSyncedCloudProviderKey("missing-proxy")), false);
       assert.deepEqual(mocked.globalState.syncedKeys, [
         SYNCED_CLOUD_STATE_KEY,
+        getSyncedCloudAccountKey("missing"),
         getSyncedCloudAccountKey("present"),
+        getSyncedCloudProviderKey("missing-proxy"),
         getSyncedCloudProviderKey("present-proxy"),
       ]);
+
+      for (const subscription of context.subscriptions.reverse()) {
+        subscription?.dispose?.();
+      }
+      await waitForRefreshCoordinatorIdle(context);
+    })
+  );
+});
+
+test("delayed synced cloud account payload becomes available after refresh", async () => {
+  core.setSavedAuthPassphrase("delayed-passphrase");
+  const delayedAccount = core.serializeSavedValue(
+    "saved_auth",
+    makeAuthFile("acct-apple1", { email: "apple1@example.com" }),
+    {
+      requireEncryption: true,
+    }
+  );
+  delayedAccount.entryVersion = 1;
+  delayedAccount.updatedAt = "2026-05-25T00:00:00.000Z";
+  core.setSavedAuthPassphrase(null);
+
+  const mocked = createVscodeMock({
+    globalStateValues: {
+      [SYNCED_CLOUD_STATE_KEY]: {
+        version: 1,
+        accounts: {},
+        accountNames: ["apple1"],
+        providers: {},
+        providerNames: [],
+      },
+    },
+    secretValues: {
+      [STORAGE_SECRET_KEY]: "delayed-passphrase",
+    },
+  });
+
+  await withDisabledIntervals(() =>
+    withSuccessfulHttps(async () => {
+      const extension = loadExtensionWithMockedVscode(mocked.vscode);
+      const context = createExtensionContext(mocked);
+      await extension.activate(context);
+
+      const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
+      let [appleItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
+        .filter((item) => item.account.name === "apple1" && item.account.source === "cloud");
+
+      assert.equal(appleItem.account.storageState, "invalid");
+      assert.match(appleItem.account.storageMessage, /payload has not synced/);
+      assert.deepEqual(mocked.globalStateValues.get(SYNCED_CLOUD_STATE_KEY).accountNames, ["apple1"]);
+      assert.deepEqual(mocked.globalState.syncedKeys, [
+        SYNCED_CLOUD_STATE_KEY,
+        getSyncedCloudAccountKey("apple1"),
+      ]);
+
+      await mocked.globalState.update(getSyncedCloudAccountKey("apple1"), delayedAccount);
+      await mocked.registeredCommands.get("codex-account-switch.refreshList")();
+
+      [appleItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
+        .filter((item) => item.account.name === "apple1" && item.account.source === "cloud");
+
+      assert.equal(appleItem.account.storageState, "ready");
+      assert.equal(appleItem.account.meta.email, "apple1@example.com");
+      assert.equal(appleItem.account.syncVersion, 1);
+      assert.equal(appleItem.account.syncUpdatedAt, "2026-05-25T00:00:00.000Z");
+
+      for (const subscription of context.subscriptions.reverse()) {
+        subscription?.dispose?.();
+      }
+      await waitForRefreshCoordinatorIdle(context);
+    })
+  );
+});
+
+test("remove account deletes a names-only cloud account index entry", async () => {
+  const mocked = createVscodeMock({
+    globalStateValues: {
+      [SYNCED_CLOUD_STATE_KEY]: {
+        version: 1,
+        accounts: {},
+        accountNames: ["apple1"],
+        providers: {},
+        providerNames: [],
+      },
+    },
+    secretValues: {
+      [STORAGE_SECRET_KEY]: "unused-passphrase",
+    },
+    warningResponses: ["Remove"],
+  });
+
+  await withDisabledIntervals(() =>
+    withSuccessfulHttps(async () => {
+      const extension = loadExtensionWithMockedVscode(mocked.vscode);
+      const context = createExtensionContext(mocked);
+      await extension.activate(context);
+
+      const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
+      const [appleItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
+        .filter((item) => item.account.name === "apple1" && item.account.source === "cloud");
+
+      assert.ok(appleItem);
+      await mocked.registeredCommands.get("codex-account-switch.removeAccount")(appleItem);
+
+      assert.deepEqual(mocked.errorMessages, []);
+      assert.deepEqual(mocked.warningMessages.map((message) => message.message), [
+        'Remove account "apple1" from cloud storage?',
+      ]);
+      assert.equal(mocked.informationMessages.length, 1);
+      assert.deepEqual(mocked.globalStateValues.get(SYNCED_CLOUD_STATE_KEY).accountNames, []);
+      assert.equal(mocked.globalStateValues.has(getSyncedCloudAccountKey("apple1")), false);
+      assert.match(mocked.informationMessages[0]?.message ?? "", /Account "apple1" was removed/);
 
       for (const subscription of context.subscriptions.reverse()) {
         subscription?.dispose?.();
