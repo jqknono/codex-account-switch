@@ -371,12 +371,12 @@ async function setAutoSwitchEnabled(enabled: boolean): Promise<void> {
   );
 }
 
-async function promptReloadWindowAfterAdd(accountName: string, email?: string) {
+function showAccountSavedAfterAdd(accountName: string, email?: string) {
   const savedMessage = email
     ? `✓ Account "${accountName}" was saved (${email}).`
     : `✓ Account "${accountName}" was saved.`;
-  await promptReloadWindow(
-    `${savedMessage} Reload the window if the Codex extension should use this account immediately.`
+  void vscode.window.showInformationMessage(
+    `${savedMessage} It is not active yet. Use Switch Account to activate it.`
   );
 }
 
@@ -1313,7 +1313,7 @@ export function registerCommands(
             });
             await restoreSavedCurrentSelectionMarker(previousSelection);
             refreshAll(refreshCoordinator);
-            await promptReloadWindowAfterAdd(trimmedName, result.meta?.email);
+            showAccountSavedAfterAdd(trimmedName, result.meta?.email);
           } else {
             await restoreSavedCurrentSelectionMarker(previousSelection);
             logCommandWarn("add-account", "save-failed", {
@@ -1373,7 +1373,7 @@ export function registerCommands(
           });
           await restoreSavedCurrentSelectionMarker(previousSelection);
           refreshAll(refreshCoordinator);
-          await promptReloadWindowAfterAdd(trimmedName, result.meta?.email);
+          showAccountSavedAfterAdd(trimmedName, result.meta?.email);
         } else {
           await restoreSavedCurrentSelectionMarker(previousSelection);
           logCommandWarn("add-account", "save-failed", {

@@ -1,4 +1,13 @@
-# Add Local Account Acceptance Cases
+# Add Local Account 验收用例
+
+```mermaid
+flowchart TD
+  A[执行 Add Account] --> B[临时 CODEX_HOME 中完成 codex login]
+  B --> C[保存为目标账号]
+  C --> D[恢复登录前 current selection]
+  D --> E[真实 auth.json 保持不变]
+  E --> F[提示已保存但尚未激活]
+```
 
 | 场景 | 前置条件 / 输入 | 预期结果 |
 | --- | --- | --- |

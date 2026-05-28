@@ -1035,6 +1035,15 @@ test("addAccount saves a new local account without switching away from the activ
         assert.equal(marker?.name, "active");
         assert.equal(marker?.source, "local");
         assert.equal(countAuthRefreshRequests(requestLog), 0);
+        const savedMessage = mocked.informationMessages.find(({ message }) =>
+          message.includes('Account "new-user" was saved')
+        );
+        assert.ok(savedMessage);
+        assert.equal(savedMessage.actions.includes("Reload"), false);
+        assert.equal(savedMessage.actions.includes("Later"), false);
+        assert.match(savedMessage.message, /not active/i);
+        assert.match(savedMessage.message, /Switch Account/i);
+        assert.doesNotMatch(savedMessage.message, /Reload/i);
 
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
