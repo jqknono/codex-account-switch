@@ -52,6 +52,7 @@ flowchart LR
 | Index and payload may arrive separately | A device can temporarily see `accountNames/providerNames` before the matching per-entry payload key; that state must not be interpreted as deletion. |
 | Envelope format must stay unchanged | `@codex-account-switch/core` remains the canonical serializer/deserializer. |
 | Account/provider writes are per-entry | Updating one cloud account or provider must not rewrite sibling payload keys. |
+| New per-entry sync keys must be registered before payload writes | Otherwise another device can sync `accountNames/providerNames` first and temporarily see a names-only invalid entry. |
 | Public account email | Stored unencrypted on each cloud account entry so locked entries can still show the email; tokens remain encrypted. |
 | VS Code internal caches stay private | The extension does not read `state.vscdb` or other VS Code internal storage; if data is only present there, automatic migration is abandoned. |
 

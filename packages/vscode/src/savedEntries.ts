@@ -716,6 +716,12 @@ function setSyncedCloudSyncKeys(accountNames: string[], providerNames: string[])
   requireContext().globalState.setKeysForSync(getSyncedCloudSyncKeys(accountNames, providerNames));
 }
 
+function registerSyncedCloudSyncKeysForData(data: SyncedStorageData): SyncedStorageData {
+  const index = toSyncedCloudStateIndex(data);
+  setSyncedCloudSyncKeys(index.accountNames, index.providerNames);
+  return index;
+}
+
 function toSyncedCloudStateIndex(data: SyncedStorageData): SyncedStorageData {
   const accountNames = normalizeNames([
     ...data.accountNames,
@@ -766,6 +772,7 @@ async function writeSyncedCloudStateIndex(data: SyncedStorageData): Promise<void
 }
 
 async function writeFullSyncedStorage(data: SyncedStorageData): Promise<void> {
+  registerSyncedCloudSyncKeysForData(data);
   for (const [name, account] of Object.entries(data.accounts)) {
     await requireContext().globalState.update(getSyncedCloudAccountKey(name), clone(account));
   }
@@ -778,6 +785,11 @@ async function writeFullSyncedStorage(data: SyncedStorageData): Promise<void> {
 async function writeSyncedCloudAccount(name: string, value: Record<string, unknown>): Promise<void> {
   const storage = readSyncedStorage();
   storage.accounts[name] = clone(value);
+  storage.accountNames = normalizeNames([
+    ...storage.accountNames,
+    name,
+  ]);
+  registerSyncedCloudSyncKeysForData(storage);
   await requireContext().globalState.update(getSyncedCloudAccountKey(name), clone(value));
   await writeSyncedCloudStateIndex(storage);
 }
@@ -785,6 +797,11 @@ async function writeSyncedCloudAccount(name: string, value: Record<string, unkno
 async function writeSyncedCloudProvider(name: string, value: Record<string, unknown>): Promise<void> {
   const storage = readSyncedStorage();
   storage.providers[name] = clone(value);
+  storage.providerNames = normalizeNames([
+    ...storage.providerNames,
+    name,
+  ]);
+  registerSyncedCloudSyncKeysForData(storage);
   await requireContext().globalState.update(getSyncedCloudProviderKey(name), clone(value));
   await writeSyncedCloudStateIndex(storage);
 }
@@ -813,6 +830,7 @@ async function renameSyncedCloudAccount(oldName: string, newName: string, value:
     ...storage.accountNames.filter((accountName) => accountName !== oldName),
     newName,
   ]);
+  registerSyncedCloudSyncKeysForData(storage);
   await requireContext().globalState.update(getSyncedCloudAccountKey(oldName), undefined);
   await requireContext().globalState.update(getSyncedCloudAccountKey(newName), clone(value));
   await writeSyncedCloudStateIndex(storage);

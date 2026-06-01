@@ -236,6 +236,7 @@ function createVscodeMock(options) {
   const treeViews = new Map();
   const createdChannels = [];
   const globalStateValues = new Map(Object.entries(options.globalStateValues ?? {}));
+  const syncedGlobalStateValues = new Map(Object.entries(options.syncedGlobalStateValues ?? {}));
   const syncedStorage = options.syncedStorage
     ? {
         version: options.syncedStorage.version ?? 1,
@@ -541,9 +542,17 @@ function createVscodeMock(options) {
         } else {
           globalStateValues.set(key, value);
         }
+        if (options.captureSyncedGlobalStateWrites && this.syncedKeys?.includes(key)) {
+          if (value === undefined) {
+            syncedGlobalStateValues.delete(key);
+          } else {
+            syncedGlobalStateValues.set(key, JSON.parse(JSON.stringify(value)));
+          }
+        }
       },
     },
     globalStateValues,
+    syncedGlobalStateValues,
     legacySyncedStorage: () => legacySyncedStorage,
   };
 }
@@ -5292,6 +5301,106 @@ test("account migration moves saved auth between local and cloud storage", async
         })
       );
     });
+  } finally {
+    core.setSavedAuthPassphrase(null);
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
+test("moveAccountToCloud syncs the payload together with the cloud index for another device", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-account-migration-cross-device-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  const authDir = path.join(tempRoot, "saved-auth");
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(authDir, { recursive: true });
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  try {
+    core.setNamedAuthDir(authDir);
+    core.writeSavedAuthFile(path.join(authDir, "auth_apple1.json"), makeAuthFile("acct-apple1", {
+      email: "apple1@example.com",
+      plan: "pro",
+    }));
+    core.setNamedAuthDir(undefined);
+
+    const source = createVscodeMock({
+      authDirectory: authDir,
+      captureSyncedGlobalStateWrites: true,
+      secretValues: {
+        [STORAGE_SECRET_KEY]: "cross-device-passphrase",
+      },
+      syncedStorage: {
+        version: 1,
+        accounts: {},
+        providers: {},
+      },
+    });
+
+    await withDisabledIntervals(() =>
+      withSuccessfulHttps(async () => {
+        const extension = loadExtensionWithMockedVscode(source.vscode);
+        const context = createExtensionContext(source);
+        await extension.activate(context);
+
+        const accountTreeView = source.treeViews.get("codexAccountSwitchAccounts");
+        const [localItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
+          .filter((item) => item.account.name === "apple1" && item.account.source === "local");
+
+        await source.registeredCommands.get("codex-account-switch.moveAccountToCloud")(localItem);
+
+        for (const subscription of context.subscriptions.reverse()) {
+          subscription?.dispose?.();
+        }
+        await waitForRefreshCoordinatorIdle(context);
+      })
+    );
+
+    const replicatedState = Object.fromEntries(source.syncedGlobalStateValues.entries());
+    const target = createVscodeMock({
+      globalStateValues: replicatedState,
+      secretValues: {
+        [STORAGE_SECRET_KEY]: "cross-device-passphrase",
+      },
+    });
+
+    await withDisabledIntervals(() =>
+      withSuccessfulHttps(async () => {
+        const extension = loadExtensionWithMockedVscode(target.vscode);
+        const context = createExtensionContext(target);
+        await extension.activate(context);
+
+        const accountTreeView = target.treeViews.get("codexAccountSwitchAccounts");
+        const [cloudItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
+          .filter((item) => item.account.name === "apple1" && item.account.source === "cloud");
+
+        assert.equal(cloudItem.account.storageState, "ready");
+        assert.equal(cloudItem.account.meta.email, "apple1@example.com");
+        assert.equal(cloudItem.account.meta.plan, "pro");
+
+        for (const subscription of context.subscriptions.reverse()) {
+          subscription?.dispose?.();
+        }
+        await waitForRefreshCoordinatorIdle(context);
+      })
+    );
   } finally {
     core.setSavedAuthPassphrase(null);
     core.setNamedAuthDir(undefined);
