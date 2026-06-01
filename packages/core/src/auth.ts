@@ -4,18 +4,6 @@ import { getCodexAuthPath, getNamedAuthPath, listNamedAuthFiles } from "./paths"
 import { AuthFile, IdTokenPayload, AccountMeta } from "./types";
 import { readSavedJsonFile, SavedStorageReadResult, writeSavedJsonFile } from "./savedStorage";
 
-function parseAuthJson(raw: string): AuthFile | null {
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return null;
-    }
-    return parsed as AuthFile;
-  } catch {
-    return null;
-  }
-}
-
 function sanitizeAuthFile(auth: AuthFile): AuthFile {
   const sanitized: AuthFile = {};
 
@@ -60,17 +48,25 @@ function sanitizeAuthFile(auth: AuthFile): AuthFile {
   return sanitized;
 }
 
+function readCompatibleAuthFile(filePath: string): AuthFile | null {
+  const result = readSavedJsonFile<AuthFile>(filePath, "saved_auth");
+  if (result.status !== "ok") {
+    return null;
+  }
+  return sanitizeAuthFile(result.value);
+}
+
 export function readCurrentAuth(): AuthFile | null {
   const p = getCodexAuthPath();
   if (!fs.existsSync(p)) {
     return null;
   }
-  return parseAuthJson(fs.readFileSync(p, "utf-8"));
+  return readCompatibleAuthFile(p);
 }
 
 export function readAuthFile(filePath: string): AuthFile | null {
   if (!fs.existsSync(filePath)) return null;
-  return parseAuthJson(fs.readFileSync(filePath, "utf-8"));
+  return readCompatibleAuthFile(filePath);
 }
 
 export function writeAuthFile(filePath: string, auth: AuthFile): void {

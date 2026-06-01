@@ -998,6 +998,21 @@ test("saved auth files can be encrypted and later unlocked with a passphrase", (
   assert.equal(reopened.value.tokens.account_id, "acct-work");
 });
 
+test("readAuthFile returns decrypted auth for encrypted saved auth files", () => {
+  const codexHome = createTempCodexHome();
+  process.env.CODEX_HOME = codexHome;
+
+  const authPath = path.join(codexHome, "auth_work.json");
+  core.setSavedAuthPassphrase("test-passphrase");
+  core.writeSavedAuthFile(authPath, makeAccountAuth("acct-work", "rt-work", "access-work"));
+
+  const auth = core.readAuthFile(authPath);
+
+  assert.equal(auth?.tokens?.account_id, "acct-work");
+  assert.equal(auth?.tokens?.access_token, "access-work");
+  assert.equal(auth?.kind, undefined);
+});
+
 test("useAccount reports locked storage when the saved account is encrypted but no passphrase is loaded", () => {
   const codexHome = createTempCodexHome();
   process.env.CODEX_HOME = codexHome;
