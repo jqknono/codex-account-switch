@@ -4,6 +4,8 @@ import { getCodexAuthPath, getNamedAuthPath, listNamedAuthFiles } from "./paths"
 import { AuthFile, IdTokenPayload, AccountMeta } from "./types";
 import { readSavedJsonFile, SavedStorageReadResult, writeSavedJsonFile } from "./savedStorage";
 
+const AUTH_UPDATED_AT_FIELD = "codex_account_switch_auth_updated_at";
+
 function sanitizeAuthFile(auth: AuthFile): AuthFile {
   const sanitized: AuthFile = {};
 
@@ -43,6 +45,10 @@ function sanitizeAuthFile(auth: AuthFile): AuthFile {
 
   if (typeof auth.last_token_auto_update === "string" && auth.last_token_auto_update) {
     sanitized.last_token_auto_update = auth.last_token_auto_update;
+  }
+
+  if (typeof auth[AUTH_UPDATED_AT_FIELD] === "string" && auth[AUTH_UPDATED_AT_FIELD]) {
+    sanitized[AUTH_UPDATED_AT_FIELD] = auth[AUTH_UPDATED_AT_FIELD];
   }
 
   return sanitized;

@@ -9,6 +9,7 @@
 | Cloud providers | Per-provider VS Code `globalState` synced keys `codex-account-switch.syncedCloudProvider.v1.{name}` | Uses the same encrypted envelope format as accounts, plus sync revision metadata and provider audit metadata (`lastWriterAction`). |
 | Saved-auth passphrase | VS Code `SecretStorage` | Local-only secret, never synced. |
 | Current selection marker | VS Code `globalState` unsynced key | Local UI state. |
+| Account auth freshness | `codex_account_switch_auth_updated_at` inside account auth | Internal timestamp used to reject stale auth writes when multiple machines sync the same cloud account. |
 
 ## Sync Behavior
 
@@ -21,6 +22,27 @@ flowchart LR
   G[SecretStorage passphrase] --> H[Decrypt encrypted envelopes locally]
   B --> H
 ```
+
+## Cloud Account Auth Freshness
+
+```mermaid
+flowchart TD
+  A[Read active auth.json before switching] --> B[Attach auth updated timestamp]
+  B --> C{Cloud account already has auth}
+  C -->|no| D[Write cloud auth]
+  C -->|yes| E{Active auth timestamp is newer}
+  E -->|yes| D
+  E -->|no| F[Skip overwrite and keep cloud auth]
+  D --> G[Increment entryVersion and updatedAt]
+  F --> H[Keep current cloud entryVersion and updatedAt]
+```
+
+| Rule | Behavior |
+| --- | --- |
+| Cloud account writes | Persisted account auth carries `codex_account_switch_auth_updated_at`. |
+| Switching to a cloud account | The copied `auth.json` keeps the cloud auth timestamp, or uses the cloud entry `updatedAt` for older entries that do not yet contain the field. |
+| Syncing current auth back to cloud | The cloud entry is overwritten only when the active auth timestamp is strictly newer than the stored cloud auth timestamp. |
+| Stale active auth | If another machine has already synced newer auth for the same account, switching away from the stale active account skips the cloud overwrite and keeps the newer cloud auth. |
 
 ## Migration Rules
 

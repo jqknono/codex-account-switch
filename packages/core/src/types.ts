@@ -11,6 +11,7 @@ export interface AuthFile {
   tokens?: AuthTokens;
   last_refresh?: string;
   last_token_auto_update?: string;
+  codex_account_switch_auth_updated_at?: string;
   [key: string]: unknown;
 }
 

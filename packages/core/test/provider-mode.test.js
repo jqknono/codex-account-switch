@@ -960,18 +960,21 @@ test("queryQuota removes a stale lock left by a dead process", async () => {
   assert.equal(fs.existsSync(staleLockPath), false);
 });
 
-test("writeAuthFile strips legacy refresh_token_expires_at fields", () => {
+test("writeAuthFile strips legacy refresh_token_expires_at fields while preserving auth freshness", () => {
   const codexHome = createTempCodexHome();
   process.env.CODEX_HOME = codexHome;
 
+  const authUpdatedAt = "2026-06-01T10:00:00.000Z";
   const authPath = path.join(codexHome, "auth_work.json");
   core.writeAuthFile(authPath, {
     ...makeAccountAuth("acct-work", "rt-work", "access-work"),
+    codex_account_switch_auth_updated_at: authUpdatedAt,
     refresh_token_expires_at: "2099-01-01T00:00:00.000Z",
     ignored_field: "ignored",
   });
 
   const saved = JSON.parse(fs.readFileSync(authPath, "utf-8"));
+  assert.equal(saved.codex_account_switch_auth_updated_at, authUpdatedAt);
   assert.equal(saved.refresh_token_expires_at, undefined);
   assert.equal(saved.ignored_field, undefined);
 });

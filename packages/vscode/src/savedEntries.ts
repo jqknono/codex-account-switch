@@ -14,6 +14,7 @@ import {
   extractMeta,
   getAccountIdentity,
   getActiveModelProvider,
+  getCodexAuthPath,
   getCurrentSelection,
   getDefaultProviderProfile,
   getModeDisplayName,
@@ -182,6 +183,7 @@ const SYNCED_STORAGE_SETTING = "syncedStorage";
 const DEFAULT_TARGET_SETTING = "defaultSaveTarget";
 const CURRENT_SELECTION_KEY = "codex-account-switch.currentSavedSelection";
 const DEFAULT_QUOTA_CACHE_INTERVAL_MS = 30 * 1000;
+const AUTH_UPDATED_AT_FIELD = "codex_account_switch_auth_updated_at";
 const inflightCloudQuotaQueries = new Map<string, Promise<QuotaQueryResult>>();
 const EMPTY_SYNC_METADATA: SavedStorageSyncMetadata = {
   entryVersion: null,
@@ -314,6 +316,80 @@ function applySyncMetadata(value: Record<string, unknown>, metadata: SavedStorag
   value.updatedAt = metadata.updatedAt;
   value.lastWriterAction = metadata.lastWriterAction;
   return value;
+}
+
+function parseIsoTimestamp(value: unknown): string | null {
+  if (typeof value !== "string" || value.length === 0) {
+    return null;
+  }
+  return Number.isFinite(Date.parse(value)) ? value : null;
+}
+
+function getAuthUpdatedAt(auth: AuthFile | null | undefined): string | null {
+  return parseIsoTimestamp(auth?.[AUTH_UPDATED_AT_FIELD]);
+}
+
+function getTimestampMs(value: string | null | undefined): number | null {
+  if (!value) {
+    return null;
+  }
+  const time = Date.parse(value);
+  return Number.isFinite(time) ? time : null;
+}
+
+function setAuthUpdatedAt(auth: AuthFile, updatedAt: string): AuthFile {
+  auth[AUTH_UPDATED_AT_FIELD] = updatedAt;
+  return auth;
+}
+
+function markAuthUpdatedNow(auth: AuthFile): AuthFile {
+  return setAuthUpdatedAt(clone(auth), new Date().toISOString());
+}
+
+function getCurrentAuthFileUpdatedAt(): string | null {
+  try {
+    return fs.statSync(getCodexAuthPath()).mtime.toISOString();
+  } catch {
+    return null;
+  }
+}
+
+function markCurrentAuthForCloudSync(auth: AuthFile): AuthFile {
+  return setAuthUpdatedAt(
+    clone(auth),
+    getAuthUpdatedAt(auth) ?? getCurrentAuthFileUpdatedAt() ?? new Date().toISOString(),
+  );
+}
+
+function markCloudAuthForCurrentUse(
+  auth: AuthFile,
+  metadata: Pick<SavedStorageSyncMetadata, "updatedAt">,
+): AuthFile {
+  return setAuthUpdatedAt(clone(auth), getAuthUpdatedAt(auth) ?? metadata.updatedAt ?? new Date().toISOString());
+}
+
+function getStoredCloudAccountAuthUpdatedAt(raw: unknown, metadata: SavedStorageSyncMetadata): string | null {
+  const result = deserializeSavedValue<AuthFile>(raw, "saved_auth");
+  if (result.status !== "ok") {
+    return metadata.updatedAt;
+  }
+  return getAuthUpdatedAt(result.value) ?? metadata.updatedAt;
+}
+
+function shouldSkipOlderCloudAccountAuthWrite(
+  currentRaw: unknown,
+  currentMetadata: SavedStorageSyncMetadata,
+  nextAuth: AuthFile,
+): boolean {
+  if (currentRaw === undefined) {
+    return false;
+  }
+  const currentTime = getTimestampMs(getStoredCloudAccountAuthUpdatedAt(currentRaw, currentMetadata));
+  if (currentTime == null) {
+    return false;
+  }
+  const nextTime = getTimestampMs(getAuthUpdatedAt(nextAuth));
+  return nextTime == null || nextTime <= currentTime;
 }
 
 function hasSyncConflict(expectedEntryVersion: number | null | undefined, current: SavedStorageSyncMetadata): boolean {
@@ -531,7 +607,11 @@ export async function restoreSavedSelectionAfterTransientLogin(
       };
     }
 
-    writeCurrentAuth(authToRestore);
+    writeCurrentAuth(
+      selection.source === "cloud" && account
+        ? markCloudAuthForCurrentUse(authToRestore, { updatedAt: account.syncUpdatedAt })
+        : authToRestore,
+    );
     clearActiveModelProvider();
     if (account && account.storageState === "ready") {
       await setCurrentAccountMarker(account);
@@ -1371,7 +1451,8 @@ async function writeCloudAccountWithExpectedVersion(
 ): Promise<CloudMutationResult> {
   requireCloudPassphrase();
   const storage = readSyncedStorage();
-  const currentMetadata = getSyncMetadata(storage.accounts[name]);
+  const currentRaw = storage.accounts[name];
+  const currentMetadata = getSyncMetadata(currentRaw);
   const expectedMetadata = getExpectedSyncMetadata(expectedEntryVersion, expectedUpdatedAt);
   const effectiveCurrentMetadata = shouldUseExpectedSnapshotAsCurrent(expectedMetadata, currentMetadata)
     ? expectedMetadata
@@ -1386,11 +1467,20 @@ async function writeCloudAccountWithExpectedVersion(
       ),
     );
   }
+  const authToWrite = getAuthUpdatedAt(auth) ? clone(auth) : markAuthUpdatedNow(auth);
+  if (shouldSkipOlderCloudAccountAuthWrite(currentRaw, currentMetadata, authToWrite)) {
+    return {
+      success: true,
+      message: `Skipped saving account "${name}" because cloud storage already has newer auth`,
+      syncVersion: currentMetadata.entryVersion,
+      syncUpdatedAt: currentMetadata.updatedAt,
+    };
+  }
   const nextMetadata = nextSyncMetadata(effectiveCurrentMetadata);
-  const serialized = serializeSavedValue("saved_auth", auth as Record<string, unknown>, {
+  const serialized = serializeSavedValue("saved_auth", authToWrite as Record<string, unknown>, {
     requireEncryption: true,
   });
-  const nextAccount = applySyncMetadata(withPublicEmail(serialized, extractMeta(auth).email), nextMetadata);
+  const nextAccount = applySyncMetadata(withPublicEmail(serialized, extractMeta(authToWrite).email), nextMetadata);
   await writeSyncedCloudAccount(name, nextAccount);
   return {
     success: true,
@@ -1567,7 +1657,7 @@ export async function syncCurrentAuthToSavedSelection(): Promise<SyncCurrentSele
       }
       const result = await persistCloudAccountAuth(
         marker.name,
-        auth,
+        markCurrentAuthForCloudSync(auth),
         marker.entryVersion,
         marker.updatedAt,
       );
@@ -1696,9 +1786,10 @@ export async function saveAuthAsAccount(
     }
   }
 
+  const authToSave = markAuthUpdatedNow(auth);
   const writeResult = await writeCloudAccountWithExpectedVersion(
     name,
-    auth,
+    authToSave,
     options?.expectedEntryVersion,
     options?.expectedUpdatedAt,
   );
@@ -1706,6 +1797,7 @@ export async function saveAuthAsAccount(
     return { success: false, message: writeResult.message, meta, conflict: writeResult.conflict };
   }
   if (options?.selectAfterSave !== false) {
+    writeCurrentAuth(authToSave);
     await setCurrentAccountMarker({
       name,
       source: "cloud",
@@ -1747,7 +1839,7 @@ export async function useSavedAccountEntry(
     };
   }
 
-  writeCurrentAuth(account.auth);
+  writeCurrentAuth(markCloudAuthForCurrentUse(account.auth, { updatedAt: account.syncUpdatedAt }));
   clearActiveModelProvider();
   await setMarker({
     kind: "account",
@@ -1987,6 +2079,7 @@ async function retryPersistRotatedCloudAuthAfterConflict(
   if (rotatedAuth.last_refresh) {
     mergedAuth.last_refresh = rotatedAuth.last_refresh;
   }
+  setAuthUpdatedAt(mergedAuth, getAuthUpdatedAt(rotatedAuth) ?? new Date().toISOString());
 
   logWarn(LOG_PREFIX, "retry-cloud-token-persist-after-conflict", {
     account: name,
@@ -2013,6 +2106,7 @@ async function refreshCloudSavedAccountEntry(account: SavedAccountInfo & { auth:
   try {
     const refreshed = await refreshAccessToken(auth);
     applyRefreshResponse(auth, refreshed);
+    setAuthUpdatedAt(auth, new Date().toISOString());
     let persistResult = await persistCloudAccountAuth(
       account.name,
       auth,
@@ -2128,7 +2222,7 @@ export async function moveSavedAccountEntry(
     }
   } else {
     requireCloudPassphrase();
-    const auth = clone(account.auth);
+    const auth = markAuthUpdatedNow(account.auth);
     const writeResult = await writeCloudAccountWithExpectedVersion(account.name, auth);
     if (!writeResult.success) {
       return { success: false, message: writeResult.message, conflict: writeResult.conflict };

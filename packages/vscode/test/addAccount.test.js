@@ -11,6 +11,7 @@ const STORAGE_SECRET_KEY = "codex-account-switch.savedAuthPassphrase";
 const SYNCED_CLOUD_STATE_KEY = "codex-account-switch.syncedCloudState.v1";
 const SYNCED_CLOUD_ACCOUNT_KEY_PREFIX = "codex-account-switch.syncedCloudAccount.v1.";
 const SYNCED_CLOUD_PROVIDER_KEY_PREFIX = "codex-account-switch.syncedCloudProvider.v1.";
+const AUTH_UPDATED_AT_FIELD = "codex_account_switch_auth_updated_at";
 
 function makeJwt(payload) {
   const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url");
@@ -2531,6 +2532,122 @@ test("manual cloud refresh increments visible sync version metadata", async (t) 
         assert.deepEqual(mocked.globalStateValues.get(SYNCED_CLOUD_STATE_KEY).accounts, {});
         assert.equal(typeof mocked.globalStateValues.get(getSyncedCloudAccountKey("sync-user"))?.ciphertext, "string");
         assert.equal(typeof mocked.globalStateValues.get(getSyncedCloudAccountKey("sibling"))?.ciphertext, "string");
+
+        for (const subscription of context.subscriptions.reverse()) {
+          subscription?.dispose?.();
+        }
+        await waitForRefreshCoordinatorIdle(context);
+      })
+    );
+  } finally {
+    core.setSavedAuthPassphrase(null);
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
+test("syncing stale active cloud auth does not overwrite newer cloud auth", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-cloud-auth-newer-wins-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  const authDir = path.join(tempRoot, "saved-auth");
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(authDir, { recursive: true });
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = authDir;
+
+  try {
+    const staleAuthTime = "2026-06-01T09:00:00.000Z";
+    const freshAuthTime = "2026-06-01T10:00:00.000Z";
+    fs.writeFileSync(
+      path.join(codexHome, "auth.json"),
+      JSON.stringify(makeAuthFile("acct-apple1", {
+        accessToken: "access-apple-stale",
+        refreshToken: "refresh-apple-stale",
+        extraFields: {
+          [AUTH_UPDATED_AT_FIELD]: staleAuthTime,
+        },
+      }), null, 2),
+      "utf-8"
+    );
+    core.writeSavedAuthFile(path.join(authDir, "auth_local.json"), makeAuthFile("acct-local"));
+
+    core.setSavedAuthPassphrase("newer-wins-passphrase");
+    const freshCloudEntry = core.serializeSavedValue(
+      "saved_auth",
+      makeAuthFile("acct-apple1", {
+        accessToken: "access-apple-fresh",
+        refreshToken: "refresh-apple-fresh",
+        extraFields: {
+          [AUTH_UPDATED_AT_FIELD]: freshAuthTime,
+        },
+      }),
+      {
+        requireEncryption: true,
+      }
+    );
+    freshCloudEntry.entryVersion = 2;
+    freshCloudEntry.updatedAt = freshAuthTime;
+    core.setSavedAuthPassphrase(null);
+
+    const mocked = createVscodeMock({
+      authDirectory: authDir,
+      syncedStorage: {
+        version: 1,
+        accounts: {
+          apple1: freshCloudEntry,
+        },
+        providers: {},
+      },
+      globalStateValues: {
+        "codex-account-switch.currentSavedSelection": {
+          kind: "account",
+          name: "apple1",
+          source: "cloud",
+          entryVersion: 1,
+          updatedAt: staleAuthTime,
+        },
+      },
+      secretValues: {
+        [STORAGE_SECRET_KEY]: "newer-wins-passphrase",
+      },
+    });
+
+    await withDisabledIntervals(() =>
+      withSuccessfulHttps(async () => {
+        const extension = loadExtensionWithMockedVscode(mocked.vscode);
+        const context = createExtensionContext(mocked);
+        await extension.activate(context);
+
+        const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
+        const [localItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
+          .filter((item) => item.account.name === "local" && item.account.source === "local");
+
+        await mocked.registeredCommands.get("codex-account-switch.useAccount")(localItem);
+
+        const cloudAuth = readCloudAccount(mocked.config, "apple1", "newer-wins-passphrase");
+        assert.equal(cloudAuth.tokens.access_token, "access-apple-fresh");
+        assert.equal(cloudAuth.tokens.refresh_token, "refresh-apple-fresh");
+        assert.equal(cloudAuth[AUTH_UPDATED_AT_FIELD], freshAuthTime);
+
+        const cloudEntry = getCloudEnvelope(mocked.config, "account", "apple1");
+        assert.equal(cloudEntry.entryVersion, 2);
+        assert.equal(cloudEntry.updatedAt, freshAuthTime);
 
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
