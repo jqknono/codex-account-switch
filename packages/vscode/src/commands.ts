@@ -966,17 +966,34 @@ async function ensureProviderProfile(name: string, source: StorageSource): Promi
   return ensureProviderProfileWithExpectedVersion(name, source);
 }
 
+async function promptForProviderName(): Promise<string | undefined> {
+  const name = await vscode.window.showInputBox({
+    ignoreFocusOut: true,
+    prompt: "Enter a name for the new provider",
+    placeHolder: "e.g. my-proxy, local-api",
+    validateInput: (v) => {
+      const trimmed = v.trim();
+      if (!trimmed) return "Name is required";
+      if (trimmed === "account") return '"account" is reserved';
+      if (!/^[a-zA-Z0-9_\-]+$/.test(trimmed)) return "Only letters, numbers, hyphens and underscores are allowed";
+      return null;
+    },
+  });
+  return name?.trim() || undefined;
+}
+
 async function ensureProviderProfileWithExpectedVersion(
   name: string,
   source: StorageSource,
   expectedEntryVersion?: number | null,
   expectedUpdatedAt?: string | null,
 ): Promise<ProviderProfile | null> {
+  const existing = getSavedProviderEntry(name, source);
   const defaults = await buildProviderProfileForSource(name, source);
   const draft = {
     auth: defaults.auth as Record<string, unknown>,
     config: defaults.config as unknown as Record<string, unknown>,
-    exists: true,
+    exists: Boolean(existing),
     invalid: false,
   };
 
@@ -1392,6 +1409,69 @@ export function registerCommands(
       });
     }),
 
+    vscode.commands.registerCommand("codex-account-switch.addProvider", async () => {
+      await runTimedCommand("addProvider", async (perf) => {
+        const target: StorageSource = vscode.workspace
+          .getConfiguration("codex-account-switch")
+          .get<StorageSource>("defaultSaveTarget", "local");
+        const targetName = await promptForProviderName();
+        if (!targetName) {
+          logCommandInfo("add-provider", "cancelled", { target });
+          return;
+        }
+
+        perf.mark("collect-provider-name", {
+          provider: targetName,
+          target,
+        });
+        logCommandInfo("add-provider", "started", {
+          provider: targetName,
+          target,
+        });
+
+        if (target === "cloud" && !(await ensureSavedAuthPassphrase(context))) {
+          logCommandWarn("add-provider", "missing-storage-password", {
+            provider: targetName,
+          });
+          vscode.window.showWarningMessage("Cloud storage requires a local storage password.");
+          return;
+        }
+
+        const existing = getSavedProviderEntry(targetName, target);
+        perf.mark("lookup-existing-provider", {
+          exists: Boolean(existing),
+        });
+        if (existing) {
+          logCommandWarn("add-provider", "already-exists", {
+            provider: targetName,
+            target,
+          });
+          vscode.window.showErrorMessage(
+            `Provider "${targetName}" already exists in ${getSourceLabel(target)} storage.`
+          );
+          return;
+        }
+
+        const created = await ensureProviderProfileWithExpectedVersion(targetName, target);
+        perf.mark("save-provider-profile", {
+          success: Boolean(created),
+        });
+        if (!created) {
+          logCommandInfo("add-provider", "cancelled-or-failed", {
+            provider: targetName,
+            target,
+          });
+          return;
+        }
+
+        logCommandInfo("add-provider", "succeeded", {
+          provider: targetName,
+          target,
+        });
+        refreshViews(refreshCoordinator);
+      });
+    }),
+
     vscode.commands.registerCommand(
       "codex-account-switch.reloginAccount",
       async (item?: AccountTreeItem) => {
@@ -1664,22 +1744,11 @@ export function registerCommands(
           vscode.window.showWarningMessage("Cloud storage requires a local storage password.");
           return;
         }
-        const newName = await vscode.window.showInputBox({
-          ignoreFocusOut: true,
-          prompt: "Enter a name for the new provider",
-          placeHolder: "e.g. my-proxy, local-api",
-          validateInput: (v) => {
-            const trimmed = v.trim();
-            if (!trimmed) return "Name is required";
-            if (trimmed === "account") return '"account" is reserved';
-            if (!/^[a-zA-Z0-9_\-]+$/.test(trimmed)) return "Only letters, numbers, hyphens and underscores are allowed";
-            return null;
-          },
-        });
+        const newName = await promptForProviderName();
         if (!newName) {
           return;
         }
-        const targetName = newName.trim();
+        const targetName = newName;
         const created = await ensureProviderProfileWithExpectedVersion(targetName, picked.source);
         if (!created) {
           return;

@@ -9,7 +9,9 @@ Codex Account Switch gives you a dedicated Activity Bar view for saved accounts,
 ## Features
 
 - Add a new account from `codex login`
+- Add a provider profile from the Providers view
 - Switch the active account with one click
+- Switch the active provider with one click
 - Refresh expired tokens for saved accounts and auto-rotate near-expiry access tokens during background quota refresh
 - Inspect current quota usage in the account list and status bar
 - Refresh saved account quotas in the background one account at a time on a configurable interval
@@ -33,6 +35,7 @@ Open the **Codex Account Switch** view from the Activity Bar to:
 Available commands:
 
 - `Codex Account Switch: Add Account`
+- `Codex Account Switch: Add Provider`
 - `Codex Account Switch: Switch Account`
 - `Codex Account Switch: Switch Provider`
 - `Codex Account Switch: Refresh Token`

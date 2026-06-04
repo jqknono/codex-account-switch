@@ -310,6 +310,29 @@ test("provider context menu exposes switch provider inline action", () => {
   assert.equal(switchProvider?.group, "inline@1");
 });
 
+test("providers view title menu exposes add provider", () => {
+  const byId = new Map(commands.map((command) => [command.command, command]));
+  const titleMenus = manifest.contributes.menus["view/title"] ?? [];
+  const addProvider = titleMenus.find(
+    (item) =>
+      item.command === "codex-account-switch.addProvider" &&
+      item.when === "view == codexAccountSwitchProviders"
+  );
+  const providerWelcome = manifest.contributes.viewsWelcome.find(
+    (item) => item.view === "codexAccountSwitchProviders"
+  );
+
+  assert.equal(
+    byId.get("codex-account-switch.addProvider")?.title,
+    "Add Provider"
+  );
+  assert.equal(addProvider?.group, "navigation@3");
+  assert.equal(
+    providerWelcome?.contents.includes("command:codex-account-switch.addProvider"),
+    true
+  );
+});
+
 test("accounts view title menu exposes a single refresh entrypoint", () => {
   const titleMenus = manifest.contributes.menus["view/title"] ?? [];
   const accountViewCommands = titleMenus

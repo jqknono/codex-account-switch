@@ -69,6 +69,7 @@ Activity Bar account view:
 
 - Activity Bar view with account list and quota details
 - Add, remove, switch, import, and export accounts
+- Add, switch, move, and remove saved providers from the Providers view
 - Mode-aware status bar display for the current account or provider mode
 - Token refresh actions for saved accounts
 - Background token maintenance that checks saved accounts for tokens expiring within 120 hours

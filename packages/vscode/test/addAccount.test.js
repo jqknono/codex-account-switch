@@ -4940,6 +4940,94 @@ test("moving one local provider to cloud does not rewrite sibling cloud provider
   });
 });
 
+test("addProvider saves a new local provider without switching mode", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-add-provider-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  const authDir = path.join(tempRoot, "saved-auth");
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(authDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(codexHome, "auth.json"),
+    JSON.stringify(makeAuthFile("acct-active"), null, 2),
+    "utf-8",
+  );
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  try {
+    const mocked = createVscodeMock({
+      authDirectory: authDir,
+      inputBoxResponses: [
+        "proxy",
+        "sk-proxy",
+        "https://proxy.example.com/v1",
+        "responses",
+      ],
+    });
+
+    await withDisabledIntervals(async () => {
+      const extension = loadExtensionWithMockedVscode(mocked.vscode);
+      const context = createExtensionContext(mocked);
+      await extension.activate(context);
+      await waitForRefreshCoordinatorIdle(context);
+
+      await mocked.registeredCommands.get("codex-account-switch.addProvider")();
+      await waitForRefreshCoordinatorIdle(context);
+
+      core.setNamedAuthDir(authDir);
+      const savedProvider = core.readProviderProfile("proxy");
+
+      assert.deepEqual(savedProvider, {
+        kind: "provider",
+        name: "proxy",
+        auth: {
+          OPENAI_API_KEY: "sk-proxy",
+        },
+        config: {
+          name: "proxy",
+          base_url: "https://proxy.example.com/v1",
+          wire_api: "responses",
+        },
+      });
+      assert.equal(core.getActiveModelProvider(), null);
+
+      const providerTreeView = mocked.treeViews.get("codexAccountSwitchProviders");
+      const providerItems = providerTreeView.treeDataProvider.getChildren();
+      assert.equal(providerItems.some((item) => item.provider?.name === "proxy"), true);
+      core.setNamedAuthDir(undefined);
+      assert.equal(
+        mocked.informationMessages.some((entry) =>
+          entry.message.includes('Created provider profile for "proxy" in local storage.')
+        ),
+        true,
+      );
+
+      for (const subscription of context.subscriptions.reverse()) {
+        subscription?.dispose?.();
+      }
+    });
+  } finally {
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
 test("manual token refresh marks invalidated refresh token as relogin required", async (t) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-account-tree-refresh-invalidated-"));
   const codexHome = path.join(tempRoot, ".codex");

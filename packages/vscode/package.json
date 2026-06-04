@@ -2,7 +2,7 @@
   "name": "codex-account-switch-vscode",
   "displayName": "Codex Account Switch",
   "description": "Codex Account Switch - VS Code extension",
-  "version": "1.8.10",
+  "version": "1.8.11",
   "publisher": "techfetch-dev",
   "repository": {
     "type": "git",
@@ -67,7 +67,7 @@
       },
       {
         "view": "codexAccountSwitchProviders",
-        "contents": "No provider profiles to display yet."
+        "contents": "No provider profiles to display yet.\n[Add provider](command:codex-account-switch.addProvider)"
       }
     ],
     "commands": [
@@ -80,6 +80,12 @@
       {
         "command": "codex-account-switch.addAccount",
         "title": "Add Account",
+        "category": "Codex Account Switch",
+        "icon": "$(add)"
+      },
+      {
+        "command": "codex-account-switch.addProvider",
+        "title": "Add Provider",
         "category": "Codex Account Switch",
         "icon": "$(add)"
       },
@@ -295,9 +301,14 @@
           "group": "navigation@2"
         },
         {
-          "command": "codex-account-switch.refreshList",
+          "command": "codex-account-switch.addProvider",
           "when": "view == codexAccountSwitchProviders",
           "group": "navigation@3"
+        },
+        {
+          "command": "codex-account-switch.refreshList",
+          "when": "view == codexAccountSwitchProviders",
+          "group": "navigation@4"
         }
       ],
       "view/item/context": [
