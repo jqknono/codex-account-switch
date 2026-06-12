@@ -10,7 +10,8 @@
 | Cloud account 新 auth 优先 | 本机 `auth.json` 仍是 `apple1` 的旧 auth，但 Settings Sync 已收到另一台机器写入的更新 `apple1` auth | 切换账号触发同步时保留云端较新的 `apple1` auth；旧 `auth.json` 不覆盖云端，云端 `entryVersion/updatedAt` 不变化。 |
 | 旧聚合云状态拆分 | `codex-account-switch.syncedCloudState.v1` 中仍聚合保存 `accounts/providers` payload | 激活时把缺失的账号和 Provider payload 写入独立 synced key，索引中的 `accounts/providers` 清空。 |
 | 缺失 payload 的索引保留 | `accountNames/providerNames` 中列出了名称，但独立 key、聚合 payload、旧设置 payload 暂未同步到本机 | 激活时保留这些 names-only 条目并继续注册独立 key 到 `setKeysForSync`，避免另一台设备抢先清理新建账号。 |
-| 延迟到达的 cloud payload | 第二台机器先收到 `apple1` 的索引，随后才收到 `codex-account-switch.syncedCloudAccount.v1.apple1` payload | `apple1` 不会被自动删除；payload 到达后刷新列表即可显示为可用 cloud account。 |
+| 延迟到达的 cloud payload | 第二台机器先收到 `apple1` 的索引，随后才收到 `codex-account-switch.syncedCloudAccount.v1.apple1` payload | `apple1` 不会被自动删除；payload 到达前账号显示为 `Payload pending`，不显示为 invalid；payload 到达后刷新列表即可显示为可用 cloud account。 |
+| 迁移到 cloud 后 payload 不可读 | local account `apple1` 执行 Move Account To Cloud，写入独立 payload 后同窗口读回失败或 payload 缺失 | 命令失败并提示 cloud 写入无法验证；本地 `auth_apple1.json` 保留，不删除 local 副本。 |
 | 多来源 payload 融合 | 独立 key、旧聚合 payload、旧设置 payload 中存在同名账号或 Provider 的不同快照 | 自动选择有 `entryVersion` 的 payload；多个 payload 都有版本时选择版本号更大的 payload 并物化到独立 key。 |
 | 版本化本地快照恢复缺失云 payload | UI/marker 中持有带版本的账号 auth 快照，但当前 synced storage 中该账号 payload 缺失或版本更低 | 写入类操作使用版本更高的本地快照作为基线继续保存，避免把可恢复数据报成 `current version unknown` 冲突。 |
 | 独立条目优先 | 旧聚合 key 和独立 entry key 同时存在，且同名独立 entry 更新 | 迁移保留独立 entry，不用旧聚合 payload 覆盖较新的单条数据。 |

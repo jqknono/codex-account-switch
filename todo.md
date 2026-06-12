@@ -1,0 +1,1 @@
+- [x] 区分 cloud payload pending 与 invalid，并在迁移到 cloud 后校验 payload 可读再删除本地账号。

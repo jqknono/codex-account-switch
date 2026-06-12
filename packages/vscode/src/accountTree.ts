@@ -253,6 +253,8 @@ export class AccountTreeItem extends vscode.TreeItem {
 
     if (account.storageState === "locked") {
       parts.push("Storage locked");
+    } else if (account.storageState === "pending") {
+      parts.push("Payload pending");
     } else if (account.storageState === "invalid") {
       parts.push("Invalid saved auth");
     } else if (reloginMessage) {
@@ -281,6 +283,8 @@ export class AccountTreeItem extends vscode.TreeItem {
       this.iconPath = new vscode.ThemeIcon("sign-in", new vscode.ThemeColor("errorForeground"));
     } else if (account.storageState === "locked") {
       this.iconPath = new vscode.ThemeIcon("lock");
+    } else if (account.storageState === "pending") {
+      this.iconPath = new vscode.ThemeIcon("sync~spin", new vscode.ThemeColor("editorWarning.foreground"));
     } else if (account.storageState === "invalid") {
       this.iconPath = new vscode.ThemeIcon("warning", new vscode.ThemeColor("errorForeground"));
     } else if (isQuotaStateFailed(quotaState)) {
@@ -811,14 +815,20 @@ export class AccountTreeProvider implements vscode.TreeDataProvider<AccountTreeN
     if (account.storageState !== "ready") {
       const storageItem = new AccountDetailItem(
         "Storage",
-        account.storageState === "locked" ? "Locked" : "Invalid",
+        account.storageState === "locked"
+          ? "Locked"
+          : account.storageState === "pending"
+            ? "Payload pending"
+            : "Invalid",
         account.storageMessage,
         parent
       );
       storageItem.iconPath =
         account.storageState === "locked"
           ? new vscode.ThemeIcon("lock")
-          : new vscode.ThemeIcon("warning", new vscode.ThemeColor("errorForeground"));
+          : account.storageState === "pending"
+            ? new vscode.ThemeIcon("sync~spin", new vscode.ThemeColor("editorWarning.foreground"))
+            : new vscode.ThemeIcon("warning", new vscode.ThemeColor("errorForeground"));
       items.push(storageItem);
       return items;
     }

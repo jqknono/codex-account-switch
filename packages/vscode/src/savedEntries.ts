@@ -62,7 +62,7 @@ export interface SavedAccountInfo {
   publicEmail: string | null;
   auth: AuthFile | null;
   isCurrent: boolean;
-  storageState: "ready" | "locked" | "invalid";
+  storageState: "ready" | "locked" | "invalid" | "pending";
   storageMessage?: string;
   encrypted: boolean;
   syncVersion: number | null;
@@ -1165,7 +1165,12 @@ function getCloudAccounts(perf?: ReturnType<typeof startPerformanceLog>): SavedA
       publicEmail,
       auth: null,
       isCurrent: false,
-      storageState: result.status === "locked" ? "locked" as const : "invalid" as const,
+      storageState:
+        result.status === "locked"
+          ? "locked" as const
+          : result.status === "missing"
+            ? "pending" as const
+            : "invalid" as const,
       storageMessage:
         result.status === "missing"
           ? `Cloud account "${name}" is indexed for sync, but its payload has not synced to this device yet. Refresh after VS Code Settings Sync finishes.`
@@ -1487,6 +1492,50 @@ async function writeCloudAccountWithExpectedVersion(
     message: `Account "${name}" was saved to cloud storage`,
     syncVersion: nextMetadata.entryVersion,
     syncUpdatedAt: nextMetadata.updatedAt,
+  };
+}
+
+function verifyCloudAccountWrite(
+  name: string,
+  expected: SavedStorageSyncMetadata,
+  expectedAuth: AuthFile,
+): CloudMutationResult {
+  const result = readCloudAccount(name);
+  if (result.status !== "ok") {
+    const message =
+      result.status === "missing"
+        ? `Cloud account "${name}" could not be verified because its synced payload is missing. Local auth was kept.`
+        : "message" in result
+          ? `Cloud account "${name}" could not be verified: ${result.message}. Local auth was kept.`
+          : `Cloud account "${name}" could not be verified. Local auth was kept.`;
+    return { success: false, message };
+  }
+
+  if (getAccountIdentity(result.value) !== getAccountIdentity(expectedAuth)) {
+    return {
+      success: false,
+      message: `Cloud account "${name}" could not be verified because the saved identity changed. Local auth was kept.`,
+    };
+  }
+
+  const metadata = getSyncMetadata(getStoredCloudAccountRaw(name));
+  if (
+    expected.entryVersion != null
+    && (metadata.entryVersion == null || metadata.entryVersion < expected.entryVersion)
+  ) {
+    return {
+      success: false,
+      message:
+        `Cloud account "${name}" could not be verified: expected synced version ${expected.entryVersion}, `
+        + `but read version ${metadata.entryVersion}. Local auth was kept.`,
+    };
+  }
+
+  return {
+    success: true,
+    message: `Cloud account "${name}" was verified`,
+    syncVersion: metadata.entryVersion,
+    syncUpdatedAt: metadata.updatedAt,
   };
 }
 
@@ -2230,6 +2279,14 @@ export async function moveSavedAccountEntry(
     nextCloudMetadata = {
       entryVersion: writeResult.syncVersion ?? null,
       updatedAt: writeResult.syncUpdatedAt ?? null,
+    };
+    const verifyResult = verifyCloudAccountWrite(account.name, nextCloudMetadata, auth);
+    if (!verifyResult.success) {
+      return { success: false, message: verifyResult.message, conflict: verifyResult.conflict };
+    }
+    nextCloudMetadata = {
+      entryVersion: verifyResult.syncVersion ?? nextCloudMetadata.entryVersion,
+      updatedAt: verifyResult.syncUpdatedAt ?? nextCloudMetadata.updatedAt,
     };
     await removeLocalAccountFile(account.name);
   }

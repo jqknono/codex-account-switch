@@ -543,6 +543,12 @@ function createVscodeMock(options) {
         } else {
           globalStateValues.set(key, value);
         }
+        if (options.afterGlobalStateUpdate) {
+          await options.afterGlobalStateUpdate(key, value, {
+            globalStateValues,
+            syncedGlobalStateValues,
+          });
+        }
         if (options.captureSyncedGlobalStateWrites && this.syncedKeys?.includes(key)) {
           if (value === undefined) {
             syncedGlobalStateValues.delete(key);
@@ -1617,7 +1623,7 @@ test("delayed synced cloud account payload becomes available after refresh", asy
       let [appleItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
         .filter((item) => item.account.name === "apple1" && item.account.source === "cloud");
 
-      assert.equal(appleItem.account.storageState, "invalid");
+      assert.equal(appleItem.account.storageState, "pending");
       assert.match(appleItem.account.storageMessage, /payload has not synced/);
       assert.deepEqual(mocked.globalStateValues.get(SYNCED_CLOUD_STATE_KEY).accountNames, ["apple1"]);
       assert.deepEqual(mocked.globalState.syncedKeys, [
@@ -5599,6 +5605,85 @@ test("moveAccountToCloud syncs the payload together with the cloud index for ano
         assert.equal(cloudItem.account.storageState, "ready");
         assert.equal(cloudItem.account.meta.email, "apple1@example.com");
         assert.equal(cloudItem.account.meta.plan, "pro");
+
+        for (const subscription of context.subscriptions.reverse()) {
+          subscription?.dispose?.();
+        }
+        await waitForRefreshCoordinatorIdle(context);
+      })
+    );
+  } finally {
+    core.setSavedAuthPassphrase(null);
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
+test("moveAccountToCloud keeps local auth when cloud payload cannot be read back", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-account-migration-readback-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  const authDir = path.join(tempRoot, "saved-auth");
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(authDir, { recursive: true });
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  try {
+    core.setNamedAuthDir(authDir);
+    core.writeSavedAuthFile(path.join(authDir, "auth_apple1.json"), makeAuthFile("acct-apple1", {
+      email: "apple1@example.com",
+      plan: "pro",
+    }));
+    core.setNamedAuthDir(undefined);
+
+    const mocked = createVscodeMock({
+      authDirectory: authDir,
+      secretValues: {
+        [STORAGE_SECRET_KEY]: "readback-passphrase",
+      },
+      syncedStorage: {
+        version: 1,
+        accounts: {},
+        providers: {},
+      },
+      afterGlobalStateUpdate(key, value, state) {
+        if (key === getSyncedCloudAccountKey("apple1") && value !== undefined) {
+          state.globalStateValues.delete(key);
+        }
+      },
+    });
+
+    await withDisabledIntervals(() =>
+      withSuccessfulHttps(async () => {
+        const extension = loadExtensionWithMockedVscode(mocked.vscode);
+        const context = createExtensionContext(mocked);
+        await extension.activate(context);
+
+        const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
+        const [localItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
+          .filter((item) => item.account.name === "apple1" && item.account.source === "local");
+
+        await mocked.registeredCommands.get("codex-account-switch.moveAccountToCloud")(localItem);
+
+        assert.equal(fs.existsSync(path.join(authDir, "auth_apple1.json")), true);
+        assert.equal(mocked.globalStateValues.has(getSyncedCloudAccountKey("apple1")), false);
+        assert.match(mocked.errorMessages.at(-1).message, /could not be verified/i);
 
         for (const subscription of context.subscriptions.reverse()) {
           subscription?.dispose?.();
