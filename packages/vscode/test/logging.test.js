@@ -19,6 +19,7 @@ function createVscodeMock() {
   const registeredCommands = new Map();
   const configurationListeners = new Set();
   const createdChannels = [];
+  const globalStoragePath = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-logging-global-storage-"));
   const globalStateValues = new Map([
     [SYNCED_CLOUD_STATE_KEY, {
       version: 1,
@@ -219,6 +220,7 @@ function createVscodeMock() {
     registeredCommands,
     createdChannels,
     config,
+    globalStoragePath,
     secrets: {
       async get() {
         return undefined;
@@ -409,6 +411,9 @@ function createExtensionContext(mocked) {
     subscriptions: [],
     secrets: mocked.secrets,
     globalState: mocked.globalState,
+    globalStorageUri: {
+      fsPath: mocked.globalStoragePath,
+    },
   };
 }
 

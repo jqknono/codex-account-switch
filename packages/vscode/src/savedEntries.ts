@@ -1,4 +1,5 @@
 import * as fs from "fs";
+import * as path from "path";
 import * as vscode from "vscode";
 import {
   AccountMeta,
@@ -53,6 +54,8 @@ const SYNCED_CLOUD_STATE_KEY = "codex-account-switch.syncedCloudState.v1";
 const SYNCED_CLOUD_ACCOUNT_KEY_PREFIX = "codex-account-switch.syncedCloudAccount.v1.";
 const SYNCED_CLOUD_PROVIDER_KEY_PREFIX = "codex-account-switch.syncedCloudProvider.v1.";
 const SYNCED_CLOUD_MIGRATION_KEY = "codex-account-switch.syncedCloudStateMigration.v1";
+const PROTECTED_CLOUD_BACKUP_VERSION = 1;
+const PROTECTED_CLOUD_ACCOUNT_BACKUP_DIR = path.join("cloud-account-recovery", "accounts");
 
 export interface SavedAccountInfo {
   id: string;
@@ -67,6 +70,7 @@ export interface SavedAccountInfo {
   encrypted: boolean;
   syncVersion: number | null;
   syncUpdatedAt: string | null;
+  recoveryAvailable?: boolean;
 }
 
 export interface SavedProviderInfo {
@@ -129,6 +133,17 @@ interface SyncCurrentSelectionResult {
   healedMarker?: HealedCloudMarker;
 }
 
+interface ProtectedCloudAccountBackup {
+  version: 1;
+  kind: "cloud_account_payload_backup";
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+  syncVersion: number | null;
+  syncUpdatedAt: string | null;
+  payload: Record<string, unknown>;
+}
+
 export type SavedSelection =
   | { kind: "account"; name: string; source: StorageSource; meta: AccountMeta | null }
   | { kind: "provider"; name: string; source: StorageSource }
@@ -185,6 +200,7 @@ const CURRENT_SELECTION_KEY = "codex-account-switch.currentSavedSelection";
 const DEFAULT_QUOTA_CACHE_INTERVAL_MS = 30 * 1000;
 const AUTH_UPDATED_AT_FIELD = "codex_account_switch_auth_updated_at";
 const inflightCloudQuotaQueries = new Map<string, Promise<QuotaQueryResult>>();
+const loggedMissingCloudAccountPayloads = new Set<string>();
 const EMPTY_SYNC_METADATA: SavedStorageSyncMetadata = {
   entryVersion: null,
   updatedAt: null,
@@ -510,6 +526,110 @@ function requireContext(): vscode.ExtensionContext {
     throw new Error("Saved entry context is not initialized.");
   }
   return extensionContext;
+}
+
+function getProtectedCloudAccountBackupPath(name: string): string {
+  const context = requireContext() as vscode.ExtensionContext & { globalStoragePath?: string };
+  const globalStoragePath = context.globalStorageUri?.fsPath ?? context.globalStoragePath;
+  if (!globalStoragePath) {
+    throw new Error("Extension global storage path is not available for protected cloud account backups.");
+  }
+  return path.join(
+    globalStoragePath,
+    PROTECTED_CLOUD_ACCOUNT_BACKUP_DIR,
+    `${encodeURIComponent(name)}.json`,
+  );
+}
+
+function parseProtectedCloudAccountBackup(name: string, raw: unknown): ProtectedCloudAccountBackup | null {
+  if (!isRecord(raw) || raw.version !== PROTECTED_CLOUD_BACKUP_VERSION || raw.kind !== "cloud_account_payload_backup") {
+    return null;
+  }
+  if (raw.name !== name || !isRecord(raw.payload)) {
+    return null;
+  }
+  return {
+    version: PROTECTED_CLOUD_BACKUP_VERSION,
+    kind: "cloud_account_payload_backup",
+    name,
+    createdAt: typeof raw.createdAt === "string" ? raw.createdAt : "",
+    updatedAt: typeof raw.updatedAt === "string" ? raw.updatedAt : "",
+    syncVersion: Number.isInteger(raw.syncVersion) ? raw.syncVersion as number : null,
+    syncUpdatedAt: typeof raw.syncUpdatedAt === "string" ? raw.syncUpdatedAt : null,
+    payload: clone(raw.payload),
+  };
+}
+
+function readProtectedCloudAccountBackup(name: string): ProtectedCloudAccountBackup | null {
+  const backupPath = getProtectedCloudAccountBackupPath(name);
+  if (!fs.existsSync(backupPath)) {
+    return null;
+  }
+  try {
+    return parseProtectedCloudAccountBackup(name, JSON.parse(fs.readFileSync(backupPath, "utf-8")));
+  } catch (error) {
+    logWarn(LOG_PREFIX, "cloud-account-protected-backup-read-failed", {
+      account: name,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+}
+
+function hasProtectedCloudAccountBackup(name: string): boolean {
+  return readProtectedCloudAccountBackup(name) !== null;
+}
+
+function writeProtectedCloudAccountBackup(
+  name: string,
+  payload: Record<string, unknown>,
+  metadata: SavedStorageSyncMetadata,
+): void {
+  const backupPath = getProtectedCloudAccountBackupPath(name);
+  const now = new Date().toISOString();
+  const existing = readProtectedCloudAccountBackup(name);
+  const backup: ProtectedCloudAccountBackup = {
+    version: PROTECTED_CLOUD_BACKUP_VERSION,
+    kind: "cloud_account_payload_backup",
+    name,
+    createdAt: existing?.createdAt || now,
+    updatedAt: now,
+    syncVersion: metadata.entryVersion,
+    syncUpdatedAt: metadata.updatedAt,
+    payload: clone(payload),
+  };
+  fs.mkdirSync(path.dirname(backupPath), { recursive: true });
+  const tempPath = `${backupPath}.${process.pid}.tmp`;
+  fs.writeFileSync(tempPath, JSON.stringify(backup, null, 2), "utf-8");
+  fs.renameSync(tempPath, backupPath);
+  logInfo(LOG_PREFIX, "cloud-account-protected-backup-written", {
+    account: name,
+    syncVersion: metadata.entryVersion,
+    syncUpdatedAt: metadata.updatedAt,
+  });
+}
+
+function removeProtectedCloudAccountBackup(name: string): void {
+  const backupPath = getProtectedCloudAccountBackupPath(name);
+  if (!fs.existsSync(backupPath)) {
+    return;
+  }
+  fs.rmSync(backupPath, { force: true });
+  logInfo(LOG_PREFIX, "cloud-account-protected-backup-removed", {
+    account: name,
+  });
+}
+
+function renameProtectedCloudAccountBackup(oldName: string, newName: string): void {
+  const backup = readProtectedCloudAccountBackup(oldName);
+  if (!backup) {
+    return;
+  }
+  writeProtectedCloudAccountBackup(newName, backup.payload, {
+    entryVersion: backup.syncVersion,
+    updatedAt: backup.syncUpdatedAt,
+  });
+  removeProtectedCloudAccountBackup(oldName);
 }
 
 function getMarker(): CurrentSelectionMarker | null {
@@ -892,6 +1012,7 @@ async function removeSyncedCloudAccount(name: string): Promise<void> {
   storage.accountNames = storage.accountNames.filter((accountName) => accountName !== name);
   await requireContext().globalState.update(getSyncedCloudAccountKey(name), undefined);
   await writeSyncedCloudStateIndex(storage);
+  removeProtectedCloudAccountBackup(name);
 }
 
 async function removeSyncedCloudProvider(name: string): Promise<void> {
@@ -914,6 +1035,7 @@ async function renameSyncedCloudAccount(oldName: string, newName: string, value:
   await requireContext().globalState.update(getSyncedCloudAccountKey(oldName), undefined);
   await requireContext().globalState.update(getSyncedCloudAccountKey(newName), clone(value));
   await writeSyncedCloudStateIndex(storage);
+  renameProtectedCloudAccountBackup(oldName, newName);
 }
 
 async function clearLegacySyncedStorage(): Promise<void> {
@@ -1133,6 +1255,7 @@ function getCloudAccounts(perf?: ReturnType<typeof startPerformanceLog>): SavedA
     const publicEmail = getPublicEmail(raw);
     const result = readCloudAccount(name);
     if (result.status === "ok") {
+      loggedMissingCloudAccountPayloads.delete(name);
       const meta = extractMeta(result.value);
       if (!publicEmail && meta.email) {
         void updateCloudAccountPublicEmail(name, raw, meta.email).catch((error) => {
@@ -1157,6 +1280,15 @@ function getCloudAccounts(perf?: ReturnType<typeof startPerformanceLog>): SavedA
       };
     }
 
+    const recoveryAvailable = result.status === "missing" && hasProtectedCloudAccountBackup(name);
+    if (result.status === "missing" && !loggedMissingCloudAccountPayloads.has(name)) {
+      loggedMissingCloudAccountPayloads.add(name);
+      logWarn(LOG_PREFIX, "cloud-account-payload-missing", {
+        account: name,
+        recoveryAvailable,
+      });
+    }
+
     return {
       id: toId("cloud", name),
       name,
@@ -1173,13 +1305,16 @@ function getCloudAccounts(perf?: ReturnType<typeof startPerformanceLog>): SavedA
             : "invalid" as const,
       storageMessage:
         result.status === "missing"
-          ? `Cloud account "${name}" is indexed for sync, but its payload has not synced to this device yet. Refresh after VS Code Settings Sync finishes.`
+          ? recoveryAvailable
+            ? `Cloud account "${name}" is indexed for sync, but its payload is missing. A protected local backup is available; restore it explicitly from the account context menu.`
+            : `Cloud account "${name}" is indexed for sync, but its payload has not synced to this device yet. Refresh after VS Code Settings Sync finishes.`
           : "message" in result
             ? result.message
             : undefined,
       encrypted: result.encrypted,
       syncVersion: syncMetadata.entryVersion,
       syncUpdatedAt: syncMetadata.updatedAt,
+      recoveryAvailable,
     };
   });
   perf?.mark("deserialize-cloud-accounts", {
@@ -1486,6 +1621,18 @@ async function writeCloudAccountWithExpectedVersion(
     requireEncryption: true,
   });
   const nextAccount = applySyncMetadata(withPublicEmail(serialized, extractMeta(authToWrite).email), nextMetadata);
+  try {
+    writeProtectedCloudAccountBackup(name, nextAccount, nextMetadata);
+  } catch (error) {
+    logWarn(LOG_PREFIX, "cloud-account-protected-backup-write-failed", {
+      account: name,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return {
+      success: false,
+      message: `Account "${name}" could not be protected locally before cloud save: ${error instanceof Error ? error.message : String(error)}.`,
+    };
+  }
   await writeSyncedCloudAccount(name, nextAccount);
   return {
     success: true,
@@ -1536,6 +1683,77 @@ function verifyCloudAccountWrite(
     message: `Cloud account "${name}" was verified`,
     syncVersion: metadata.entryVersion,
     syncUpdatedAt: metadata.updatedAt,
+  };
+}
+
+export async function restoreCloudAccountPayloadFromProtectedBackup(
+  account: SavedAccountInfo,
+): Promise<{ success: boolean; message: string; conflict?: CloudSyncConflict }> {
+  if (account.source !== "cloud") {
+    return { success: false, message: `Account "${account.name}" is not stored in cloud.` };
+  }
+
+  const storage = readSyncedStorage();
+  if (storage.accounts[account.name] !== undefined) {
+    return { success: false, message: `Cloud account "${account.name}" already has a synced payload. Refresh the list before restoring.` };
+  }
+
+  const backup = readProtectedCloudAccountBackup(account.name);
+  if (!backup) {
+    logWarn(LOG_PREFIX, "cloud-account-protected-backup-missing", {
+      account: account.name,
+    });
+    return { success: false, message: `Cloud account "${account.name}" has no protected local backup to restore.` };
+  }
+
+  requireCloudPassphrase();
+  const backupRead = deserializeSavedValue<AuthFile>(backup.payload, "saved_auth");
+  if (backupRead.status !== "ok") {
+    const message = "message" in backupRead
+      ? backupRead.message
+      : "protected backup could not be read";
+    logWarn(LOG_PREFIX, "cloud-account-protected-backup-restore-blocked", {
+      account: account.name,
+      status: backupRead.status,
+    });
+    return {
+      success: false,
+      message: `Cloud account "${account.name}" could not be restored from its protected backup: ${message}.`,
+    };
+  }
+
+  await writeSyncedCloudAccount(account.name, backup.payload);
+  const restored = readCloudAccount(account.name);
+  if (restored.status !== "ok") {
+    const message = "message" in restored
+      ? restored.message
+      : "restored payload could not be read";
+    logWarn(LOG_PREFIX, "cloud-account-protected-backup-restore-unverified", {
+      account: account.name,
+      status: restored.status,
+    });
+    return {
+      success: false,
+      message: `Cloud account "${account.name}" was restored from its protected backup, but verification failed: ${message}.`,
+    };
+  }
+  if (getAccountIdentity(restored.value) !== getAccountIdentity(backupRead.value)) {
+    return {
+      success: false,
+      message: `Cloud account "${account.name}" was restored from its protected backup, but verification failed because the saved identity changed.`,
+    };
+  }
+
+  loggedMissingCloudAccountPayloads.delete(account.name);
+  const metadata = getSyncMetadata(backup.payload);
+  logInfo(LOG_PREFIX, "cloud-account-protected-backup-restored", {
+    account: account.name,
+    syncVersion: metadata.entryVersion,
+    syncUpdatedAt: metadata.updatedAt,
+  });
+  return {
+    success: true,
+    message: `Restored cloud account "${account.name}" from its protected local backup.`,
   };
 }
 
@@ -2272,6 +2490,24 @@ export async function moveSavedAccountEntry(
   } else {
     requireCloudPassphrase();
     const auth = markAuthUpdatedNow(account.auth);
+    const initialProtectedPayload = withPublicEmail(
+      serializeSavedValue("saved_auth", auth as Record<string, unknown>, {
+        requireEncryption: true,
+      }),
+      extractMeta(auth).email,
+    );
+    try {
+      writeProtectedCloudAccountBackup(account.name, initialProtectedPayload, EMPTY_SYNC_METADATA);
+    } catch (error) {
+      logWarn(LOG_PREFIX, "cloud-account-protected-backup-write-failed", {
+        account: account.name,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return {
+        success: false,
+        message: `Cloud account "${account.name}" could not be protected locally before upload: ${error instanceof Error ? error.message : String(error)}. Local auth was kept.`,
+      };
+    }
     const writeResult = await writeCloudAccountWithExpectedVersion(account.name, auth);
     if (!writeResult.success) {
       return { success: false, message: writeResult.message, conflict: writeResult.conflict };

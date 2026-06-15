@@ -165,6 +165,10 @@ test("storage migration commands are contributed", () => {
     "Move Account To Cloud"
   );
   assert.equal(
+    byId.get("codex-account-switch.restoreCloudAccountPayload")?.title,
+    "Restore Cloud Payload From Protected Backup"
+  );
+  assert.equal(
     byId.get("codex-account-switch.moveAccountToLocal")?.title,
     "Move Account To Local"
   );
@@ -260,6 +264,24 @@ test("cloud account context menu exposes move account to local", () => {
   );
 
   assert.equal(moveAccountToLocal?.group, "context@4");
+});
+
+test("recoverable cloud account context menu exposes explicit restore", () => {
+  const contextMenus = manifest.contributes.menus["view/item/context"] ?? [];
+  const restore = contextMenus.find(
+    (item) =>
+      item.command === "codex-account-switch.restoreCloudAccountPayload"
+      && item.when === "view == codexAccountSwitchAccounts && viewItem == accountCloudRecoverable"
+  );
+  const remove = contextMenus.find(
+    (item) =>
+      item.command === "codex-account-switch.removeAccount"
+      && item.when ===
+        "view == codexAccountSwitchAccounts && (viewItem == accountLocal || viewItem == accountCloud || viewItem == accountCloudRecoverable)"
+  );
+
+  assert.equal(restore?.group, "context@1");
+  assert.equal(remove?.group, "context@3");
 });
 
 test("account group context menu exposes refresh quota for local and cloud groups", () => {

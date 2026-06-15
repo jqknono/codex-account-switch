@@ -275,6 +275,8 @@ export class AccountTreeItem extends vscode.TreeItem {
     this.contextValue =
       account.source === "cloud" && account.storageState === "locked"
         ? "accountCloudLocked"
+        : account.source === "cloud" && account.recoveryAvailable
+          ? "accountCloudRecoverable"
         : account.source === "cloud"
           ? "accountCloud"
           : "accountLocal";
@@ -284,7 +286,9 @@ export class AccountTreeItem extends vscode.TreeItem {
     } else if (account.storageState === "locked") {
       this.iconPath = new vscode.ThemeIcon("lock");
     } else if (account.storageState === "pending") {
-      this.iconPath = new vscode.ThemeIcon("sync~spin", new vscode.ThemeColor("editorWarning.foreground"));
+      this.iconPath = account.recoveryAvailable
+        ? new vscode.ThemeIcon("cloud-download", new vscode.ThemeColor("editorWarning.foreground"))
+        : new vscode.ThemeIcon("sync~spin", new vscode.ThemeColor("editorWarning.foreground"));
     } else if (account.storageState === "invalid") {
       this.iconPath = new vscode.ThemeIcon("warning", new vscode.ThemeColor("errorForeground"));
     } else if (isQuotaStateFailed(quotaState)) {

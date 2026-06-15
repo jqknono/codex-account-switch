@@ -1,1 +1,2 @@
 - [x] 区分 cloud payload pending 与 invalid，并在迁移到 cloud 后校验 payload 可读再删除本地账号。
+- [x] 为 cloud 账号迁移增加加密保护副本和显式恢复命令，修复同步合并导致 `bob1990` payload 丢失的问题。

@@ -40,6 +40,7 @@ import {
   refreshSavedAccountEntry,
   renameSavedAccountEntry,
   removeSavedAccountEntry,
+  restoreCloudAccountPayloadFromProtectedBackup,
   restoreSavedCurrentSelectionMarker,
   saveAuthAsAccount,
   saveCurrentAuthAsAccount,
@@ -2185,6 +2186,66 @@ export function registerCommands(
           return;
         }
         logCommandInfo("move-account-to-cloud", "succeeded", {
+          account: account.name,
+        });
+        vscode.window.showInformationMessage(`✓ ${result.message}`);
+        refreshAll(refreshCoordinator, [`cloud:${account.name}`]);
+      });
+    }),
+
+    vscode.commands.registerCommand("codex-account-switch.restoreCloudAccountPayload", async (item?: AccountTreeItem) => {
+      await runTimedCommand("restoreCloudAccountPayload", async (perf) => {
+        const account = await pickSavedAccount(item, "Select a cloud account to restore from protected backup");
+        if (!account) return;
+        perf.mark("pick-saved-account", {
+          account: account.name,
+          source: account.source,
+          recoveryAvailable: account.recoveryAvailable ?? false,
+        });
+        logCommandInfo("restore-cloud-account-payload", "started", {
+          account: account.name,
+          source: account.source,
+          recoveryAvailable: account.recoveryAvailable ?? false,
+        });
+        if (account.source !== "cloud") {
+          const message = `Account "${account.name}" is not stored in cloud.`;
+          logCommandWarn("restore-cloud-account-payload", "failed", {
+            account: account.name,
+            message,
+          });
+          vscode.window.showErrorMessage(message);
+          return;
+        }
+        if (!account.recoveryAvailable) {
+          const message = `Cloud account "${account.name}" has no protected local backup to restore.`;
+          logCommandWarn("restore-cloud-account-payload", "failed", {
+            account: account.name,
+            message,
+          });
+          vscode.window.showErrorMessage(message);
+          return;
+        }
+        if (!(await ensureSavedAuthPassphrase(context))) {
+          logCommandWarn("restore-cloud-account-payload", "missing-storage-password", {
+            account: account.name,
+          });
+          vscode.window.showWarningMessage("Cloud storage requires a local storage password.");
+          return;
+        }
+        perf.mark("ensure-saved-auth-passphrase");
+        const result = await restoreCloudAccountPayloadFromProtectedBackup(account);
+        perf.mark("restore-cloud-account-payload", {
+          success: result.success,
+        });
+        if (!result.success) {
+          logCommandWarn("restore-cloud-account-payload", "failed", {
+            account: account.name,
+            message: result.message,
+          });
+          vscode.window.showErrorMessage(result.message);
+          return;
+        }
+        logCommandInfo("restore-cloud-account-payload", "succeeded", {
           account: account.name,
         });
         vscode.window.showInformationMessage(`✓ ${result.message}`);

@@ -2,7 +2,7 @@
   "name": "codex-account-switch-vscode",
   "displayName": "Codex Account Switch",
   "description": "Codex Account Switch - VS Code extension",
-  "version": "1.8.12",
+  "version": "1.8.13",
   "publisher": "techfetch-dev",
   "repository": {
     "type": "git",
@@ -228,6 +228,12 @@
         "icon": "$(cloud-upload)"
       },
       {
+        "command": "codex-account-switch.restoreCloudAccountPayload",
+        "title": "Restore Cloud Payload From Protected Backup",
+        "category": "Codex Account Switch",
+        "icon": "$(cloud-download)"
+      },
+      {
         "command": "codex-account-switch.moveAccountToLocal",
         "title": "Move Account To Local",
         "category": "Codex Account Switch",
@@ -344,13 +350,18 @@
         },
         {
           "command": "codex-account-switch.removeAccount",
-          "when": "view == codexAccountSwitchAccounts && (viewItem == accountLocal || viewItem == accountCloud)",
+          "when": "view == codexAccountSwitchAccounts && (viewItem == accountLocal || viewItem == accountCloud || viewItem == accountCloudRecoverable)",
           "group": "context@3"
         },
         {
           "command": "codex-account-switch.moveAccountToCloud",
           "when": "view == codexAccountSwitchAccounts && viewItem == accountLocal",
           "group": "context@4"
+        },
+        {
+          "command": "codex-account-switch.restoreCloudAccountPayload",
+          "when": "view == codexAccountSwitchAccounts && viewItem == accountCloudRecoverable",
+          "group": "context@1"
         },
         {
           "command": "codex-account-switch.moveAccountToLocal",
