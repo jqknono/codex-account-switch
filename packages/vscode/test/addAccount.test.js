@@ -5947,6 +5947,103 @@ test("restoreCloudAccountPayload restores an index-only cloud account from prote
   });
 });
 
+test("restoreCloudAccountPayload lists orphan protected backup when cloud index is missing", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-account-orphan-payload-restore-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  const authDir = path.join(tempRoot, "saved-auth");
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(authDir, { recursive: true });
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  try {
+    core.setNamedAuthDir(authDir);
+    core.writeSavedAuthFile(path.join(authDir, "auth_fanfan.json"), makeAuthFile("acct-fanfan", {
+      email: "fanfan@example.com",
+      plan: "pro",
+    }));
+    core.setNamedAuthDir(undefined);
+
+    const mocked = createVscodeMock({
+      authDirectory: authDir,
+      secretValues: {
+        [STORAGE_SECRET_KEY]: "restore-passphrase",
+      },
+      syncedStorage: {
+        version: 1,
+        accounts: {},
+        providers: {},
+      },
+    });
+
+    await withDisabledIntervals(() =>
+      withSuccessfulHttps(async () => {
+        const extension = loadExtensionWithMockedVscode(mocked.vscode);
+        const context = createExtensionContext(mocked);
+        await extension.activate(context);
+
+        const accountTreeView = mocked.treeViews.get("codexAccountSwitchAccounts");
+        const [localItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
+          .filter((item) => item.account.name === "fanfan" && item.account.source === "local");
+
+        await mocked.registeredCommands.get("codex-account-switch.moveAccountToCloud")(localItem);
+
+        assert.equal(fs.existsSync(path.join(authDir, "auth_fanfan.json")), false);
+        assert.equal(fs.existsSync(getProtectedCloudAccountBackupPath(mocked, "fanfan")), true);
+
+        mocked.globalStateValues.delete(getSyncedCloudAccountKey("fanfan"));
+        const cloudState = mocked.globalStateValues.get(SYNCED_CLOUD_STATE_KEY);
+        cloudState.accountNames = cloudState.accountNames.filter((name) => name !== "fanfan");
+        await mocked.registeredCommands.get("codex-account-switch.refreshList")();
+
+        let [cloudItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
+          .filter((item) => item.account.name === "fanfan" && item.account.source === "cloud");
+
+        assert.equal(cloudItem.account.storageState, "pending");
+        assert.equal(cloudItem.account.publicEmail, "fanfan@example.com");
+        assert.equal(cloudItem.account.recoveryAvailable, true);
+        assert.equal(cloudItem.contextValue, "accountCloudRecoverable");
+        assert.match(cloudItem.account.storageMessage, /synced index and payload are missing/i);
+
+        await mocked.registeredCommands.get("codex-account-switch.restoreCloudAccountPayload")(cloudItem);
+
+        assert.equal(typeof mocked.globalStateValues.get(getSyncedCloudAccountKey("fanfan"))?.ciphertext, "string");
+        assert.deepEqual(mocked.globalStateValues.get(SYNCED_CLOUD_STATE_KEY).accountNames, ["fanfan"]);
+        [cloudItem] = getAccountTreeItems(accountTreeView.treeDataProvider)
+          .filter((item) => item.account.name === "fanfan" && item.account.source === "cloud");
+        assert.equal(cloudItem.account.storageState, "ready");
+        assert.equal(cloudItem.account.meta.email, "fanfan@example.com");
+        assert.equal(cloudItem.account.meta.plan, "pro");
+
+        for (const subscription of context.subscriptions.reverse()) {
+          subscription?.dispose?.();
+        }
+        await waitForRefreshCoordinatorIdle(context);
+      })
+    );
+  } finally {
+    core.setSavedAuthPassphrase(null);
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
 test("moveAccountToCloud keeps local auth when cloud payload cannot be read back", async (t) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-account-migration-readback-"));
   const codexHome = path.join(tempRoot, ".codex");

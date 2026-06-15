@@ -8,5 +8,6 @@
 | 迁移到 cloud 后 payload 不可读 | local account `apple1` 执行 Move Account To Cloud，写入独立 payload 后同窗口读回失败或 payload 缺失 | 命令失败并提示 cloud 写入无法验证；本地 `auth_apple1.json` 保留，不删除 local 副本。 |
 | 正常迁移到 cloud | local account `apple1` 执行 Move Account To Cloud，独立 payload 可读回，保护副本可写入 | 删除本地 `auth_apple1.json`，cloud account 进入 ready 状态，索引和独立 payload 一起参与 Settings Sync，并保留加密保护副本。 |
 | 同步合并后 payload 丢失 | `bob1990` 已迁移到 cloud 且有保护副本，随后 VS Code extension state 合并为 index-only：`accountNames` 包含 `bob1990`，但 `codex-account-switch.syncedCloudAccount.v1.bob1990` 缺失 | `bob1990` 显示 `Payload pending` 和可恢复状态，不自动写回 payload，不自动切换到本地。 |
+| 同步合并后 index 和 payload 都丢失 | `fanfan` 已迁移到 cloud 且有保护副本，随后 VS Code extension state 合并后 `accountNames` 和 `codex-account-switch.syncedCloudAccount.v1.fanfan` 都缺失 | `fanfan` 仍从保护副本目录显示为 `Payload pending` 和可恢复状态，不自动写回 payload；用户可执行显式恢复。 |
 | 显式恢复保护副本 | 对可恢复的 `bob1990` 执行 Restore Cloud Payload From Protected Backup | 扩展把保护副本中的加密 payload 写回独立 cloud key，通过普通 cloud 读取路径验证后，`bob1990` 回到 ready 状态。 |
 | 清理保护副本 | cloud account 被删除，或执行 Move Account To Local 成功 | 对应 `globalStorage/cloud-account-recovery/accounts/{name}.json` 被删除。 |

@@ -541,6 +541,15 @@ function getProtectedCloudAccountBackupPath(name: string): string {
   );
 }
 
+function getProtectedCloudAccountBackupDir(): string {
+  const context = requireContext() as vscode.ExtensionContext & { globalStoragePath?: string };
+  const globalStoragePath = context.globalStorageUri?.fsPath ?? context.globalStoragePath;
+  if (!globalStoragePath) {
+    throw new Error("Extension global storage path is not available for protected cloud account backups.");
+  }
+  return path.join(globalStoragePath, PROTECTED_CLOUD_ACCOUNT_BACKUP_DIR);
+}
+
 function parseProtectedCloudAccountBackup(name: string, raw: unknown): ProtectedCloudAccountBackup | null {
   if (!isRecord(raw) || raw.version !== PROTECTED_CLOUD_BACKUP_VERSION || raw.kind !== "cloud_account_payload_backup") {
     return null;
@@ -576,8 +585,36 @@ function readProtectedCloudAccountBackup(name: string): ProtectedCloudAccountBac
   }
 }
 
-function hasProtectedCloudAccountBackup(name: string): boolean {
-  return readProtectedCloudAccountBackup(name) !== null;
+function listProtectedCloudAccountBackupNames(): string[] {
+  const backupDir = getProtectedCloudAccountBackupDir();
+  if (!fs.existsSync(backupDir)) {
+    return [];
+  }
+
+  try {
+    const names: string[] = [];
+    for (const entry of fs.readdirSync(backupDir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".json")) {
+        continue;
+      }
+      const encodedName = entry.name.slice(0, -".json".length);
+      let name: string;
+      try {
+        name = decodeURIComponent(encodedName);
+      } catch {
+        continue;
+      }
+      if (readProtectedCloudAccountBackup(name)) {
+        names.push(name);
+      }
+    }
+    return normalizeNames(names).sort();
+  } catch (error) {
+    logWarn(LOG_PREFIX, "cloud-account-protected-backup-list-failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return [];
+  }
 }
 
 function writeProtectedCloudAccountBackup(
@@ -1246,14 +1283,29 @@ function getLocalAccounts(perf?: ReturnType<typeof startPerformanceLog>): SavedA
 
 function getCloudAccounts(perf?: ReturnType<typeof startPerformanceLog>): SavedAccountInfo[] {
   const storage = readSyncedStorage();
+  const protectedBackupNames = listProtectedCloudAccountBackupNames();
+  const accountNames = normalizeNames([
+    ...storage.accountNames,
+    ...protectedBackupNames,
+  ]).sort();
   perf?.mark("read-synced-storage", {
     cloudAccountCount: storage.accountNames.length,
+    protectedBackupCount: protectedBackupNames.length,
+    listedCloudAccountCount: accountNames.length,
   });
-  const accounts = storage.accountNames.map((name) => {
+  const accounts = accountNames.map((name) => {
     const raw = storage.accounts[name];
-    const syncMetadata = getSyncMetadata(raw);
-    const publicEmail = getPublicEmail(raw);
+    const isIndexed = storage.accountNames.includes(name);
     const result = readCloudAccount(name);
+    const backup = result.status === "missing" ? readProtectedCloudAccountBackup(name) : null;
+    const syncMetadata = raw === undefined && backup
+      ? {
+          entryVersion: backup.syncVersion,
+          updatedAt: backup.syncUpdatedAt,
+          lastWriterAction: null,
+        }
+      : getSyncMetadata(raw);
+    const publicEmail = getPublicEmail(raw) ?? getPublicEmail(backup?.payload);
     if (result.status === "ok") {
       loggedMissingCloudAccountPayloads.delete(name);
       const meta = extractMeta(result.value);
@@ -1280,12 +1332,13 @@ function getCloudAccounts(perf?: ReturnType<typeof startPerformanceLog>): SavedA
       };
     }
 
-    const recoveryAvailable = result.status === "missing" && hasProtectedCloudAccountBackup(name);
+    const recoveryAvailable = backup !== null;
     if (result.status === "missing" && !loggedMissingCloudAccountPayloads.has(name)) {
       loggedMissingCloudAccountPayloads.add(name);
       logWarn(LOG_PREFIX, "cloud-account-payload-missing", {
         account: name,
         recoveryAvailable,
+        indexed: isIndexed,
       });
     }
 
@@ -1306,7 +1359,9 @@ function getCloudAccounts(perf?: ReturnType<typeof startPerformanceLog>): SavedA
       storageMessage:
         result.status === "missing"
           ? recoveryAvailable
-            ? `Cloud account "${name}" is indexed for sync, but its payload is missing. A protected local backup is available; restore it explicitly from the account context menu.`
+            ? isIndexed
+              ? `Cloud account "${name}" is indexed for sync, but its payload is missing. A protected local backup is available; restore it explicitly from the account context menu.`
+              : `Cloud account "${name}" has a protected local backup, but its synced index and payload are missing. Restore it explicitly from the account context menu.`
             : `Cloud account "${name}" is indexed for sync, but its payload has not synced to this device yet. Refresh after VS Code Settings Sync finishes.`
           : "message" in result
             ? result.message

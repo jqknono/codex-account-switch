@@ -38,20 +38,24 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-  A[Cloud index contains account name] --> B{Per-account payload exists?}
-  B -->|yes| C[Show ready/locked/invalid by deserialize result]
-  B -->|no| D{Protected local copy exists?}
-  D -->|yes| E[Show Payload pending with recovery available]
-  D -->|no| F[Show Payload pending and wait for Settings Sync]
-  E --> G[User runs Restore Cloud Payload From Protected Backup]
-  G --> H[Write encrypted payload back to per-account key]
-  H --> I[Verify through normal cloud read path]
+  A[Build cloud account list] --> B[Merge cloud index names]
+  A --> C[Merge protected backup names]
+  B --> D{Per-account payload exists?}
+  C --> D
+  D -->|yes| E[Show ready/locked/invalid by deserialize result]
+  D -->|no| F{Protected local copy exists?}
+  F -->|yes| G[Show Payload pending with recovery available]
+  F -->|no| H[Show Payload pending and wait for Settings Sync]
+  G --> I[User runs Restore Cloud Payload From Protected Backup]
+  I --> J[Write encrypted payload back to per-account key and index]
+  J --> K[Verify through normal cloud read path]
 ```
 
 | 规则 | 行为 |
 | --- | --- |
 | 索引先到、payload 未到 | 账号显示 `Payload pending`，保留独立 key 注册，等待 Settings Sync 后续同步。 |
 | 索引保留、payload 被同步合并移除、保护副本存在 | 账号显示 `Payload pending` 且标记可恢复；只有用户显式执行恢复命令时才写回 cloud payload。 |
+| 索引和 payload 都被同步合并移除、保护副本存在 | 账号仍从保护副本目录显示为 `Payload pending` 且标记可恢复；只有用户显式执行恢复命令时才写回 cloud index 和 payload。 |
 | payload 结构错误或无法解密 | 账号显示 invalid 或 locked，由具体反序列化结果决定。 |
 | 直接新增 cloud account | 写入独立 payload 后必须通过普通 cloud 读取路径读回验证；验证失败时不把保存结果当作成功，并保留保护副本供显式恢复。 |
 | local 迁移到 cloud | 只有保护副本写入成功且 cloud payload 读回成功后，才删除本地 `auth_{name}.json`。 |
