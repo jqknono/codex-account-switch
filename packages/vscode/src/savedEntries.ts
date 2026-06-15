@@ -2063,13 +2063,21 @@ export async function saveAuthAsAccount(
   if (!writeResult.success) {
     return { success: false, message: writeResult.message, meta, conflict: writeResult.conflict };
   }
+  const verifyResult = verifyCloudAccountWrite(name, {
+    entryVersion: writeResult.syncVersion ?? null,
+    updatedAt: writeResult.syncUpdatedAt ?? null,
+    lastWriterAction: null,
+  }, authToSave);
+  if (!verifyResult.success) {
+    return { success: false, message: verifyResult.message, meta, conflict: verifyResult.conflict };
+  }
   if (options?.selectAfterSave !== false) {
     writeCurrentAuth(authToSave);
     await setCurrentAccountMarker({
       name,
       source: "cloud",
-      syncVersion: writeResult.syncVersion ?? null,
-      syncUpdatedAt: writeResult.syncUpdatedAt ?? null,
+      syncVersion: verifyResult.syncVersion ?? writeResult.syncVersion ?? null,
+      syncUpdatedAt: verifyResult.syncUpdatedAt ?? writeResult.syncUpdatedAt ?? null,
     });
   }
   return { success: true, message: `Account "${name}" was saved to cloud storage`, meta };

@@ -4,6 +4,7 @@
 | --- | --- | --- |
 | 缺失 payload 的索引保留 | `accountNames/providerNames` 中列出了名称，但独立 key、聚合 payload、旧设置 payload 暂未同步到本机 | 激活时保留这些 names-only 条目并继续注册独立 key 到 `setKeysForSync`。 |
 | 延迟到达的 cloud payload | 第二台机器先收到 `apple1` 的索引，随后才收到 `codex-account-switch.syncedCloudAccount.v1.apple1` payload | `apple1` payload 到达前显示为 `Payload pending`，不显示为 invalid；payload 到达后刷新列表即可显示为可用 cloud account。 |
+| 直接新增 cloud account 后 payload 不可读 | 用户通过 Add Account 直接把 `bob1990` 保存到 cloud，独立 payload 写入后同窗口读回失败或 payload 缺失 | 命令失败并提示 cloud 写入无法验证；不把保存结果当作成功；保留对应保护副本供后续显式恢复。 |
 | 迁移到 cloud 后 payload 不可读 | local account `apple1` 执行 Move Account To Cloud，写入独立 payload 后同窗口读回失败或 payload 缺失 | 命令失败并提示 cloud 写入无法验证；本地 `auth_apple1.json` 保留，不删除 local 副本。 |
 | 正常迁移到 cloud | local account `apple1` 执行 Move Account To Cloud，独立 payload 可读回，保护副本可写入 | 删除本地 `auth_apple1.json`，cloud account 进入 ready 状态，索引和独立 payload 一起参与 Settings Sync，并保留加密保护副本。 |
 | 同步合并后 payload 丢失 | `bob1990` 已迁移到 cloud 且有保护副本，随后 VS Code extension state 合并为 index-only：`accountNames` 包含 `bob1990`，但 `codex-account-switch.syncedCloudAccount.v1.bob1990` 缺失 | `bob1990` 显示 `Payload pending` 和可恢复状态，不自动写回 payload，不自动切换到本地。 |

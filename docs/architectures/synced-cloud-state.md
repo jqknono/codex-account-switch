@@ -53,5 +53,6 @@ flowchart TD
 | 索引先到、payload 未到 | 账号显示 `Payload pending`，保留独立 key 注册，等待 Settings Sync 后续同步。 |
 | 索引保留、payload 被同步合并移除、保护副本存在 | 账号显示 `Payload pending` 且标记可恢复；只有用户显式执行恢复命令时才写回 cloud payload。 |
 | payload 结构错误或无法解密 | 账号显示 invalid 或 locked，由具体反序列化结果决定。 |
+| 直接新增 cloud account | 写入独立 payload 后必须通过普通 cloud 读取路径读回验证；验证失败时不把保存结果当作成功，并保留保护副本供显式恢复。 |
 | local 迁移到 cloud | 只有保护副本写入成功且 cloud payload 读回成功后，才删除本地 `auth_{name}.json`。 |
 | 删除 cloud account 或移动回 local | 同步清理对应保护副本，避免保留用户已明确删除的数据。 |

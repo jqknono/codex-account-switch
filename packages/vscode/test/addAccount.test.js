@@ -2282,6 +2282,92 @@ test("addAccount can save to synced settings when cloud storage is selected", as
   });
 });
 
+test("addAccount to cloud fails when the payload cannot be verified after write", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-add-cloud-account-unverified-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  const authDir = path.join(tempRoot, "saved-auth");
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(authDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(codexHome, "auth.json"),
+    JSON.stringify(makeAuthFile("acct-cloud"), null, 2),
+    "utf-8"
+  );
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  try {
+    const mocked = createVscodeMock({
+      authDirectory: authDir,
+      inputBoxResponses: ["sync-user", "cloud-passphrase", "cloud-passphrase"],
+      warningResponses: ["Login"],
+      infoResponses: [
+        () => {
+          writeLastTerminalAuth(mocked, makeAuthFile("acct-cloud"));
+          return "Done";
+        },
+      ],
+      defaultSaveTarget: "cloud",
+      afterGlobalStateUpdate(key, value, state) {
+        if (key === getSyncedCloudAccountKey("sync-user") && value !== undefined) {
+          state.globalStateValues.delete(key);
+        }
+      },
+    });
+
+    await withDisabledIntervals(() =>
+      withSuccessfulHttps(async () => {
+        const extension = loadExtensionWithMockedVscode(mocked.vscode);
+        const context = createExtensionContext(mocked);
+        await extension.activate(context);
+
+        await mocked.registeredCommands.get("codex-account-switch.addAccount")();
+
+        assert.equal(mocked.config.syncedStorage.accounts["sync-user"], undefined);
+        assert.equal(fs.existsSync(path.join(authDir, "auth_sync-user.json")), false);
+        assert.equal(fs.existsSync(getProtectedCloudAccountBackupPath(mocked, "sync-user")), true);
+        assert.match(
+          [
+            mocked.errorMessages.at(-1)?.message ?? "",
+            mocked.warningMessages.at(-1)?.message ?? "",
+            ...mocked.informationMessages.map((entry) => entry.message),
+          ].join("\n"),
+          /could not be verified/i,
+        );
+        assert.equal(
+          mocked.informationMessages.some((entry) => entry.message.includes('Account "sync-user" was saved to cloud storage')),
+          false,
+        );
+
+        for (const subscription of context.subscriptions.reverse()) {
+          subscription?.dispose?.();
+        }
+        await waitForRefreshCoordinatorIdle(context);
+      })
+    );
+  } finally {
+    core.setSavedAuthPassphrase(null);
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
 test("reloginAccount updates the saved cloud auth without changing the active account or prompting reload", async (t) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-relogin-cloud-globalstate-"));
   const codexHome = path.join(tempRoot, ".codex");

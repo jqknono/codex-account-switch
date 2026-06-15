@@ -54,6 +54,7 @@ flowchart TD
 | Multiple sources contain the same entry | Prefer payloads with `entryVersion`; when more than one source has a version, keep the highest version and materialize it into the per-entry key. |
 | Local operation snapshot has a newer version | Use the versioned local snapshot as the write baseline when current synced storage is missing or older, then write the next version. |
 | Index name has no payload | Preserve the name and keep its per-entry key registered for sync; treat it as a pending payload rather than deleting it. |
+| Directly saving a new cloud account | After writing the per-account payload, read it back through the normal cloud account path. If read-back fails, report the cloud save as unverified and keep the protected backup for explicit restore. |
 | Local account moves to cloud | After writing the per-account payload, read it back through the normal cloud account path before deleting the local `auth_{name}.json`. If read-back fails, keep the local auth and report the cloud write as unverified. |
 | Legacy cleanup succeeds | Remove the old `codex-account-switch.syncedStorage` setting. |
 | Legacy cleanup fails | Keep the migrated `globalState` data active, log a warning, and show a non-fatal notice. |
