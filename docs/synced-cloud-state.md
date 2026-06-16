@@ -10,6 +10,7 @@
 | Saved-auth passphrase | VS Code `SecretStorage` | Local-only secret, never synced. |
 | Current selection marker | VS Code `globalState` unsynced key | Local UI state. |
 | Account auth freshness | `codex_account_switch_auth_updated_at` inside account auth | Internal timestamp used to reject stale auth writes when multiple machines sync the same cloud account. |
+| Tombstones | Per-entry synced keys with `deleted: true` | Deletes keep a higher-version tombstone so stale payloads cannot silently resurrect during sync merge. |
 
 ## Sync Behavior
 
@@ -52,8 +53,9 @@ flowchart TD
 | New synced key missing and legacy setting has data | Copy legacy entries into per-account/per-provider synced `globalState` keys and keep only index metadata in the aggregate key. |
 | Aggregate key contains legacy payloads | Materialize missing per-entry keys, prefer already-existing per-entry keys, then clear aggregate `accounts` and `providers`. |
 | Multiple sources contain the same entry | Prefer payloads with `entryVersion`; when more than one source has a version, keep the highest version and materialize it into the per-entry key. |
-| Local operation snapshot has a newer version | Use the versioned local snapshot as the write baseline when current synced storage is missing or older, then write the next version. |
+| Ordinary cloud writes require an explicit baseline | Callers must pass the version they expect, or explicit `null` to mean “create only if no versioned entry exists yet.” Missing baseline writes are rejected. |
 | Index name has no payload | Preserve the name and keep its per-entry key registered for sync; treat it as a pending payload rather than deleting it. |
+| Missing payload with a stale marker or local snapshot | Do not auto-heal by rewriting the payload. Show the pending state and require explicit restore. |
 | Directly saving a new cloud account | After writing the per-account payload, read it back through the normal cloud account path. If read-back fails, report the cloud save as unverified and keep the protected backup for explicit restore. |
 | Local account moves to cloud | After writing the per-account payload, read it back through the normal cloud account path before deleting the local `auth_{name}.json`. If read-back fails, keep the local auth and report the cloud write as unverified. |
 | Legacy cleanup succeeds | Remove the old `codex-account-switch.syncedStorage` setting. |
@@ -75,6 +77,7 @@ flowchart TD
 | Passphrase is local-only | A second machine must enter the same password before synced cloud entries can be decrypted. |
 | Index and payload may arrive separately | A device can temporarily see `accountNames/providerNames` before the matching per-entry payload key; that state must not be interpreted as deletion. |
 | Names-only cloud accounts are pending | A cloud account whose index is present but payload is missing is displayed as `Payload pending`, not as invalid saved auth. |
+| `globalState` keys are not enumerable | The extension cannot discover an unknown per-entry key without some indexed name or local recovery hint, so `accountNames/providerNames` remain a discovery aid rather than payload truth. |
 | Envelope format must stay unchanged | `@codex-account-switch/core` remains the canonical serializer/deserializer. |
 | Account/provider writes are per-entry | Updating one cloud account or provider must not rewrite sibling payload keys. |
 | New per-entry sync keys must be registered before payload writes | Otherwise another device can sync `accountNames/providerNames` first and temporarily see a names-only invalid entry. |
@@ -92,3 +95,13 @@ flowchart TD
 | Manual create or edit of a cloud provider profile | `save_provider_profile` |
 | Switching away from the active cloud provider and syncing its auth | `sync_current_provider_auth` |
 | Moving a local provider into cloud storage | `move_provider_to_cloud` |
+
+## Account Audit Metadata
+
+| Write Path | Stored `lastWriterAction` |
+| --- | --- |
+| Manual create or overwrite of a cloud account | `save_account` |
+| Switching away from the active cloud account and syncing its auth | `sync_current_account_auth` |
+| Moving a local account into cloud storage | `move_account_to_cloud` |
+| Restoring a cloud account from its protected backup | `restore_cloud_account_payload` |
+| Deleting a cloud account | `delete_account` |

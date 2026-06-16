@@ -70,6 +70,7 @@ export interface SavedAccountInfo {
   encrypted: boolean;
   syncVersion: number | null;
   syncUpdatedAt: string | null;
+  lastWriterAction?: string | null;
   recoveryAvailable?: boolean;
 }
 
@@ -106,7 +107,16 @@ interface SavedStorageSyncMetadata {
   lastWriterAction?: string | null;
 }
 
-type ProviderAuditAction = "save_provider_profile" | "sync_current_provider_auth" | "move_provider_to_cloud";
+type EntryAuditAction =
+  | "save_account"
+  | "sync_current_account_auth"
+  | "move_account_to_cloud"
+  | "restore_cloud_account_payload"
+  | "delete_account"
+  | "save_provider_profile"
+  | "sync_current_provider_auth"
+  | "move_provider_to_cloud"
+  | "delete_provider";
 
 interface CloudMutationResult {
   success: boolean;
@@ -249,6 +259,17 @@ function withPublicEmail(value: Record<string, unknown>, email: string | null): 
     delete next.email;
   }
   return next;
+}
+
+function isDeletedSyncedEntry(value: unknown): boolean {
+  return isRecord(value) && value.deleted === true;
+}
+
+function createSyncedEntryTombstone(metadata: SavedStorageSyncMetadata): Record<string, unknown> {
+  return applySyncMetadata({
+    deleted: true,
+    deletedAt: metadata.updatedAt,
+  }, metadata);
 }
 
 function normalizeSyncedStorage(raw: unknown): SyncedStorageData {
@@ -412,6 +433,10 @@ function hasSyncConflict(expectedEntryVersion: number | null | undefined, curren
   return expectedEntryVersion != null && current.entryVersion !== expectedEntryVersion;
 }
 
+function hasExplicitExpectedBaseline(expectedEntryVersion: number | null | undefined): boolean {
+  return expectedEntryVersion !== undefined;
+}
+
 function shouldPreferCandidatePayload(current: unknown, candidate: unknown): boolean {
   if (candidate === undefined) {
     return false;
@@ -444,14 +469,15 @@ function getExpectedSyncMetadata(
   };
 }
 
-function shouldUseExpectedSnapshotAsCurrent(
-  expected: SavedStorageSyncMetadata,
-  current: SavedStorageSyncMetadata,
-): boolean {
-  return (
-    expected.entryVersion != null
-    && (current.entryVersion == null || expected.entryVersion > current.entryVersion)
-  );
+function formatMissingExpectedBaselineResult(
+  entryType: "account" | "provider",
+  name: string,
+): CloudMutationResult {
+  const label = entryType === "account" ? "Cloud account" : "Cloud provider";
+  return {
+    success: false,
+    message: `${label} "${name}" requires an explicit sync baseline before writing. Refresh the list before retrying.`,
+  };
 }
 
 function formatMissingSyncedPayloadResult(
@@ -1045,18 +1071,22 @@ async function writeSyncedCloudProvider(name: string, value: Record<string, unkn
 
 async function removeSyncedCloudAccount(name: string): Promise<void> {
   const storage = readSyncedStorage();
-  delete storage.accounts[name];
+  const currentMetadata = getSyncMetadata(storage.accounts[name]);
+  const nextMetadata = nextSyncMetadata(currentMetadata, getCurrentWriterMetadata("delete_account"));
+  storage.accounts[name] = createSyncedEntryTombstone(nextMetadata);
   storage.accountNames = storage.accountNames.filter((accountName) => accountName !== name);
-  await requireContext().globalState.update(getSyncedCloudAccountKey(name), undefined);
+  await requireContext().globalState.update(getSyncedCloudAccountKey(name), clone(storage.accounts[name] as Record<string, unknown>));
   await writeSyncedCloudStateIndex(storage);
   removeProtectedCloudAccountBackup(name);
 }
 
 async function removeSyncedCloudProvider(name: string): Promise<void> {
   const storage = readSyncedStorage();
-  delete storage.providers[name];
+  const currentMetadata = getSyncMetadata(storage.providers[name]);
+  const nextMetadata = nextSyncMetadata(currentMetadata, getCurrentWriterMetadata("delete_provider"));
+  storage.providers[name] = createSyncedEntryTombstone(nextMetadata);
   storage.providerNames = storage.providerNames.filter((providerName) => providerName !== name);
-  await requireContext().globalState.update(getSyncedCloudProviderKey(name), undefined);
+  await requireContext().globalState.update(getSyncedCloudProviderKey(name), clone(storage.providers[name] as Record<string, unknown>));
   await writeSyncedCloudStateIndex(storage);
 }
 
@@ -1148,7 +1178,7 @@ export function hasEncryptedSyncedEntries(): boolean {
     || Object.values(storage.providers).some((value) => isSerializedSavedValueEncrypted(value));
 }
 
-function getCurrentWriterMetadata(action?: ProviderAuditAction): {
+function getCurrentWriterMetadata(action?: EntryAuditAction): {
   lastWriterAction: string | null;
 } {
   return {
@@ -1222,11 +1252,13 @@ function getStoredCloudProviderRaw(name: string): unknown {
 }
 
 function readCloudAccount(name: string) {
-  return deserializeSavedValue<AuthFile>(getStoredCloudAccountRaw(name), "saved_auth");
+  const raw = getStoredCloudAccountRaw(name);
+  return deserializeSavedValue<AuthFile>(isDeletedSyncedEntry(raw) ? undefined : raw, "saved_auth");
 }
 
 function readCloudProvider(name: string) {
-  return deserializeSavedValue<ProviderProfile>(getStoredCloudProviderRaw(name), "saved_provider");
+  const raw = getStoredCloudProviderRaw(name);
+  return deserializeSavedValue<ProviderProfile>(isDeletedSyncedEntry(raw) ? undefined : raw, "saved_provider");
 }
 
 async function updateCloudAccountPublicEmail(name: string, raw: unknown, email: string): Promise<void> {
@@ -1293,8 +1325,12 @@ function getCloudAccounts(perf?: ReturnType<typeof startPerformanceLog>): SavedA
     protectedBackupCount: protectedBackupNames.length,
     listedCloudAccountCount: accountNames.length,
   });
-  const accounts = accountNames.map((name) => {
+  const accounts: SavedAccountInfo[] = [];
+  for (const name of accountNames) {
     const raw = storage.accounts[name];
+    if (isDeletedSyncedEntry(raw)) {
+      continue;
+    }
     const isIndexed = storage.accountNames.includes(name);
     const result = readCloudAccount(name);
     const backup = result.status === "missing" ? readProtectedCloudAccountBackup(name) : null;
@@ -1317,7 +1353,7 @@ function getCloudAccounts(perf?: ReturnType<typeof startPerformanceLog>): SavedA
           });
         });
       }
-      return {
+      accounts.push({
         id: toId("cloud", name),
         name,
         source: "cloud" as const,
@@ -1329,7 +1365,9 @@ function getCloudAccounts(perf?: ReturnType<typeof startPerformanceLog>): SavedA
         encrypted: result.encrypted,
         syncVersion: syncMetadata.entryVersion,
         syncUpdatedAt: syncMetadata.updatedAt,
-      };
+        lastWriterAction: syncMetadata.lastWriterAction ?? null,
+      });
+      continue;
     }
 
     const recoveryAvailable = backup !== null;
@@ -1342,7 +1380,7 @@ function getCloudAccounts(perf?: ReturnType<typeof startPerformanceLog>): SavedA
       });
     }
 
-    return {
+    accounts.push({
       id: toId("cloud", name),
       name,
       source: "cloud" as const,
@@ -1369,9 +1407,10 @@ function getCloudAccounts(perf?: ReturnType<typeof startPerformanceLog>): SavedA
       encrypted: result.encrypted,
       syncVersion: syncMetadata.entryVersion,
       syncUpdatedAt: syncMetadata.updatedAt,
+      lastWriterAction: syncMetadata.lastWriterAction ?? null,
       recoveryAvailable,
-    };
-  });
+    });
+  }
   perf?.mark("deserialize-cloud-accounts", {
     cloudCount: accounts.length,
   });
@@ -1402,12 +1441,16 @@ function getLocalProviders(): SavedProviderInfo[] {
 }
 
 function getCloudProviders(): SavedProviderInfo[] {
-  return getCloudProviderNames().map((name) => {
+  const providers: SavedProviderInfo[] = [];
+  for (const name of getCloudProviderNames()) {
     const raw = getStoredCloudProviderRaw(name);
+    if (isDeletedSyncedEntry(raw)) {
+      continue;
+    }
     const syncMetadata = getSyncMetadata(raw);
     const result = readCloudProvider(name);
     const profile = result.status === "ok" ? parseProviderProfile(name, result.value) : null;
-    return {
+    providers.push({
       id: toId("cloud", name),
       name,
       source: "cloud" as const,
@@ -1429,8 +1472,9 @@ function getCloudProviders(): SavedProviderInfo[] {
       syncVersion: syncMetadata.entryVersion,
       syncUpdatedAt: syncMetadata.updatedAt,
       lastWriterAction: syncMetadata.lastWriterAction ?? null,
-    };
-  });
+    });
+  }
+  return providers;
 }
 
 function selectCurrentAccount(accounts: SavedAccountInfo[]): SavedAccountInfo[] {
@@ -1598,7 +1642,13 @@ async function persistCloudAccountAuth(
   expectedEntryVersion?: number | null,
   expectedUpdatedAt?: string | null,
 ): Promise<CloudMutationResult> {
-  return writeCloudAccountWithExpectedVersion(name, auth, expectedEntryVersion, expectedUpdatedAt);
+  return writeCloudAccountWithExpectedVersion(
+    name,
+    auth,
+    expectedEntryVersion,
+    expectedUpdatedAt,
+    "sync_current_account_auth",
+  );
 }
 
 function persistLocalAccountAuth(
@@ -1643,16 +1693,34 @@ async function writeCloudAccountWithExpectedVersion(
   auth: AuthFile,
   expectedEntryVersion?: number | null,
   expectedUpdatedAt?: string | null,
+  auditAction: EntryAuditAction = "save_account",
 ): Promise<CloudMutationResult> {
   requireCloudPassphrase();
+  if (!hasExplicitExpectedBaseline(expectedEntryVersion)) {
+    return formatMissingExpectedBaselineResult("account", name);
+  }
   const storage = readSyncedStorage();
   const currentRaw = storage.accounts[name];
   const currentMetadata = getSyncMetadata(currentRaw);
   const expectedMetadata = getExpectedSyncMetadata(expectedEntryVersion, expectedUpdatedAt);
-  const effectiveCurrentMetadata = shouldUseExpectedSnapshotAsCurrent(expectedMetadata, currentMetadata)
-    ? expectedMetadata
-    : currentMetadata;
-  if (hasSyncConflict(expectedEntryVersion, currentMetadata) && effectiveCurrentMetadata !== expectedMetadata) {
+  if (expectedEntryVersion === null) {
+    if (currentRaw !== undefined && currentMetadata.entryVersion != null) {
+      return formatConflictResult(
+        buildConflict(
+          "account",
+          name,
+          expectedMetadata,
+          currentMetadata,
+        ),
+      );
+    }
+  } else if (currentRaw === undefined) {
+    return formatMissingSyncedPayloadResult("account", name, expectedMetadata);
+  }
+  if (isDeletedSyncedEntry(currentRaw)) {
+    return formatConflictResult(buildConflict("account", name, expectedMetadata, currentMetadata));
+  }
+  if (hasSyncConflict(expectedEntryVersion, currentMetadata)) {
     return formatConflictResult(
       buildConflict(
         "account",
@@ -1671,7 +1739,7 @@ async function writeCloudAccountWithExpectedVersion(
       syncUpdatedAt: currentMetadata.updatedAt,
     };
   }
-  const nextMetadata = nextSyncMetadata(effectiveCurrentMetadata);
+  const nextMetadata = nextSyncMetadata(currentMetadata, getCurrentWriterMetadata(auditAction));
   const serialized = serializeSavedValue("saved_auth", authToWrite as Record<string, unknown>, {
     requireEncryption: true,
   });
@@ -1777,7 +1845,12 @@ export async function restoreCloudAccountPayloadFromProtectedBackup(
     };
   }
 
-  await writeSyncedCloudAccount(account.name, backup.payload);
+  const restoredMetadata = nextSyncMetadata(
+    getSyncMetadata(storage.accounts[account.name]),
+    getCurrentWriterMetadata("restore_cloud_account_payload"),
+  );
+  const restoredPayload = applySyncMetadata(clone(backup.payload), restoredMetadata);
+  await writeSyncedCloudAccount(account.name, restoredPayload);
   const restored = readCloudAccount(account.name);
   if (restored.status !== "ok") {
     const message = "message" in restored
@@ -1800,7 +1873,7 @@ export async function restoreCloudAccountPayloadFromProtectedBackup(
   }
 
   loggedMissingCloudAccountPayloads.delete(account.name);
-  const metadata = getSyncMetadata(backup.payload);
+  const metadata = getSyncMetadata(restoredPayload);
   logInfo(LOG_PREFIX, "cloud-account-protected-backup-restored", {
     account: account.name,
     syncVersion: metadata.entryVersion,
@@ -1816,16 +1889,34 @@ async function writeCloudProviderWithExpectedVersion(
   profile: ProviderProfile,
   expectedEntryVersion?: number | null,
   expectedUpdatedAt?: string | null,
-  auditAction?: ProviderAuditAction,
+  auditAction: EntryAuditAction = "save_provider_profile",
 ): Promise<CloudMutationResult> {
   requireCloudPassphrase();
+  if (!hasExplicitExpectedBaseline(expectedEntryVersion)) {
+    return formatMissingExpectedBaselineResult("provider", profile.name);
+  }
   const storage = readSyncedStorage();
-  const currentMetadata = getSyncMetadata(storage.providers[profile.name]);
+  const currentRaw = storage.providers[profile.name];
+  const currentMetadata = getSyncMetadata(currentRaw);
   const expectedMetadata = getExpectedSyncMetadata(expectedEntryVersion, expectedUpdatedAt);
-  const effectiveCurrentMetadata = shouldUseExpectedSnapshotAsCurrent(expectedMetadata, currentMetadata)
-    ? expectedMetadata
-    : currentMetadata;
-  if (hasSyncConflict(expectedEntryVersion, currentMetadata) && effectiveCurrentMetadata !== expectedMetadata) {
+  if (expectedEntryVersion === null) {
+    if (currentRaw !== undefined && currentMetadata.entryVersion != null) {
+      return formatConflictResult(
+        buildConflict(
+          "provider",
+          profile.name,
+          expectedMetadata,
+          currentMetadata,
+        ),
+      );
+    }
+  } else if (currentRaw === undefined) {
+    return formatMissingSyncedPayloadResult("provider", profile.name, expectedMetadata);
+  }
+  if (isDeletedSyncedEntry(currentRaw)) {
+    return formatConflictResult(buildConflict("provider", profile.name, expectedMetadata, currentMetadata));
+  }
+  if (hasSyncConflict(expectedEntryVersion, currentMetadata)) {
     return formatConflictResult(
       buildConflict(
         "provider",
@@ -1835,7 +1926,7 @@ async function writeCloudProviderWithExpectedVersion(
       ),
     );
   }
-  const nextMetadata = nextSyncMetadata(effectiveCurrentMetadata, getCurrentWriterMetadata(auditAction));
+  const nextMetadata = nextSyncMetadata(currentMetadata, getCurrentWriterMetadata(auditAction));
   const nextProvider = applySyncMetadata(serializeSavedValue("saved_provider", profile as unknown as Record<string, unknown>, {
     requireEncryption: true,
   }), nextMetadata);
@@ -1913,17 +2004,21 @@ async function removeCloudAccountEntry(
   expected: SavedStorageSyncMetadata = EMPTY_SYNC_METADATA,
 ): Promise<CloudMutationResult> {
   const storage = readSyncedStorage();
-  if (!(name in storage.accounts)) {
-    if (expected.entryVersion != null) {
-      return formatMissingSyncedPayloadResult("account", name, expected);
-    }
+  const currentRaw = storage.accounts[name];
+  if (currentRaw === undefined) {
     if (storage.accountNames.includes(name)) {
       await removeSyncedCloudAccount(name);
       return { success: true, message: `Account "${name}" was removed` };
     }
+    if (expected.entryVersion != null) {
+      return formatMissingSyncedPayloadResult("account", name, expected);
+    }
     return { success: false, message: `Account "${name}" does not exist.` };
   }
-  const currentMetadata = getSyncMetadata(storage.accounts[name]);
+  const currentMetadata = getSyncMetadata(currentRaw);
+  if (isDeletedSyncedEntry(currentRaw)) {
+    return { success: false, message: `Account "${name}" does not exist.` };
+  }
   if (hasSyncConflict(expected.entryVersion, currentMetadata)) {
     return formatConflictResult(buildConflict("account", name, expected, currentMetadata));
   }
@@ -1936,17 +2031,21 @@ async function removeCloudProviderEntry(
   expected: SavedStorageSyncMetadata = EMPTY_SYNC_METADATA,
 ): Promise<CloudMutationResult> {
   const storage = readSyncedStorage();
-  if (!(name in storage.providers)) {
-    if (expected.entryVersion != null) {
-      return formatMissingSyncedPayloadResult("provider", name, expected);
-    }
+  const currentRaw = storage.providers[name];
+  if (currentRaw === undefined) {
     if (storage.providerNames.includes(name)) {
       await removeSyncedCloudProvider(name);
       return { success: true, message: `Removed provider "${name}"` };
     }
+    if (expected.entryVersion != null) {
+      return formatMissingSyncedPayloadResult("provider", name, expected);
+    }
     return { success: false, message: `Provider "${name}" does not exist.` };
   }
-  const currentMetadata = getSyncMetadata(storage.providers[name]);
+  const currentMetadata = getSyncMetadata(currentRaw);
+  if (isDeletedSyncedEntry(currentRaw)) {
+    return { success: false, message: `Provider "${name}" does not exist.` };
+  }
   if (hasSyncConflict(expected.entryVersion, currentMetadata)) {
     return formatConflictResult(buildConflict("provider", name, expected, currentMetadata));
   }
@@ -1977,11 +2076,13 @@ export async function syncCurrentAuthToSavedSelection(): Promise<SyncCurrentSele
         await setMarkerToCurrentAuthAccount();
         return healedMarker ? { success: true, healedMarker } : { success: true };
       }
+      const expectedEntryVersion = marker.entryVersion ?? markerAccount?.syncVersion ?? null;
+      const expectedUpdatedAt = marker.updatedAt ?? markerAccount?.syncUpdatedAt ?? null;
       const result = await persistCloudAccountAuth(
         marker.name,
         markCurrentAuthForCloudSync(auth),
-        marker.entryVersion,
-        marker.updatedAt,
+        expectedEntryVersion,
+        expectedUpdatedAt,
       );
       if (!result.success) {
         return {
@@ -2004,10 +2105,12 @@ export async function syncCurrentAuthToSavedSelection(): Promise<SyncCurrentSele
     const provider = getSavedProviderEntry(marker.name, "cloud");
     const currentAuth = readCurrentAuth();
     if (provider?.profile && currentAuth) {
+      const expectedEntryVersion = marker.entryVersion ?? provider.syncVersion ?? null;
+      const expectedUpdatedAt = marker.updatedAt ?? provider.syncUpdatedAt ?? null;
       const result = await writeCloudProviderWithExpectedVersion({
         ...provider.profile,
         auth: currentAuth,
-      }, marker.entryVersion, marker.updatedAt, "sync_current_provider_auth");
+      }, expectedEntryVersion, expectedUpdatedAt, "sync_current_provider_auth");
       if (!result.success) {
         return {
           success: false,
@@ -2114,6 +2217,7 @@ export async function saveAuthAsAccount(
     authToSave,
     options?.expectedEntryVersion,
     options?.expectedUpdatedAt,
+    "save_account",
   );
   if (!writeResult.success) {
     return { success: false, message: writeResult.message, meta, conflict: writeResult.conflict };
@@ -2571,7 +2675,13 @@ export async function moveSavedAccountEntry(
         message: `Cloud account "${account.name}" could not be protected locally before upload: ${error instanceof Error ? error.message : String(error)}. Local auth was kept.`,
       };
     }
-    const writeResult = await writeCloudAccountWithExpectedVersion(account.name, auth);
+    const writeResult = await writeCloudAccountWithExpectedVersion(
+      account.name,
+      auth,
+      null,
+      null,
+      "move_account_to_cloud",
+    );
     if (!writeResult.success) {
       return { success: false, message: writeResult.message, conflict: writeResult.conflict };
     }
@@ -2746,7 +2856,12 @@ export async function moveSavedProviderEntry(
   let nextCloudMetadata: SavedStorageSyncMetadata = EMPTY_SYNC_METADATA;
 
   if (target === "cloud") {
-    const writeResult = await writeCloudProviderWithExpectedVersion(provider.profile, undefined, undefined, "move_provider_to_cloud");
+    const writeResult = await writeCloudProviderWithExpectedVersion(
+      provider.profile,
+      null,
+      null,
+      "move_provider_to_cloud",
+    );
     if (!writeResult.success) {
       return { success: false, message: writeResult.message, conflict: writeResult.conflict };
     }

@@ -1033,8 +1033,12 @@ async function ensureProviderProfileWithExpectedVersion(
   });
 
   const saveResult = await saveProviderProfileToSource(profile, source, {
-    expectedEntryVersion,
-    expectedUpdatedAt,
+    expectedEntryVersion: source === "cloud" && expectedEntryVersion === undefined
+      ? null
+      : expectedEntryVersion,
+    expectedUpdatedAt: source === "cloud" && expectedEntryVersion === undefined
+      ? null
+      : expectedUpdatedAt,
   });
   if (!saveResult.success) {
     if (saveResult.conflict) {
@@ -1380,6 +1384,8 @@ export function registerCommands(
         }
 
         const result = await saveAuthAsAccount(loginResult.auth, trimmedName, target, {
+          expectedEntryVersion: target === "cloud" ? null : undefined,
+          expectedUpdatedAt: target === "cloud" ? null : undefined,
           selectAfterSave: false,
         });
         if (result.success) {
