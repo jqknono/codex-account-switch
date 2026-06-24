@@ -4,6 +4,9 @@ Codex CLI multi-account switching for Windows, macOS, and Linux.
 
 It provides both a CLI and a VS Code extension.
 
+[![VS Code Marketplace](https://img.shields.io/visual-studio-marketplace/v/techfetch-dev.codex-account-switch-vscode?label=VS%20Code%20Marketplace&color=blue)](https://marketplace.visualstudio.com/items?itemName=techfetch-dev.codex-account-switch-vscode)
+[![Open VSX](https://img.shields.io/open-vsx/v/techfetch-dev/codex-account-switch-vscode?label=Open%20VSX&color=purple)](https://open-vsx.org/extension/techfetch-dev/codex-account-switch-vscode)
+
 ## Project Structure
 
 ```text

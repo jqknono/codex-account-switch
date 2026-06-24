@@ -1210,10 +1210,25 @@ function getAccountLookupKey(source: StorageSource, name: string): string {
 }
 
 function parseProviderProfile(name: string, value: unknown): ProviderProfile | null {
-  if (!isRecord(value) || value.kind !== "provider" || value.name !== name) {
+  if (!isRecord(value)) {
+    logWarn(LOG_PREFIX, "parse-provider-profile-failed", { name, reason: "not-a-record", typeofValue: typeof value });
+    return null;
+  }
+  if (value.kind !== "provider") {
+    logWarn(LOG_PREFIX, "parse-provider-profile-failed", { name, reason: "wrong-kind", actualKind: value.kind });
+    return null;
+  }
+  if (value.name !== name) {
+    logWarn(LOG_PREFIX, "parse-provider-profile-failed", { name, reason: "name-mismatch", actualName: value.name });
     return null;
   }
   if (!isRecord(value.auth) || !isRecord(value.config)) {
+    logWarn(LOG_PREFIX, "parse-provider-profile-failed", {
+      name,
+      reason: "auth-or-config-not-record",
+      authIsRecord: isRecord(value.auth),
+      configIsRecord: isRecord(value.config),
+    });
     return null;
   }
   if (
@@ -1221,6 +1236,13 @@ function parseProviderProfile(name: string, value: unknown): ProviderProfile | n
     || typeof value.config.base_url !== "string"
     || typeof value.config.wire_api !== "string"
   ) {
+    logWarn(LOG_PREFIX, "parse-provider-profile-failed", {
+      name,
+      reason: "config-field-type-mismatch",
+      configNameType: typeof value.config.name,
+      configBaseUrlType: typeof value.config.base_url,
+      configWireApiType: typeof value.config.wire_api,
+    });
     return null;
   }
   return {
@@ -1450,6 +1472,22 @@ function getCloudProviders(): SavedProviderInfo[] {
     const syncMetadata = getSyncMetadata(raw);
     const result = readCloudProvider(name);
     const profile = result.status === "ok" ? parseProviderProfile(name, result.value) : null;
+    if (result.status === "ok" && !profile) {
+      logWarn(LOG_PREFIX, "cloud-provider-parse-failed", {
+        name,
+        rawType: typeof raw,
+        rawIsRecord: isRecord(raw),
+        rawIsEnvelope: raw != null && isRecord(raw) ? isSerializedSavedValueEncrypted(raw) : false,
+      });
+    }
+    if (result.status === "missing" || result.status === "invalid") {
+      logWarn(LOG_PREFIX, "cloud-provider-read-failed", {
+        name,
+        status: result.status,
+        message: "message" in result ? result.message : undefined,
+        rawExists: raw != null,
+      });
+    }
     providers.push({
       id: toId("cloud", name),
       name,
@@ -1704,7 +1742,7 @@ async function writeCloudAccountWithExpectedVersion(
   const currentMetadata = getSyncMetadata(currentRaw);
   const expectedMetadata = getExpectedSyncMetadata(expectedEntryVersion, expectedUpdatedAt);
   if (expectedEntryVersion === null) {
-    if (currentRaw !== undefined && currentMetadata.entryVersion != null) {
+    if (currentRaw !== undefined && !isDeletedSyncedEntry(currentRaw) && currentMetadata.entryVersion != null) {
       return formatConflictResult(
         buildConflict(
           "account",
@@ -1717,7 +1755,7 @@ async function writeCloudAccountWithExpectedVersion(
   } else if (currentRaw === undefined) {
     return formatMissingSyncedPayloadResult("account", name, expectedMetadata);
   }
-  if (isDeletedSyncedEntry(currentRaw)) {
+  if (expectedEntryVersion !== null && isDeletedSyncedEntry(currentRaw)) {
     return formatConflictResult(buildConflict("account", name, expectedMetadata, currentMetadata));
   }
   if (hasSyncConflict(expectedEntryVersion, currentMetadata)) {
@@ -1900,7 +1938,7 @@ async function writeCloudProviderWithExpectedVersion(
   const currentMetadata = getSyncMetadata(currentRaw);
   const expectedMetadata = getExpectedSyncMetadata(expectedEntryVersion, expectedUpdatedAt);
   if (expectedEntryVersion === null) {
-    if (currentRaw !== undefined && currentMetadata.entryVersion != null) {
+    if (currentRaw !== undefined && !isDeletedSyncedEntry(currentRaw) && currentMetadata.entryVersion != null) {
       return formatConflictResult(
         buildConflict(
           "provider",
@@ -1913,7 +1951,7 @@ async function writeCloudProviderWithExpectedVersion(
   } else if (currentRaw === undefined) {
     return formatMissingSyncedPayloadResult("provider", profile.name, expectedMetadata);
   }
-  if (isDeletedSyncedEntry(currentRaw)) {
+  if (expectedEntryVersion !== null && isDeletedSyncedEntry(currentRaw)) {
     return formatConflictResult(buildConflict("provider", profile.name, expectedMetadata, currentMetadata));
   }
   if (hasSyncConflict(expectedEntryVersion, currentMetadata)) {
