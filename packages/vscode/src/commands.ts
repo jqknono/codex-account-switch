@@ -709,6 +709,7 @@ async function restoreProviderModeAfterFailedLogin(previousSelection: ReturnType
             isCurrent: false,
             invalid: true,
             locked: false,
+            pending: false,
             encrypted: false,
             auth: {},
             config: {},

@@ -1666,6 +1666,92 @@ test("delayed synced cloud account payload becomes available after refresh", asy
   );
 });
 
+test("delayed synced cloud provider payload is pending until it becomes available", async () => {
+  core.setSavedAuthPassphrase("delayed-provider-passphrase");
+  const delayedProvider = core.serializeSavedValue(
+    "saved_provider",
+    {
+      kind: "provider",
+      name: "qingteng",
+      auth: { OPENAI_API_KEY: "sk-qingteng" },
+      config: {
+        name: "qingteng",
+        base_url: "https://qingteng.example.com/v1",
+        wire_api: "responses",
+      },
+    },
+    {
+      requireEncryption: true,
+    }
+  );
+  delayedProvider.entryVersion = 1;
+  delayedProvider.updatedAt = "2026-07-12T00:00:00.000Z";
+  core.setSavedAuthPassphrase(null);
+
+  const mocked = createVscodeMock({
+    globalStateValues: {
+      [SYNCED_CLOUD_STATE_KEY]: {
+        version: 1,
+        accounts: {},
+        accountNames: [],
+        providers: {},
+        providerNames: [],
+      },
+    },
+    secretValues: {
+      [STORAGE_SECRET_KEY]: "delayed-provider-passphrase",
+    },
+  });
+
+  await withDisabledIntervals(() =>
+    withSuccessfulHttps(async () => {
+      const extension = loadExtensionWithMockedVscode(mocked.vscode);
+      const context = createExtensionContext(mocked);
+      await extension.activate(context);
+
+      const providerTreeView = mocked.treeViews.get("codexAccountSwitchProviders");
+      assert.equal(
+        providerTreeView.treeDataProvider
+          .getChildren()
+          .some((item) => item.provider.name === "qingteng" && item.provider.source === "cloud"),
+        false,
+      );
+
+      mocked.globalStateValues.get(SYNCED_CLOUD_STATE_KEY).providerNames = ["qingteng"];
+      await mocked.registeredCommands.get("codex-account-switch.refreshList")();
+
+      let [providerItem] = providerTreeView.treeDataProvider
+        .getChildren()
+        .filter((item) => item.provider.name === "qingteng" && item.provider.source === "cloud");
+
+      assert.equal(providerItem.provider.pending, true);
+      assert.equal(providerItem.provider.invalid, false);
+      assert.match(providerItem.description, /payload pending/i);
+      assert.deepEqual(mocked.globalState.syncedKeys, [
+        SYNCED_CLOUD_STATE_KEY,
+        getSyncedCloudProviderKey("qingteng"),
+      ]);
+
+      await mocked.globalState.update(getSyncedCloudProviderKey("qingteng"), delayedProvider);
+      await mocked.registeredCommands.get("codex-account-switch.refreshList")();
+
+      [providerItem] = providerTreeView.treeDataProvider
+        .getChildren()
+        .filter((item) => item.provider.name === "qingteng" && item.provider.source === "cloud");
+
+      assert.equal(providerItem.provider.pending, false);
+      assert.equal(providerItem.provider.invalid, false);
+      assert.equal(providerItem.provider.profile.auth.OPENAI_API_KEY, "sk-qingteng");
+      assert.equal(providerItem.provider.syncVersion, 1);
+
+      for (const subscription of context.subscriptions.reverse()) {
+        subscription?.dispose?.();
+      }
+      await waitForRefreshCoordinatorIdle(context);
+    })
+  );
+});
+
 test("remove account deletes a names-only cloud account index entry", async () => {
   const mocked = createVscodeMock({
     globalStateValues: {
@@ -5067,6 +5153,86 @@ test("moving one local provider to cloud does not rewrite sibling cloud provider
   });
 });
 
+test("moving a provider to cloud keeps the local profile when payload verification fails", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-provider-move-readback-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  const authDir = path.join(tempRoot, "saved-auth");
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(authDir, { recursive: true });
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousNamedAuthDir = process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+  process.env.CODEX_HOME = codexHome;
+  delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+
+  try {
+    core.setNamedAuthDir(authDir);
+    core.writeProviderProfile({
+      kind: "provider",
+      name: "qingteng",
+      auth: { OPENAI_API_KEY: "sk-qingteng" },
+      config: {
+        name: "qingteng",
+        base_url: "https://qingteng.example.com/v1",
+        wire_api: "responses",
+      },
+    });
+    core.setNamedAuthDir(undefined);
+
+    const mocked = createVscodeMock({
+      authDirectory: authDir,
+      secretValues: {
+        [STORAGE_SECRET_KEY]: "provider-move-readback-passphrase",
+      },
+      afterGlobalStateUpdate(key, value, state) {
+        if (key === getSyncedCloudProviderKey("qingteng") && value !== undefined) {
+          state.globalStateValues.delete(key);
+        }
+      },
+    });
+
+    await withDisabledIntervals(async () => {
+      const extension = loadExtensionWithMockedVscode(mocked.vscode);
+      const context = createExtensionContext(mocked);
+      await extension.activate(context);
+      await waitForRefreshCoordinatorIdle(context);
+
+      const providerTreeView = mocked.treeViews.get("codexAccountSwitchProviders");
+      const [localItem] = providerTreeView.treeDataProvider
+        .getChildren()
+        .filter((item) => item.provider.name === "qingteng" && item.provider.source === "local");
+
+      await mocked.registeredCommands.get("codex-account-switch.moveProviderToCloud")(localItem);
+      await waitForRefreshCoordinatorIdle(context);
+
+      assert.equal(fs.existsSync(path.join(authDir, "provider_qingteng.json")), true);
+      assert.equal(mocked.globalStateValues.has(getSyncedCloudProviderKey("qingteng")), false);
+      assert.match(mocked.errorMessages.at(-1).message, /could not be verified.*local provider was kept/i);
+
+      for (const subscription of context.subscriptions.reverse()) {
+        subscription?.dispose?.();
+      }
+    });
+  } finally {
+    core.setSavedAuthPassphrase(null);
+    core.setNamedAuthDir(undefined);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    if (previousNamedAuthDir === undefined) {
+      delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
+    } else {
+      process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
 test("addProvider saves a new local provider without switching mode", async (t) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-add-provider-"));
   const codexHome = path.join(tempRoot, ".codex");
@@ -5147,6 +5313,140 @@ test("addProvider saves a new local provider without switching mode", async (t) 
       delete process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR;
     } else {
       process.env.CODEX_ACCOUNT_SWITCH_AUTH_DIR = previousNamedAuthDir;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
+test("addProvider saves and verifies a new cloud provider payload", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-add-cloud-provider-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  fs.mkdirSync(codexHome, { recursive: true });
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = codexHome;
+
+  try {
+    const mocked = createVscodeMock({
+      defaultSaveTarget: "cloud",
+      captureSyncedGlobalStateWrites: true,
+      secretValues: {
+        [STORAGE_SECRET_KEY]: "cloud-provider-passphrase",
+      },
+      inputBoxResponses: [
+        "qingteng",
+        "sk-qingteng",
+        "https://qingteng.example.com/v1",
+        "responses",
+      ],
+    });
+
+    await withDisabledIntervals(async () => {
+      const extension = loadExtensionWithMockedVscode(mocked.vscode);
+      const context = createExtensionContext(mocked);
+      await extension.activate(context);
+      await waitForRefreshCoordinatorIdle(context);
+
+      await mocked.registeredCommands.get("codex-account-switch.addProvider")();
+      await waitForRefreshCoordinatorIdle(context);
+
+      const storedProvider = mocked.globalStateValues.get(getSyncedCloudProviderKey("qingteng"));
+      assert.equal(typeof storedProvider?.ciphertext, "string");
+      assert.equal(storedProvider.entryVersion, 1);
+      assert.equal(storedProvider.lastWriterAction, "save_provider_profile");
+      assert.deepEqual(mocked.globalStateValues.get(SYNCED_CLOUD_STATE_KEY).providerNames, ["qingteng"]);
+      assert.equal(typeof mocked.syncedGlobalStateValues.get(getSyncedCloudProviderKey("qingteng"))?.ciphertext, "string");
+
+      const providerTreeView = mocked.treeViews.get("codexAccountSwitchProviders");
+      const [providerItem] = providerTreeView.treeDataProvider
+        .getChildren()
+        .filter((item) => item.provider.name === "qingteng" && item.provider.source === "cloud");
+      assert.equal(providerItem.provider.pending, false);
+      assert.equal(providerItem.provider.invalid, false);
+      assert.equal(providerItem.provider.profile.auth.OPENAI_API_KEY, "sk-qingteng");
+      assert.equal(
+        mocked.informationMessages.some((entry) =>
+          entry.message.includes('Created provider profile for "qingteng" in cloud storage.')
+        ),
+        true,
+      );
+
+      for (const subscription of context.subscriptions.reverse()) {
+        subscription?.dispose?.();
+      }
+    });
+  } finally {
+    core.setSavedAuthPassphrase(null);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+  }
+
+  await t.test("cleanup", () => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
+test("addProvider reports failure when a cloud provider payload cannot be read back", async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cas-vscode-add-cloud-provider-readback-"));
+  const codexHome = path.join(tempRoot, ".codex");
+  fs.mkdirSync(codexHome, { recursive: true });
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = codexHome;
+
+  try {
+    const mocked = createVscodeMock({
+      defaultSaveTarget: "cloud",
+      secretValues: {
+        [STORAGE_SECRET_KEY]: "cloud-provider-readback-passphrase",
+      },
+      inputBoxResponses: [
+        "qingteng",
+        "sk-qingteng",
+        "https://qingteng.example.com/v1",
+        "responses",
+      ],
+      afterGlobalStateUpdate(key, value, state) {
+        if (key === getSyncedCloudProviderKey("qingteng") && value !== undefined) {
+          state.globalStateValues.delete(key);
+        }
+      },
+    });
+
+    await withDisabledIntervals(async () => {
+      const extension = loadExtensionWithMockedVscode(mocked.vscode);
+      const context = createExtensionContext(mocked);
+      await extension.activate(context);
+      await waitForRefreshCoordinatorIdle(context);
+
+      await mocked.registeredCommands.get("codex-account-switch.addProvider")();
+      await waitForRefreshCoordinatorIdle(context);
+
+      assert.equal(mocked.globalStateValues.has(getSyncedCloudProviderKey("qingteng")), false);
+      assert.match(mocked.errorMessages.at(-1).message, /could not be verified.*payload is missing/i);
+      assert.equal(
+        mocked.informationMessages.some((entry) =>
+          entry.message.includes('Created provider profile for "qingteng" in cloud storage.')
+        ),
+        false,
+      );
+
+      for (const subscription of context.subscriptions.reverse()) {
+        subscription?.dispose?.();
+      }
+    });
+  } finally {
+    core.setSavedAuthPassphrase(null);
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
     }
   }
 

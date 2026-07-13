@@ -8,6 +8,9 @@ function describeProvider(provider: SavedProviderInfo): string {
   if (provider.locked) {
     return `${provider.source} · Storage locked`;
   }
+  if (provider.pending) {
+    return `${provider.source} · Payload pending`;
+  }
   if (provider.invalid) {
     return `${provider.source} · Invalid profile`;
   }
@@ -63,6 +66,8 @@ export class ProviderTreeItem extends vscode.TreeItem {
 
     if (provider.locked) {
       this.iconPath = new vscode.ThemeIcon("lock");
+    } else if (provider.pending) {
+      this.iconPath = new vscode.ThemeIcon("sync");
     } else if (provider.invalid) {
       this.iconPath = new vscode.ThemeIcon("warning", new vscode.ThemeColor("errorForeground"));
     } else if (provider.isCurrent) {
@@ -73,7 +78,13 @@ export class ProviderTreeItem extends vscode.TreeItem {
 
     const tooltipLines = [`Provider: ${provider.name}`, `Source: ${provider.source}`];
     tooltipLines.push(
-      provider.locked ? "Status: Storage locked" : provider.invalid ? "Status: Invalid provider profile" : "Status: Ready",
+      provider.locked
+        ? "Status: Storage locked"
+        : provider.pending
+          ? "Status: Payload pending"
+          : provider.invalid
+            ? "Status: Invalid provider profile"
+            : "Status: Ready",
     );
     if (provider.isCurrent) {
       tooltipLines.push("Active: Yes");
@@ -159,17 +170,31 @@ export class ProviderTreeProvider implements vscode.TreeDataProvider<ProviderTre
 
     const statusItem = new ProviderDetailItem(
       "Status",
-      provider.locked ? "Locked" : provider.invalid ? "Invalid" : provider.isCurrent ? "Active" : "Saved",
-      provider.locked ? provider.storageMessage : provider.invalid ? "Provider profile is invalid or incomplete" : undefined,
+      provider.locked
+        ? "Locked"
+        : provider.pending
+          ? "Payload pending"
+          : provider.invalid
+            ? "Invalid"
+            : provider.isCurrent
+              ? "Active"
+              : "Saved",
+      provider.locked || provider.pending
+        ? provider.storageMessage
+        : provider.invalid
+          ? "Provider profile is invalid or incomplete"
+          : undefined,
       parent,
     );
     statusItem.iconPath = provider.locked
       ? new vscode.ThemeIcon("lock")
-      : provider.invalid
-        ? new vscode.ThemeIcon("warning", new vscode.ThemeColor("errorForeground"))
-        : provider.isCurrent
-          ? new vscode.ThemeIcon("check", new vscode.ThemeColor("charts.green"))
-          : new vscode.ThemeIcon("circle-large-outline");
+      : provider.pending
+        ? new vscode.ThemeIcon("sync")
+        : provider.invalid
+          ? new vscode.ThemeIcon("warning", new vscode.ThemeColor("errorForeground"))
+          : provider.isCurrent
+            ? new vscode.ThemeIcon("check", new vscode.ThemeColor("charts.green"))
+            : new vscode.ThemeIcon("circle-large-outline");
     items.push(statusItem);
 
     const sourceItem = new ProviderDetailItem("Source", provider.source, provider.source, parent);
@@ -206,6 +231,17 @@ export class ProviderTreeProvider implements vscode.TreeDataProvider<ProviderTre
     }
 
     if (provider.locked) {
+      return items;
+    }
+    if (provider.pending) {
+      const pendingItem = new ProviderDetailItem(
+        "Profile",
+        "Waiting for sync",
+        provider.storageMessage,
+        parent,
+      );
+      pendingItem.iconPath = new vscode.ThemeIcon("sync");
+      items.push(pendingItem);
       return items;
     }
 

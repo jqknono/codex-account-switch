@@ -55,6 +55,7 @@ flowchart TD
 | Multiple sources contain the same entry | Prefer payloads with `entryVersion`; when more than one source has a version, keep the highest version and materialize it into the per-entry key. |
 | Ordinary cloud writes require an explicit baseline | Callers must pass the version they expect, or explicit `null` to mean “create only if no versioned entry exists yet.” Missing baseline writes are rejected. |
 | Index name has no payload | Preserve the name and keep its per-entry key registered for sync; treat it as a pending payload rather than deleting it. |
+| Cloud provider write verification | After creating, editing, syncing, or moving a provider into cloud storage, read the per-provider payload back through the normal provider path before reporting success or deleting a local provider file. |
 | Missing payload with a stale marker or local snapshot | Do not auto-heal by rewriting the payload. Show the pending state and require explicit restore. |
 | Directly saving a new cloud account | After writing the per-account payload, read it back through the normal cloud account path. If read-back fails, report the cloud save as unverified and keep the protected backup for explicit restore. |
 | Local account moves to cloud | After writing the per-account payload, read it back through the normal cloud account path before deleting the local `auth_{name}.json`. If read-back fails, keep the local auth and report the cloud write as unverified. |
@@ -73,10 +74,11 @@ flowchart TD
 
 | Constraint | Effect |
 | --- | --- |
-| No `globalState` change event for remote sync | Reload/activation or explicit refresh is the supported pickup boundary. |
+| No `globalState` change event for remote sync | Reload/activation or explicit refresh is the supported pickup boundary; every storage read refreshes the dynamic per-entry sync key registration from the latest index. |
 | Passphrase is local-only | A second machine must enter the same password before synced cloud entries can be decrypted. |
 | Index and payload may arrive separately | A device can temporarily see `accountNames/providerNames` before the matching per-entry payload key; that state must not be interpreted as deletion. |
 | Names-only cloud accounts are pending | A cloud account whose index is present but payload is missing is displayed as `Payload pending`, not as invalid saved auth. |
+| Names-only cloud providers are pending | A cloud provider whose index is present but payload is missing is displayed as `Payload pending`, not as an invalid provider profile. |
 | `globalState` keys are not enumerable | The extension cannot discover an unknown per-entry key without some indexed name or local recovery hint, so `accountNames/providerNames` remain a discovery aid rather than payload truth. |
 | Envelope format must stay unchanged | `@codex-account-switch/core` remains the canonical serializer/deserializer. |
 | Account/provider writes are per-entry | Updating one cloud account or provider must not rewrite sibling payload keys. |

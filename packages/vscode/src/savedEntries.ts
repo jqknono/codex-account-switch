@@ -1,5 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
+import { isDeepStrictEqual } from "util";
 import * as vscode from "vscode";
 import {
   AccountMeta,
@@ -81,6 +82,7 @@ export interface SavedProviderInfo {
   isCurrent: boolean;
   invalid: boolean;
   locked: boolean;
+  pending: boolean;
   storageMessage?: string;
   encrypted: boolean;
   auth: Record<string, unknown>;
@@ -940,7 +942,7 @@ function readSyncedStorage(): SyncedStorageData {
     mergeSyncedPayload(providers, name, requireContext().globalState.get<unknown>(getSyncedCloudProviderKey(name)));
   }
 
-  return {
+  const result = {
     ...storage,
     accounts,
     accountNames: normalizeNames([
@@ -953,6 +955,8 @@ function readSyncedStorage(): SyncedStorageData {
       ...Object.keys(providers),
     ]).sort(),
   };
+  setSyncedCloudSyncKeys(result.accountNames, result.providerNames);
+  return result;
 }
 
 async function writeSyncedStorage(data: SyncedStorageData): Promise<void> {
@@ -1450,6 +1454,7 @@ function getLocalProviders(): SavedProviderInfo[] {
       isCurrent: false,
       invalid: result.status === "invalid",
       locked: result.status === "locked",
+      pending: false,
       storageMessage: "message" in result ? result.message : undefined,
       encrypted: result.encrypted,
       auth: profile?.auth ?? {},
@@ -1493,8 +1498,9 @@ function getCloudProviders(): SavedProviderInfo[] {
       name,
       source: "cloud" as const,
       isCurrent: false,
-      invalid: result.status === "missing" || result.status === "invalid" || (result.status === "ok" && !profile),
+      invalid: result.status === "invalid" || (result.status === "ok" && !profile),
       locked: result.status === "locked",
+      pending: result.status === "missing",
       storageMessage:
         result.status === "missing"
           ? `Cloud provider "${name}" is indexed for sync, but its payload has not synced to this device yet. Refresh after VS Code Settings Sync finishes.`
@@ -1977,6 +1983,51 @@ async function writeCloudProviderWithExpectedVersion(
   };
 }
 
+function verifyCloudProviderWrite(
+  profile: ProviderProfile,
+  expected: SavedStorageSyncMetadata,
+): CloudMutationResult {
+  const result = readCloudProvider(profile.name);
+  if (result.status !== "ok") {
+    const message =
+      result.status === "missing"
+        ? `Cloud provider "${profile.name}" could not be verified because its synced payload is missing.`
+        : "message" in result
+          ? `Cloud provider "${profile.name}" could not be verified: ${result.message}.`
+          : `Cloud provider "${profile.name}" could not be verified.`;
+    return { success: false, message };
+  }
+
+  const savedProfile = parseProviderProfile(profile.name, result.value);
+  const expectedProfile = parseProviderProfile(profile.name, profile);
+  if (!savedProfile || !expectedProfile || !isDeepStrictEqual(savedProfile, expectedProfile)) {
+    return {
+      success: false,
+      message: `Cloud provider "${profile.name}" could not be verified because the saved profile changed.`,
+    };
+  }
+
+  const metadata = getSyncMetadata(getStoredCloudProviderRaw(profile.name));
+  if (
+    expected.entryVersion != null
+    && (metadata.entryVersion == null || metadata.entryVersion < expected.entryVersion)
+  ) {
+    return {
+      success: false,
+      message:
+        `Cloud provider "${profile.name}" could not be verified: expected synced version ${expected.entryVersion}, `
+        + `but read version ${metadata.entryVersion}.`,
+    };
+  }
+
+  return {
+    success: true,
+    message: `Cloud provider "${profile.name}" was verified`,
+    syncVersion: metadata.entryVersion,
+    syncUpdatedAt: metadata.updatedAt,
+  };
+}
+
 async function renameCloudAccountEntry(
   account: SavedAccountInfo,
   newName: string,
@@ -2157,9 +2208,24 @@ export async function syncCurrentAuthToSavedSelection(): Promise<SyncCurrentSele
           healedMarker: healedMarker ?? undefined,
         };
       }
-      await updateMarkerSyncMetadata("provider", marker.name, {
+      const verifyResult = verifyCloudProviderWrite({
+        ...provider.profile,
+        auth: currentAuth,
+      }, {
         entryVersion: result.syncVersion ?? null,
         updatedAt: result.syncUpdatedAt ?? null,
+      });
+      if (!verifyResult.success) {
+        return {
+          success: false,
+          message: verifyResult.message,
+          conflict: verifyResult.conflict,
+          healedMarker: healedMarker ?? undefined,
+        };
+      }
+      await updateMarkerSyncMetadata("provider", marker.name, {
+        entryVersion: verifyResult.syncVersion ?? result.syncVersion ?? null,
+        updatedAt: verifyResult.syncUpdatedAt ?? result.syncUpdatedAt ?? null,
       });
     }
   }
@@ -2767,13 +2833,26 @@ export async function saveProviderProfileToSource(
     options?.expectedUpdatedAt,
     "save_provider_profile",
   );
-  if (result.success) {
+  if (!result.success) {
+    return result;
+  }
+  const verifyResult = verifyCloudProviderWrite(profile, {
+    entryVersion: result.syncVersion ?? null,
+    updatedAt: result.syncUpdatedAt ?? null,
+  });
+  if (verifyResult.success) {
     await updateMarkerSyncMetadata("provider", profile.name, {
-      entryVersion: result.syncVersion ?? null,
-      updatedAt: result.syncUpdatedAt ?? null,
+      entryVersion: verifyResult.syncVersion ?? result.syncVersion ?? null,
+      updatedAt: verifyResult.syncUpdatedAt ?? result.syncUpdatedAt ?? null,
     });
   }
-  return result;
+  return verifyResult.success
+    ? {
+        ...result,
+        syncVersion: verifyResult.syncVersion ?? result.syncVersion,
+        syncUpdatedAt: verifyResult.syncUpdatedAt ?? result.syncUpdatedAt,
+      }
+    : verifyResult;
 }
 
 export async function buildProviderProfileForSource(
@@ -2906,6 +2985,14 @@ export async function moveSavedProviderEntry(
     nextCloudMetadata = {
       entryVersion: writeResult.syncVersion ?? null,
       updatedAt: writeResult.syncUpdatedAt ?? null,
+    };
+    const verifyResult = verifyCloudProviderWrite(provider.profile, nextCloudMetadata);
+    if (!verifyResult.success) {
+      return { success: false, message: `${verifyResult.message} Local provider was kept.` };
+    }
+    nextCloudMetadata = {
+      entryVersion: verifyResult.syncVersion ?? nextCloudMetadata.entryVersion,
+      updatedAt: verifyResult.syncUpdatedAt ?? nextCloudMetadata.updatedAt,
     };
   } else {
     const providerPath = getNamedProviderPath(provider.name);
